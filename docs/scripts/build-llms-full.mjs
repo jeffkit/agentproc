@@ -26,6 +26,7 @@ const SECTIONS = [
   ['docs/sdk/node.md', 'Node.js SDK'],
   ['docs/guide/getting-started.md', 'Quick Start'],
   ['docs/guide/what-is-agentproc.md', 'What is AgentProc?'],
+  ['docs/hub/index.md', 'Profile Hub'],
   ['docs/examples/claude.md', 'Example: Connect the claude CLI'],
   ['docs/examples/bare.md', 'Example: Bare script (no SDK)'],
 ];

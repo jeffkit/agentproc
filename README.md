@@ -2,7 +2,7 @@
 
 A minimal protocol for connecting any Agent CLI to a messaging platform through a process-based interface.
 
-**[Documentation](https://agentproc.dev/) · **[中文文档](https://agentproc.dev/zh/) · **[Protocol Spec](./spec/protocol.md)**
+**[Documentation](https://agentproc.dev/) · **[中文文档](https://agentproc.dev/zh/) · **[Protocol Spec](./spec/protocol.md) · **[Profile Hub](./hub/)**
 
 ---
 
@@ -19,6 +19,16 @@ No HTTP, no sockets. Any process that reads env vars and writes to stdout is a v
 Messaging Platform → Bridge → Your Script → Bridge → User
                        ↑ env vars    stdout ↑
 ```
+
+## Profile Hub
+
+Ready-to-use profiles for popular AI CLIs — drop one in and any conformant bridge can drive it. See [`hub/`](./hub/) for the full list:
+
+- **[claude-code](./hub/claude-code/)** (Anthropic) — official, Python + Node
+- **[codex](./hub/codex/)** (OpenAI) — official, Python + Node
+- **[codebuddy](./hub/codebuddy/)** (Tencent) — official, Python + Node
+- **[agy](./hub/agy/)** — community, Python + Node
+- **[echo-agent](./hub/echo-agent/)** — minimal hello-world for testing your bridge
 
 ## Quick example
 

@@ -1,0 +1,23 @@
+name: codebuddy
+description: Connect the codebuddy CLI (Tencent CodeBuddy) as an AgentProc agent with streaming and session continuity
+cli: codebuddy
+cli_install: |
+  # CodeBuddy is currently distributed by Tencent; see internal docs for installation.
+  # Once installed, the binary is typically available as `codebuddy` or `cbc`.
+agentproc:
+  command: python3 ./bridge.py
+  cwd: ~/your-project
+  timeout_secs: 600
+  streaming: true
+  env:
+    # Auth via codebuddy's own login flow (run `codebuddy` once interactively).
+    # Override model if desired:
+    # CODEBUDDY_MODEL: "claude-sonnet-4.6"
+tested: official
+maintainer: jeffkit
+tags: [coding, tencent, ai]
+notes: |
+  CodeBuddy's stream-json output schema is structurally compatible with claude's
+  (same `assistant.message.content[].text` and `result.session_id` shape), so this
+  bridge is a thin variant of the claude-code bridge. The CLI flag for resume is
+  `-r <sessionId>` (or `--resume <sessionId>`).

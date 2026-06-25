@@ -9,9 +9,14 @@ Thanks for your interest in improving AgentProc.
 - `spec/` — the protocol specification. EN at `protocol.md`, ZH at `protocol.zh.md`. These are the source of truth; everything else follows.
 - `sdk/python/`, `sdk/node/` — reference SDKs that implement the spec.
 - `examples/` — minimal agent scripts in bash / Python / Node.
+- `hub/` — drop-in AgentProc profiles for popular AI CLIs (claude-code, codex, codebuddy, agy, echo-agent). Each profile is a directory with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md`.
 - `docs/` — VitePress documentation site, English root and `zh/` mirror.
 - `docs/public/` — static files served at the site root (`llms.txt`, `llms-full.txt`, `robots.txt`).
 - `AGENTS.md` — guidance for AI coding agents working in this repo.
+
+## Adding a profile to the hub
+
+See [`hub/README.md`](./hub/README.md) for the schema and contribution flow. Briefly: each profile is a self-contained directory under `hub/<name>/` with a pure-P0 `profile.yaml`, a `bridge.py` and `bridge.js` at parity, and a `README.md`. Set `tested: unverified` unless you've verified end-to-end.
 
 ## Spec changes
 

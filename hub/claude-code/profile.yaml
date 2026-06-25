@@ -1,0 +1,22 @@
+name: claude-code
+description: Connect the claude CLI (Anthropic Claude Code) as an AgentProc agent with streaming and session continuity
+cli: claude
+cli_install: |
+  npm install -g @anthropic-ai/claude-code
+agentproc:
+  command: python3 ./bridge.py
+  cwd: ~/your-project
+  timeout_secs: 600
+  streaming: true
+  env:
+    ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    # Optional: override the default model
+    # ANTHROPIC_MODEL: "claude-sonnet-4-6"
+tested: official
+maintainer: jeffkit
+tags: [coding, anthropic, ai]
+notes: |
+  The bridge script invokes `claude -p <message> --output-format stream-json` and
+  re-emits the stream as AGENT_PARTIAL: lines. The session ID emitted by claude's
+  final `result` event is forwarded via AGENT_SESSION: and replayed as `--resume`
+  on the next turn.
