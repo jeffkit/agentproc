@@ -24,8 +24,8 @@ agentproc/
 │   ├── python/              # `agentproc` on PyPI
 │   │   ├── src/agentproc/   # the package
 │   │   └── tests/           # pytest
-│   └── node/                # `agentproc` on npm
-│       └── src/             # the package (.js + .d.ts + .test.js)
+│   └── node/                # `agentproc` on npm (SDK + CLI)
+│       └── src/             # index.js (SDK), cli.js (CLI), runner.js (core), tests
 ├── examples/
 │   ├── bash/                # echo agent (smoke test)
 │   ├── python/              # claude_bridge.py
@@ -39,7 +39,7 @@ agentproc/
 │   └── echo-agent/
 ├── docs/                    # VitePress site (agentproc.dev)
 │   ├── public/              # static files served at root (llms.txt, robots.txt)
-│   ├── guide/  sdk/  hub/  examples/  spec/   # English content
+│   ├── guide/  sdk/  cli/  hub/  examples/  spec/   # English content
 │   └── zh/                  # Chinese mirror
 ├── .github/workflows/       # test.yml, publish.yml, docs.yml
 ├── CHANGELOG.md             # version history
@@ -68,6 +68,16 @@ If you add a feature to one SDK, add the equivalent to the other and update both
 | `ctx.protocol_version` | `ctx.protocolVersion` |
 | `load_history` / `append_history` / `session_file_path` | `loadHistory` / `appendHistory` / `sessionFilePath` |
 | `raise ProtocolError(msg)` | `throw await sdk.protocolError(msg)` |
+
+## The Node SDK also ships the CLI
+
+`sdk/node/src/` contains three modules with distinct roles:
+
+- `index.js` — the SDK (call from code: `createProfile(handler)`)
+- `runner.js` — the canonical bridge-side engine (`run(profile, options)`); the **spec in code form**
+- `cli.js` — thin wrapper that turns `runner.js` into a command-line tool
+
+If you change bridge-side behavior in `runner.js` (e.g. how stdout lines are classified, how timeouts fire, how env vars inject), you are changing the canonical implementation of the spec — bump the version, update CHANGELOG, and update `spec/protocol.md` if the behavior is spec-relevant. Tests in `runner.test.js` must keep passing.
 
 ## How to run tests
 

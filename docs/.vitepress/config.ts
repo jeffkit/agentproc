@@ -20,6 +20,7 @@ export default defineConfig({
           { text: '快速开始', link: '/zh/guide/getting-started' },
           { text: '协议规范', link: '/zh/spec/' },
           { text: 'SDK', link: '/zh/sdk/' },
+          { text: 'CLI', link: '/zh/cli/' },
           { text: 'Profile Hub', link: '/zh/hub/' },
           { text: '示例', link: '/zh/examples/' },
         ],
@@ -43,6 +44,12 @@ export default defineConfig({
               { text: 'SDK 概览', link: '/zh/sdk/' },
               { text: 'Python SDK', link: '/zh/sdk/python' },
               { text: 'Node.js SDK', link: '/zh/sdk/node' },
+            ],
+          },
+          {
+            text: 'CLI',
+            items: [
+              { text: 'agentproc CLI', link: '/zh/cli/' },
             ],
           },
           {
@@ -71,6 +78,7 @@ export default defineConfig({
       { text: 'Quick Start', link: '/guide/getting-started' },
       { text: 'Specification', link: '/spec/' },
       { text: 'SDK', link: '/sdk/' },
+      { text: 'CLI', link: '/cli/' },
       { text: 'Profile Hub', link: '/hub/' },
       { text: 'Examples', link: '/examples/' },
     ],
@@ -100,6 +108,14 @@ export default defineConfig({
             { text: 'Overview', link: '/sdk/' },
             { text: 'Python SDK', link: '/sdk/python' },
             { text: 'Node.js SDK', link: '/sdk/node' },
+          ],
+        },
+      ],
+      '/cli/': [
+        {
+          text: 'CLI',
+          items: [
+            { text: 'agentproc CLI', link: '/cli/' },
           ],
         },
       ],

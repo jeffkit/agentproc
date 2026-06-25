@@ -85,10 +85,23 @@ Both SDKs are at parity: `send_partial` / `sendPartial` for streaming, `send_err
 - **Complete docs in one file** (for LLM ingestion): https://agentproc.dev/llms-full.txt
 - **Python SDK reference**: https://agentproc.dev/sdk/python
 - **Node SDK reference**: https://agentproc.dev/sdk/node
+- **agentproc CLI** (canonical bridge runner): https://agentproc.dev/cli/
 - **Profile Hub** (ready-to-use profiles for claude/codex/codebuddy/agy): https://agentproc.dev/hub/
   - Source: https://github.com/jeffkit/agentproc/tree/main/hub
 - **Wrapping the claude CLI**: https://agentproc.dev/examples/claude
 - **Repository**: https://github.com/jeffkit/agentproc
+
+## The agentproc CLI
+
+`npm install -g agentproc` installs both the Node SDK and the CLI. The CLI is the canonical bridge runner: read a profile, spawn the agent, parse stdout per spec, print the reply.
+
+```bash
+agentproc --profile hub/echo-agent/profile.yaml --prompt "hi" --cwd hub/echo-agent
+agentproc --profile hub/claude-code/profile.yaml --prompt "hello" --cwd ~/your-project
+agentproc -p prof.yaml --prompt "follow up" --session <prev-id>
+```
+
+Output semantics: stderr carries protocol lines (`AGENT_PARTIAL:`, `AGENT_SESSION:`, `AGENT_ERROR:`) and the final session id (`agentproc:session:<id>`); stdout carries the clean reply body. Exit code per spec. Use `--raw` to forward the agent's stdout verbatim, `--quiet` to suppress protocol lines, `--verbose` (default) to show them.
 
 ## Profile Hub (drop-in profiles for real CLIs)
 
