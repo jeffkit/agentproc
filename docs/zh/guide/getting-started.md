@@ -66,4 +66,4 @@ bash ./echo_agent.sh
 
 - [阅读完整协议规范](/zh/spec/) 了解所有特性
 - [使用 SDK](/zh/sdk/) 省去样板代码
-- [查看示例](/zh/examples/) 了解如何接入 claude 等真实 AI agent
+- [查看示例](/zh/examples/claude) 了解如何接入 claude 等真实 AI agent

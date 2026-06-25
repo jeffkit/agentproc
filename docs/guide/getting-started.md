@@ -66,4 +66,4 @@ Point your bridge at the profile YAML. The exact steps depend on which bridge yo
 
 - [Read the full protocol spec](/spec/) to understand all the features
 - [Use an SDK](/sdk/) to skip the boilerplate
-- [See examples](/examples/) for connecting real AI agents like claude CLI
+- [See examples](/examples/claude) for connecting real AI agents like claude CLI

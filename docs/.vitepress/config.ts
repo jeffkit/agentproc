@@ -22,37 +22,36 @@ export default defineConfig({
           { text: 'SDK', link: '/zh/sdk/' },
           { text: '示例', link: '/zh/examples/' },
         ],
-        sidebar: {
-          '/zh/': [
-            {
-              text: '简介',
-              items: [
-                { text: '什么是 AgentProc？', link: '/zh/guide/what-is-agentproc' },
-                { text: '快速开始', link: '/zh/guide/getting-started' },
-              ],
-            },
-            {
-              text: '协议规范',
-              items: [
-                { text: 'P0 协议规范', link: '/zh/spec/' },
-              ],
-            },
-            {
-              text: 'SDK',
-              items: [
-                { text: 'Python SDK', link: '/zh/sdk/python' },
-                { text: 'Node.js SDK', link: '/zh/sdk/node' },
-              ],
-            },
-            {
-              text: '示例',
-              items: [
-                { text: '接入 claude CLI', link: '/zh/examples/claude' },
-                { text: '裸脚本（无 SDK）', link: '/zh/examples/bare' },
-              ],
-            },
-          ],
-        },
+        sidebar: [
+          {
+            text: '简介',
+            items: [
+              { text: '什么是 AgentProc？', link: '/zh/guide/what-is-agentproc' },
+              { text: '快速开始', link: '/zh/guide/getting-started' },
+            ],
+          },
+          {
+            text: '协议规范',
+            items: [
+              { text: 'P0 协议规范', link: '/zh/spec/' },
+            ],
+          },
+          {
+            text: 'SDK',
+            items: [
+              { text: 'SDK 概览', link: '/zh/sdk/' },
+              { text: 'Python SDK', link: '/zh/sdk/python' },
+              { text: 'Node.js SDK', link: '/zh/sdk/node' },
+            ],
+          },
+          {
+            text: '示例',
+            items: [
+              { text: '接入 claude CLI', link: '/zh/examples/claude' },
+              { text: '裸脚本（无 SDK）', link: '/zh/examples/bare' },
+            ],
+          },
+        ],
       },
     },
   },
