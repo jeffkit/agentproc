@@ -1,0 +1,104 @@
+# AgentProc
+
+> A minimal protocol for connecting any Agent CLI to a messaging platform via a process-based interface. The bridge spawns your script as a subprocess; input comes in via environment variables, output goes out via stdout. No HTTP, no sockets.
+
+AgentProc defines how a **bridge** (the platform adapter for WeChat / Slack / Telegram / etc.) talks to an **agent process** (a script that wraps an AI CLI like Claude Code, Codex, Gemini CLI, or any LLM). The contract is intentionally minimal so that any script — in any language — can be a valid agent.
+
+## The protocol in one minute
+
+**Input (environment variables injected by the bridge):**
+
+| Variable | Purpose |
+|----------|---------|
+| `AGENT_MESSAGE` | User message text |
+| `AGENT_SESSION_ID` | Session ID from the previous turn (empty = new session) |
+| `AGENT_SESSION_NAME` | Human-readable session name |
+| `AGENT_FROM_USER` | Sender identifier |
+| `AGENT_STREAMING` | `"1"` = streaming mode, `"0"` = one-shot |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string (currently `"0.1"`) |
+| `AGENT_IMAGE_URL` / `AGENT_FILE_URL` | Single-attachment URLs (P0) |
+| `AGENT_ATTACHMENTS` | JSON array of `{type,url,name}` (draft, multi-attachment) |
+
+**Output (stdout, sentinel-prefixed lines):**
+
+```
+AGENT_SESSION:<opaque-id>     # declare session id; may appear anywhere, last wins
+AGENT_PARTIAL:<json-string>   # streaming chunk
+AGENT_ERROR:<json-string>     # error message to forward to user
+<everything else>             # final reply body
+```
+
+**Exit codes:** `0` success · `1` error · `124` timeout · `130` SIGINT · `143` SIGTERM.
+
+## Hello world
+
+```bash
+#!/usr/bin/env bash
+echo "You said: $AGENT_MESSAGE"
+```
+
+Profile YAML:
+
+```yaml
+command: bash ./echo_agent.sh
+timeout_secs: 10
+```
+
+That's a complete agent.
+
+## Install an SDK (optional, removes boilerplate)
+
+```bash
+pip install agentproc         # Python
+npm install agentproc         # Node.js
+```
+
+Python:
+
+```python
+from agentproc import create_profile
+
+async def handler(ctx):
+    reply = await my_llm(ctx.message)
+    return reply
+
+create_profile(handler)
+```
+
+Node.js:
+
+```js
+const { createProfile } = require('agentproc');
+
+createProfile(async ({ message }) => {
+  const reply = await myLLM(message);
+  return { response: reply };
+});
+```
+
+Both SDKs are at parity: `send_partial` / `sendPartial` for streaming, `send_error` / `sendError` for surfacing errors, `ProtocolError` exception, `attachments` parsing, JSONL history helpers.
+
+## Where to go next
+
+- **Full protocol spec** (canonical, read this before building a bridge): https://agentproc.dev/spec/
+  - Source: https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md
+- **Complete docs in one file** (for LLM ingestion): https://agentproc.dev/llms-full.txt
+- **Python SDK reference**: https://agentproc.dev/sdk/python
+- **Node SDK reference**: https://agentproc.dev/sdk/node
+- **Wrapping the claude CLI**: https://agentproc.dev/examples/claude
+- **Repository**: https://github.com/jeffkit/agentproc
+
+## How AgentProc differs from neighboring protocols
+
+- **Not MCP.** MCP connects an LLM app to *tools* (LLM is client, tools are subprocesses). AgentProc connects a bridge to an *agent* (reverse direction). They compose: your AgentProc agent may internally use MCP tools.
+- **Not ACP.** ACP is an interactive, bidirectional JSON-RPC protocol for IDEs. AgentProc is one process per turn, plain text on stdout.
+- **Not NDJSON.** NDJSON requires every line to be valid JSON. AgentProc uses sentinel-prefixed lines so `echo "You said: $AGENT_MESSAGE"` is a valid agent.
+- **Not a bot framework.** Hubot/Errbot/BotKit live on the bridge's upstream side (process adapters, HTTP connectors). AgentProc defines the contract between the bridge and the agent.
+
+## Status
+
+Version 0.1.1 (draft). Stable enough to implement against, but expect refinements. See https://agentproc.dev/ for the human-readable site.
+
+## License
+
+MIT.
