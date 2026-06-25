@@ -45,3 +45,5 @@ jobs:
       - name: Run Python SDK tests
         run: pytest -q tests/
         working-directory: sdk/python
+        env:
+          PYTHONPATH: src

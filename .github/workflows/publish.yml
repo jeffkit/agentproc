@@ -31,6 +31,8 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/
         working-directory: sdk/python
+        env:
+          PYTHONPATH: src
 
   publish-npm:
     needs: [test-node, test-python]
