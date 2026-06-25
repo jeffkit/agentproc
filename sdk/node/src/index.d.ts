@@ -1,7 +1,7 @@
-// Type declarations for @agentproc/sdk
+// Type declarations for agentproc
 // Protocol version: 0.1 (see spec/protocol.md)
 
-declare module '@agentproc/sdk' {
+declare module 'agentproc' {
 
   export const PROTOCOL_VERSION: string;
 

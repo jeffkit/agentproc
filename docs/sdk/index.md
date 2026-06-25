@@ -7,7 +7,7 @@ AgentProc SDKs remove the boilerplate of reading env vars and writing the stdout
 | Language | Package | Install |
 |----------|---------|---------|
 | Python | `agentproc` | `pip install agentproc` |
-| Node.js | `@agentproc/sdk` | `npm install @agentproc/sdk` |
+| Node.js | `agentproc` | `npm install agentproc` |
 
 ## Without an SDK
 
@@ -30,7 +30,7 @@ create_profile(handler)
 ```
 
 ```js [Node.js]
-const { createProfile } = require('@agentproc/sdk');
+const { createProfile } = require('agentproc');
 
 createProfile(async ({ message }) => {
   const reply = await myLLM(message);

@@ -16,7 +16,7 @@
  *   Exit   — 0 success, 1 error, 124 timeout, 130 SIGINT, 143 SIGTERM
  *
  * @example
- * const { createProfile } = require('@agentproc/sdk');
+ * const { createProfile } = require('agentproc');
  *
  * createProfile(async ({ message, sessionId }) => {
  *   const reply = await myAI(message);

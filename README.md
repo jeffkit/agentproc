@@ -64,7 +64,7 @@ agentproc/
 ├── spec/              # Protocol specification (EN + ZH)
 ├── sdk/
 │   ├── python/        # pip install agentproc
-│   └── node/          # npm install @agentproc/sdk
+│   └── node/          # npm install agentproc
 ├── examples/          # Ready-to-use agent scripts
 │   ├── python/
 │   ├── node/
@@ -77,7 +77,7 @@ agentproc/
 | Language | Package | Install |
 |----------|---------|---------|
 | Python | `agentproc` | `pip install agentproc` |
-| Node.js | `@agentproc/sdk` | `npm install @agentproc/sdk` |
+| Node.js | `agentproc` | `npm install agentproc` |
 
 ```python
 from agentproc import create_profile

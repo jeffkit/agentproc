@@ -3,7 +3,7 @@
 ## 安装
 
 ```bash
-npm install @agentproc/sdk
+npm install agentproc
 ```
 
 SDK 版本与协议版本对齐（当前 **0.1.0**），要求 Node.js 18+。
@@ -11,7 +11,7 @@ SDK 版本与协议版本对齐（当前 **0.1.0**），要求 Node.js 18+。
 ## 基础用法
 
 ```js
-const { createProfile } = require('@agentproc/sdk');
+const { createProfile } = require('agentproc');
 
 createProfile(async (ctx) => {
   // ctx.message          — 用户消息文本
@@ -87,7 +87,7 @@ createProfile(async (ctx) => {
 异常形式更符合控制流风格。SDK 会捕获标记为 `isProtocolError` 的异常，输出 `AGENT_ERROR:` 行并以退出码 1 退出。
 
 ```js
-const { createProfile, protocolError } = require('@agentproc/sdk');
+const { createProfile, protocolError } = require('agentproc');
 
 createProfile(async (ctx) => {
   if (!ctx.message.trim()) {
@@ -129,7 +129,7 @@ createProfile(async (ctx) => {
 `ctx.protocolVersion` 反映 bridge 实现的协议版本（来自 `AGENT_PROTOCOL_VERSION`）。当 bridge 未注入时，SDK 回退到自身的 `PROTOCOL_VERSION`（当前 `"0.1"`）。
 
 ```js
-const { createProfile, PROTOCOL_VERSION } = require('@agentproc/sdk');
+const { createProfile, PROTOCOL_VERSION } = require('agentproc');
 
 createProfile(async (ctx) => {
   if (ctx.protocolVersion !== PROTOCOL_VERSION) {
@@ -142,7 +142,7 @@ createProfile(async (ctx) => {
 ## 会话历史
 
 ```js
-const { createProfile, loadHistory, appendHistory } = require('@agentproc/sdk');
+const { createProfile, loadHistory, appendHistory } = require('agentproc');
 
 createProfile(async ({ message, sessionId }) => {
   const history = loadHistory(sessionId);

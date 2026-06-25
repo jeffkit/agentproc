@@ -126,7 +126,7 @@ create_profile(handler)
 ```
 
 ```js [node]
-const { createProfile, protocolError } = require('@agentproc/sdk');
+const { createProfile, protocolError } = require('agentproc');
 
 createProfile(async (ctx) => {
   if (!ctx.message.trim()) {

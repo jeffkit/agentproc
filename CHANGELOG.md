@@ -40,7 +40,7 @@ Initial definition of the AgentProc process-based interface between a messaging 
 
 ### SDKs
 
-Python (`agentproc`) and Node.js (`@agentproc/sdk`) SDKs released at parity.
+Python (`agentproc`) and Node.js (`agentproc`) SDKs released at parity.
 
 - `create_profile(handler)` / `createProfile(handler)` — async handler with `AgentContext`
 - `ctx.send_partial(text)` / `ctx.sendPartial(text)` — streaming
