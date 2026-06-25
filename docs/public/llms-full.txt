@@ -1,0 +1,1148 @@
+# AgentProc — Full Documentation (for LLMs)
+
+> Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: https://agentproc.dev
+
+> Protocol version: 0.1 · Package version: 0.1.1 · Generated from commit in repo.
+
+
+## Table of contents
+
+- Protocol Specification
+- Python SDK
+- Node.js SDK
+- Quick Start
+- What is AgentProc?
+- Example: Connect the claude CLI
+- Example: Bare script (no SDK)
+
+
+
+---
+
+# Protocol Specification
+
+> Source: https://agentproc.dev/spec/  ·  Repository path: `spec/protocol.md`
+
+# AgentProc Protocol Specification
+
+**Version:** 0.1.1
+**Status:** Draft
+
+---
+
+## Overview
+
+AgentProc is a minimal protocol for connecting any agent CLI to a messaging platform via a process-based interface. It defines how a **bridge** (the platform adapter) communicates with an **agent process** (a script or executable that wraps an AI agent).
+
+```
+Messaging Platform
+      │
+      ▼
+   Bridge                ← reads profile YAML, manages process lifecycle
+      │   env vars (and optional stdin)
+      ▼
+ Agent Process           ← your script or binary (implements the contract below)
+      │   stdout
+      ▼
+   Bridge                ← forwards reply to the platform
+```
+
+The protocol has exactly two sides:
+
+- **Input** — environment variables injected by the bridge before the process starts (optionally accompanied by a single stdin write)
+- **Output** — stdout lines written by the agent process, distinguished by line prefix
+
+No HTTP, no sockets, no shared memory. Just a process.
+
+---
+
+## Profile YAML
+
+A profile is a YAML file that tells the bridge how to launch an agent process.
+
+```yaml
+# Required: the executable to run
+command: ./my_agent.py        # path to script or binary
+args: []                      # optional arguments (placeholders supported)
+stdin: none                   # none | message
+
+# Execution environment
+cwd: /path/to/workspace       # working directory (~ and placeholders supported)
+env:                          # extra environment variables
+  MY_API_KEY: "${MY_API_KEY}" # reference existing env vars with ${VAR}
+
+# Output control
+timeout_secs: 600             # stdout read timeout, default 1800
+kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
+max_reply_chars: 8000         # truncate reply at this length, default 8000
+truncation_suffix: "\n\n…(truncated)"
+include_stderr_in_reply: false
+send_error_reply: true        # tell the user when the agent errors
+
+# Streaming
+streaming: true               # forward AGENT_PARTIAL: lines in real time
+
+# Session continuity
+session_line_prefix: "AGENT_SESSION:"  # prefix that marks a session line
+```
+
+### Placeholders
+
+Placeholders in `args`, `cwd`, and `env` values are replaced before the process starts. They are **not** passed through a shell.
+
+| Placeholder | Value |
+|-------------|-------|
+| `{{MESSAGE}}` | User message text |
+| `{{SESSION_ID}}` | Session ID from the previous turn (empty = new session) |
+| `{{SESSION_NAME}}` | Human-readable session name |
+
+### Command execution model
+
+The `command` field MUST be split into an argv array on whitespace and passed to the platform's `execve` (or equivalent) **without** invoking a shell. This avoids shell-injection attacks via the `{{MESSAGE}}` placeholder.
+
+If a bridge implementation chooses to use a shell (e.g., for environment-variable expansion), it MUST apply POSIX shell quoting to every placeholder substitution. Bridges SHOULD prefer the no-shell form.
+
+### `stdin` field
+
+| Value | Behavior |
+|-------|----------|
+| `none` (default) | Message is only available via the `AGENT_MESSAGE` env var |
+| `message` | Message text is also written to stdin, **then stdin is closed (EOF)** |
+
+When `stdin: message` is set, the bridge writes the message followed by EOF. The agent can read it with any line-oriented or stream-oriented API (`input()`, `readline`, `fs.readFileSync(0)`, etc.) and trust that it will terminate.
+
+---
+
+## Input — Environment Variables
+
+The bridge injects the following variables before spawning the process. The agent process reads them directly.
+
+### Core variables
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_MESSAGE` | User message text |
+| `AGENT_SESSION_ID` | Session ID from the previous turn (empty string = new session) |
+| `AGENT_SESSION_NAME` | Human-readable session name (default: `"default"`) |
+| `AGENT_FROM_USER` | Sender identifier (platform-specific: user ID, handle, etc.) |
+| `AGENT_STREAMING` | `"1"` = streaming mode, `"0"` = one-shot mode |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. Agents MAY inspect this to gate behavior. |
+
+### Attachment variables (P0 — single attachment)
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_IMAGE_URL` | Image attachment URL (only set when the message contains exactly one image) |
+| `AGENT_FILE_URL` | File attachment URL (only set when the message contains exactly one file) |
+
+### Attachment variables (draft — multi-attachment)
+
+| Variable | Description |
+|------|-------------|
+| `AGENT_ATTACHMENTS` | JSON array of `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`. **Draft**: bridges MAY set this in addition to the single-attachment vars; agents SHOULD prefer `AGENT_ATTACHMENTS` when present and fall back to the single-attachment vars when not. |
+
+Custom variables declared in the profile's `env` block are also injected.
+
+---
+
+## Output — stdout Protocol
+
+The agent process writes to stdout. The bridge reads it line by line in real time.
+
+### Protocol line recognition
+
+A line is treated as a **protocol line** if and only if it matches one of the prefixes below, evaluated in this order:
+
+1. `AGENT_SESSION:` — declares or updates the session ID
+2. `AGENT_PARTIAL:` — emits a streaming chunk
+3. `AGENT_ERROR:` — emits an error message to forward to the user
+
+All other lines are **reply body** and forwarded verbatim.
+
+This means an agent's reply body MUST NOT contain lines that start with `AGENT_SESSION:`, `AGENT_PARTIAL:`, or `AGENT_ERROR:`. If an agent needs to output such text (e.g., when the user is discussing the protocol itself), it MUST prefix the line with a single space or otherwise ensure it does not match.
+
+> **Implementation note for bridges:** match prefixes against the *stripped* line if you want to be tolerant of leading whitespace from heredocs; otherwise match against the raw line. Bridges SHOULD be consistent.
+
+### `AGENT_SESSION:` — session line
+
+If the agent process maintains its own session state (e.g., an AI CLI with `--resume`), it declares the session ID by emitting:
+
+```
+AGENT_SESSION:<opaque-string>
+```
+
+**Session line rule (resolves ordering ambiguity):**
+
+- The session line MAY appear at **any position** in stdout — first line, interleaved with partials, or last line.
+- If multiple `AGENT_SESSION:` lines are emitted, the **last one wins**. The bridge stores the final value and passes it back as `AGENT_SESSION_ID` on the next turn.
+- This rule accommodates the common case where the session ID is only known after the underlying CLI exits (e.g., `claude --output-format stream-json` emits the session ID in its terminal `result` event).
+
+The session-ID string is **opaque** — the bridge stores and forwards it verbatim and MUST NOT interpret its format. It MAY be a UUID, a CLI-internal handle, or any string without whitespace or colons.
+
+This line is consumed by the bridge and does **not** appear in the reply sent to the user.
+
+### `AGENT_PARTIAL:` — streaming chunk
+
+For streaming output, the agent process emits partial chunks at any time:
+
+```
+AGENT_PARTIAL:<json-encoded-string>
+```
+
+The value MUST be a JSON-encoded string (e.g., `"hello"`, `"line one\nline two"`, `"emoji: 😀"`).
+
+**JSON parsing policy (resolves ambiguity):**
+
+- The bridge attempts to JSON-decode the text after the prefix.
+- On success, the decoded string is forwarded to the user immediately.
+- On failure, the bridge SHOULD treat the raw text after the prefix as the chunk (lenient mode) and emit a warning to stderr. Bridges MAY choose strict mode (discard the line and log), but the default SHOULD be lenient to accommodate hand-written agents.
+
+When `streaming: false` is set in the profile, the bridge ignores all `AGENT_PARTIAL:` lines.
+
+### `AGENT_ERROR:` — error message
+
+When the agent encounters an error that should be communicated to the user, it emits:
+
+```
+AGENT_ERROR:<json-encoded-string>
+```
+
+This line is honored **regardless** of `streaming` mode. The bridge forwards the decoded string to the user as an error reply and SHOULD terminate any in-progress partial stream.
+
+If an `AGENT_ERROR:` line is emitted, the bridge SHOULD treat the process as failed even if the exit code is 0. The agent SHOULD exit with a non-zero code after emitting `AGENT_ERROR:`.
+
+Any reply body produced alongside an `AGENT_ERROR:` line is discarded.
+
+### Reply body
+
+All stdout lines that are **not** protocol lines form the final reply body, sent to the user after the process exits.
+
+If all content was already delivered via `AGENT_PARTIAL:` lines, the reply body may be empty — the bridge will skip the final send in that case.
+
+### Complete examples
+
+**Streaming with session discovered at the end (the common CLI-wrapping case):**
+
+```
+AGENT_PARTIAL:"Here is the first part of the answer. "
+AGENT_PARTIAL:"And here is the second part."
+AGENT_SESSION:cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c
+```
+
+**One-shot with session declared up front:**
+
+```
+AGENT_SESSION:f47ac10b-58cc-4372-a567-0e02b2c3d479
+Here is the complete answer.
+```
+
+**Error mid-stream:**
+
+```
+AGENT_PARTIAL:"Let me look that up... "
+AGENT_ERROR:"Upstream API rate limited. Try again in 60s."
+```
+
+---
+
+## stdin / EOF Contract
+
+- When `stdin: none` (default), the bridge does not write to stdin. The agent's stdin reads will return EOF immediately.
+- When `stdin: message`, the bridge writes `AGENT_MESSAGE` to stdin followed by EOF. The agent can read it via `input()`, `readline()`, `fs.readFileSync(0, 'utf8')`, etc., and the read will terminate.
+
+The agent MUST NOT block on stdin when `stdin: none` is in effect.
+
+---
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success — stdout content (minus protocol lines) is sent as the reply |
+| `1` | Generic agent error |
+| `124` | Timeout (bridge-imposed; matches GNU `timeout` convention) |
+| `130` | Interrupted by SIGINT (Ctrl-C) |
+| `143` | Terminated by SIGTERM |
+
+Other non-zero codes are treated as generic errors. When `send_error_reply: true` is set and the process exits non-zero (without having emitted `AGENT_ERROR:`), the bridge sends a generic error message to the user.
+
+stderr is captured as a debug log and not shown to the user, unless `include_stderr_in_reply: true`.
+
+---
+
+## Timeout Handling
+
+When `timeout_secs` is reached without the process exiting:
+
+1. Bridge sends `SIGTERM` to the process.
+2. Bridge waits `kill_grace_secs` (default 5) for the process to exit.
+3. If still running, bridge sends `SIGKILL`.
+
+Any `AGENT_PARTIAL:` lines already received are forwarded to the user. The bridge then sends a timeout error reply (subject to `send_error_reply`).
+
+The agent SHOULD handle `SIGTERM` by flushing any buffered partial output and exiting promptly.
+
+---
+
+## Design Principles
+
+**1. Process boundary is the only contract.**
+The bridge does not care what language the agent is written in, what AI model it calls, or how it manages state. Any process that reads env vars and writes to stdout is a valid agent.
+
+**2. No bridge logic in the agent.**
+The agent process should not need to know anything about the messaging platform. It reads a message, does something, writes a reply. Platform-specific concerns (delivery, rate limiting, session storage) are the bridge's responsibility.
+
+**3. Session IDs are opaque.**
+The bridge stores and forwards session IDs but never interprets them. The agent process owns the meaning of its session IDs.
+
+**4. The unit of work is one turn.**
+Each user message spawns one process. The agent is not expected to be a long-running daemon. (Long-running daemons are out of scope; see "Comparison with related protocols" below.)
+
+**5. `type:` shortcuts are not part of this protocol.**
+Built-in shortcuts (e.g. `type: claude-code`) are platform extensions, not P0. Implementations may offer them, but they are out of scope for this specification.
+
+---
+
+## Design Rationale
+
+**Why environment variables for input, rather than stdin or JSON args?**
+
+Three reasons:
+
+1. **Debuggability.** You can drive an agent by hand from a shell: `AGENT_MESSAGE="hello" ./agent.sh`. No fixtures, no test harness.
+2. **Language neutrality.** Every programming language reads env vars identically. Argument parsing differs across languages and shells.
+3. **No quoting ambiguity.** A long, multiline message in a CLI arg requires shell escaping. An env var carries its full value verbatim.
+
+The cost is that env vars have platform-specific size limits (typically 128 KB – 8 MB). Messages larger than that should use `stdin: message`.
+
+**Why sentinel-prefixed lines, rather than NDJSON?**
+
+NDJSON (one JSON object per line) is the format used internally by Claude Code's `stream-json`, MCP, ACP, etc. It's a good format — but it forces every emitted line to be valid JSON. AgentProc wants this to be a valid agent:
+
+```bash
+#!/usr/bin/env bash
+echo "You said: $AGENT_MESSAGE"
+```
+
+Sentinel-prefixed lines let the common case (final reply body) be plain text, while structured events (`AGENT_SESSION:`, `AGENT_PARTIAL:`, `AGENT_ERROR:`) opt in to a prefix. The cost is one rule: the reply body must not start with `AGENT_` followed by a known prefix.
+
+**Why "last session line wins"?**
+
+Because the underlying CLI often doesn't know its own session ID until it exits. `claude --output-format stream-json` emits the session ID in the terminal `result` event, which is the last event of the run. A "must be first line" rule would force bridge authors into awkward buffering. "Last wins" lets the agent emit the session line whenever it learns it.
+
+**Why `AGENT_ERROR:` in addition to non-zero exit codes?**
+
+Exit codes tell the bridge *that* something went wrong, but not *what* to tell the user. `AGENT_ERROR:` lets the agent forward a meaningful, user-readable error message (e.g., "API key expired", "rate limited; retry in 60s") instead of the bridge's generic template.
+
+---
+
+## Comparison with Related Protocols
+
+AgentProc occupies a specific niche. The neighboring protocols are similar in *shape* (subprocess + stdio) but different in *purpose*.
+
+### MCP — Model Context Protocol (Anthropic)
+
+MCP connects an LLM application (the client) to **tools and data sources** (the server, a subprocess). Transport: JSON-RPC 2.0 over stdio or HTTP+SSE.
+
+**Relationship to AgentProc:** **Reverse direction.** In MCP, the AI is the client and the tool provider is the subprocess. In AgentProc, the bridge is the client and the AI wrapper is the subprocess. They compose naturally: an AgentProc agent may internally use MCP tools.
+
+- Spec: https://modelcontextprotocol.io/
+
+### ACP — Agent Client Protocol (Zed Industries)
+
+ACP connects a code editor to an AI coding agent. Transport: JSON-RPC 2.0 over stdio, bidirectional, long-lived.
+
+**Relationship to AgentProc:** **Richer cousin.** ACP assumes an interactive IDE session with tool calls, file diffs, and mode switching. AgentProc assumes a single chat turn per process invocation. Use ACP if you're building an IDE; use AgentProc if you're bridging a chat bot to a CLI.
+
+- Spec: https://agentclientprotocol.com/
+
+### NDJSON / JSON Lines
+
+NDJSON is one JSON object per line, newline-delimited. It's the wire format used internally by Claude Code, Codex, Gemini CLI streaming modes, and by MCP.
+
+**Relationship to AgentProc:** **Alternative wire format.** NDJSON requires every emitted line to be valid JSON. AgentProc uses sentinel-prefixed plain text to keep hand-written agents (`echo "You said: $AGENT_MESSAGE"`) valid. The cost is one disambiguation rule (reply body must not start with `AGENT_*:`).
+
+- Spec: https://jsonlines.org/
+
+### SSE — Server-Sent Events (WHATWG)
+
+SSE streams `event:` / `data:` lines over HTTP.
+
+**Relationship to AgentProc:** **Semantic ancestor of `AGENT_PARTIAL:`.** The pattern of "newline-terminated events with a prefix" is borrowed from SSE, minus the HTTP transport and with a fixed field set.
+
+- Spec: https://html.spec.whatwg.org/multipage/server-sent-events.html
+
+### LSP / DAP — Language Server / Debug Adapter Protocols (Microsoft)
+
+LSP and DAP connect an editor to a language server or debugger. Transport: JSON-RPC 2.0 over stdio with `Content-Length: N` framing.
+
+**Relationship to AgentProc:** **Framing contrast.** LSP uses byte-length-prefixed framing (allows binary payloads, requires a parser). AgentProc uses newline-delimited framing (text only, trivial to parse by hand). The trade-off is deliberate.
+
+- Specs: https://microsoft.github.io/language-server-protocol/ / https://microsoft.github.io/debug-adapter-protocol/
+
+### Unix filter convention
+
+The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on success" — formalized in Eric Raymond's *The Art of Unix Programming*.
+
+**Relationship to AgentProc:** **Philosophical foundation.** AgentProc extends the Unix filter convention with two things filters don't have: session-continuity handoff (`AGENT_SESSION:`) and streaming events (`AGENT_PARTIAL:`). Everything else is ordinary Unix.
+
+- Reference: http://www.catb.org/~esr/writings/taoup/html/ch01s06.html
+
+### What AgentProc is *not*
+
+- **Not a bot framework.** Hubot, Errbot, BotKit, and Microsoft Bot Framework operate on the *consumer* side of the bridge (in-process adapters, HTTP connectors). AgentProc defines the contract *between* the bridge and the agent, and is orthogonal to those frameworks.
+- **Not an agent-to-agent protocol.** A2A / AGNTCY solve a different problem (agents talking to each other).
+- **Not an IDE protocol.** Use ACP for that.
+- **Not a tool protocol.** Use MCP for that.
+
+---
+
+## Changelog
+
+- **0.1.0** — Initial public draft. Defined env-var input, sentinel-prefixed stdout, `AGENT_SESSION:` / `AGENT_PARTIAL:` / `AGENT_ERROR:`, session-line "last wins" rule, `AGENT_PROTOCOL_VERSION`, `AGENT_ATTACHMENTS` (draft), timeout/SIGTERM contract, exit-code conventions, stdin EOF contract, command-execution no-shell rule.
+
+
+---
+
+# Python SDK
+
+> Source: https://agentproc.dev/sdk/python  ·  Repository path: `docs/sdk/python.md`
+
+# Python SDK
+
+## Install
+
+```bash
+pip install agentproc
+```
+
+## Basic usage
+
+```python
+from agentproc import create_profile
+
+async def handler(ctx):
+    # ctx.message           — user message text
+    # ctx.session_id        — previous session id (empty = new session)
+    # ctx.session_name      — human-readable session name
+    # ctx.from_user         — sender identifier
+    # ctx.streaming         — True if bridge expects streaming output
+    # ctx.protocol_version  — protocol version string (e.g. "0.1")
+    # ctx.image_url         — image attachment URL (empty if none)
+    # ctx.file_url          — file attachment URL (empty if none)
+    # ctx.attachments       — parsed AGENT_ATTACHMENTS (draft, [] if unset)
+    reply = await my_llm(ctx.message)
+    return reply
+
+create_profile(handler)
+```
+
+Save as `agent.py`, then in your profile YAML:
+
+```yaml
+command: python3 ./agent.py
+timeout_secs: 60
+```
+
+## Returning a session ID
+
+Return an `AgentResult` to persist a session id for multi-turn continuity:
+
+```python
+from agentproc import create_profile, AgentResult
+
+async def handler(ctx):
+    reply, new_session_id = await my_cli(ctx.message, ctx.session_id)
+    return AgentResult(response=reply, session_id=new_session_id)
+
+create_profile(handler)
+```
+
+## Streaming
+
+Use `ctx.send_partial()` to send chunks immediately without waiting for the full response:
+
+```python
+from agentproc import create_profile, AgentResult
+
+async def handler(ctx):
+    session_id = ctx.session_id
+    async for chunk, session_id in stream_llm(ctx.message, ctx.session_id):
+        await ctx.send_partial(chunk)
+    return AgentResult(response="", session_id=session_id)
+
+create_profile(handler)
+```
+
+## Error handling
+
+Surface a user-readable error via `AGENT_ERROR:`. Two equivalent forms:
+
+```python
+from agentproc import create_profile, AgentResult, ProtocolError
+
+async def handler(ctx):
+    # Form 1: call send_error, then return / raise
+    if rate_limited():
+        await ctx.send_error("rate limited; retry in 60s")
+        return                       # bridge discards any reply body
+
+    # Form 2: raise ProtocolError — SDK emits AGENT_ERROR: and exits 1
+    if bad_input(ctx.message):
+        raise ProtocolError("bad input")
+
+    return AgentResult(response=await my_llm(ctx.message))
+
+create_profile(handler)
+```
+
+`ProtocolError` is the exception form; the SDK serializes its message as an `AGENT_ERROR:` line and exits non-zero. Any other uncaught exception is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
+
+## Multi-attachment input (draft)
+
+When the bridge sets `AGENT_ATTACHMENTS`, the SDK parses it into `ctx.attachments`:
+
+```python
+from agentproc import create_profile, Attachment
+
+async def handler(ctx):
+    # Prefer the multi-attachment list when present, fall back to single vars
+    images = [a for a in ctx.attachments if a.type == "image"] or (
+        [Attachment(type="image", url=ctx.image_url)] if ctx.image_url else []
+    )
+    reply = await my_vision_llm(ctx.message, [a.url for a in images])
+    return reply
+
+create_profile(handler)
+```
+
+`ctx.attachments` is empty when `AGENT_ATTACHMENTS` is unset or unparseable. The single-attachment vars (`ctx.image_url`, `ctx.file_url`) remain the P0 path.
+
+## Conversation history
+
+For agents that call LLM APIs directly and need to carry context across turns:
+
+```python
+from agentproc import create_profile, AgentResult, load_history, append_history, HistoryEntry
+
+async def handler(ctx):
+    history = load_history(ctx.session_id)
+    messages = [{"role": e.role, "content": e.content} for e in history]
+    messages.append({"role": "user", "content": ctx.message})
+
+    reply = await call_openai(messages)
+
+    append_history(ctx.session_id, [
+        HistoryEntry(role="user", content=ctx.message),
+        HistoryEntry(role="assistant", content=reply),
+    ])
+    return AgentResult(response=reply, session_id=ctx.session_id)
+
+create_profile(handler)
+```
+
+History is stored as JSONL files under `~/.agentproc/sessions/<session_id>.jsonl`.
+
+## Local testing
+
+Test your agent without a running bridge:
+
+```bash
+AGENT_MESSAGE="hello" \
+AGENT_SESSION_ID="" \
+AGENT_SESSION_NAME="default" \
+AGENT_FROM_USER="test" \
+AGENT_STREAMING="1" \
+AGENT_PROTOCOL_VERSION="0.1" \
+python3 ./agent.py
+```
+
+
+---
+
+# Node.js SDK
+
+> Source: https://agentproc.dev/sdk/node  ·  Repository path: `docs/sdk/node.md`
+
+# Node.js SDK
+
+## Install
+
+```bash
+npm install agentproc
+```
+
+## Basic usage
+
+```js
+const { createProfile } = require('agentproc');
+
+createProfile(async (ctx) => {
+  // ctx.message           — user message text
+  // ctx.sessionId         — previous session id (empty = new session)
+  // ctx.sessionName       — human-readable session name
+  // ctx.fromUser          — sender identifier
+  // ctx.streaming         — true if bridge expects streaming output
+  // ctx.protocolVersion   — protocol version string (e.g. "0.1")
+  // ctx.imageUrl          — image attachment URL (empty if none)
+  // ctx.fileUrl           — file attachment URL (empty if none)
+  // ctx.attachments       — parsed AGENT_ATTACHMENTS (draft, [] if unset)
+  const reply = await myLLM(ctx.message);
+  return { response: reply };
+});
+```
+
+Save as `agent.js`, then in your profile YAML:
+
+```yaml
+command: node ./agent.js
+timeout_secs: 60
+```
+
+## Returning a session ID
+
+```js
+createProfile(async ({ message, sessionId }) => {
+  const { reply, newSessionId } = await myCLI(message, sessionId);
+  return { response: reply, sessionId: newSessionId };
+});
+```
+
+## Streaming
+
+```js
+createProfile(async (ctx) => {
+  let newSessionId = ctx.sessionId;
+  for await (const { chunk, sid } of streamLLM(ctx.message, ctx.sessionId)) {
+    ctx.sendPartial(chunk);
+    newSessionId = sid;
+  }
+  return { response: '', sessionId: newSessionId };
+});
+```
+
+## Error handling
+
+Surface a user-readable error via `AGENT_ERROR:`. Two equivalent forms:
+
+```js
+const { createProfile, protocolError } = require('agentproc');
+
+createProfile(async (ctx) => {
+  // Form 1: call sendError, then return / throw
+  if (rateLimited()) {
+    ctx.sendError('rate limited; retry in 60s');
+    return;                          // bridge discards any reply body
+  }
+
+  // Form 2: throw a protocol error — SDK emits AGENT_ERROR: and exits 1
+  if (badInput(ctx.message)) {
+    throw await protocolError('bad input');
+  }
+
+  return { response: await myLLM(ctx.message) };
+});
+```
+
+`protocolError(msg)` returns a rejected promise whose error is tagged `isProtocolError`; the SDK serializes its message as an `AGENT_ERROR:` line and exits 1. Any other uncaught error is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
+
+## Multi-attachment input (draft)
+
+When the bridge sets `AGENT_ATTACHMENTS`, the SDK parses it into `ctx.attachments`:
+
+```js
+const { createProfile } = require('agentproc');
+
+createProfile(async (ctx) => {
+  // Prefer the multi-attachment list when present, fall back to single vars
+  const images = (ctx.attachments.filter(a => a.type === 'image').length
+    ? ctx.attachments.filter(a => a.type === 'image')
+    : (ctx.imageUrl ? [{ type: 'image', url: ctx.imageUrl }] : []));
+  const reply = await myVisionLLM(ctx.message, images.map(a => a.url));
+  return { response: reply };
+});
+```
+
+`ctx.attachments` is empty when `AGENT_ATTACHMENTS` is unset or unparseable. The single-attachment vars (`ctx.imageUrl`, `ctx.fileUrl`) remain the P0 path.
+
+## Conversation history
+
+```js
+const { createProfile, loadHistory, appendHistory } = require('agentproc');
+
+createProfile(async ({ message, sessionId }) => {
+  const history = loadHistory(sessionId);
+  const messages = [...history.map(e => ({ role: e.role, content: e.content })),
+                    { role: 'user', content: message }];
+
+  const reply = await callOpenAI(messages);
+
+  appendHistory(sessionId, [
+    { role: 'user', content: message },
+    { role: 'assistant', content: reply },
+  ]);
+  return { response: reply, sessionId };
+});
+```
+
+History is stored as JSONL files under `~/.agentproc/sessions/<session_id>.jsonl`.
+
+## Local testing
+
+Test your agent without a running bridge:
+
+```bash
+AGENT_MESSAGE="hello" \
+AGENT_SESSION_ID="" \
+AGENT_SESSION_NAME="default" \
+AGENT_FROM_USER="test" \
+AGENT_STREAMING="1" \
+AGENT_PROTOCOL_VERSION="0.1" \
+node ./agent.js
+```
+
+
+---
+
+# Quick Start
+
+> Source: https://agentproc.dev/guide/getting-started  ·  Repository path: `docs/guide/getting-started.md`
+
+# Quick Start
+
+Get an AgentProc-compatible agent running in 5 minutes.
+
+## Step 1: Write your agent script
+
+The simplest possible agent reads `AGENT_MESSAGE` and writes a reply to stdout.
+
+::: code-group
+
+```bash [bash]
+#!/usr/bin/env bash
+# echo_agent.sh — replies with whatever the user sent
+echo "You said: $AGENT_MESSAGE"
+```
+
+```python [python]
+#!/usr/bin/env python3
+# echo_agent.py
+import os
+print(f"You said: {os.environ['AGENT_MESSAGE']}")
+```
+
+```js [node]
+#!/usr/bin/env node
+// echo_agent.js
+console.log(`You said: ${process.env.AGENT_MESSAGE}`);
+```
+
+:::
+
+## Step 2: Create a profile YAML
+
+```yaml
+# myagent.yaml
+command: bash ./echo_agent.sh
+timeout_secs: 10
+```
+
+## Step 3: Test it locally
+
+You can test your agent without a running bridge by setting the env vars manually:
+
+```bash
+AGENT_MESSAGE="hello" \
+AGENT_SESSION_ID="" \
+AGENT_SESSION_NAME="default" \
+AGENT_FROM_USER="test" \
+AGENT_STREAMING="1" \
+bash ./echo_agent.sh
+```
+
+Expected output:
+
+```
+You said: hello
+```
+
+## Step 4: Connect to a bridge
+
+Point your bridge at the profile YAML. The exact steps depend on which bridge you're using — refer to the bridge's documentation.
+
+---
+
+## Error handling
+
+When something goes wrong, emit an `AGENT_ERROR:` line to send the user a readable message. The bridge forwards it as an error reply and discards any reply body emitted alongside.
+
+::: code-group
+
+```bash [bash]
+#!/usr/bin/env bash
+# error_agent.sh
+if [ -z "$AGENT_MESSAGE" ]; then
+  echo 'AGENT_ERROR:"message is required"'
+  exit 1
+fi
+echo "You said: $AGENT_MESSAGE"
+```
+
+```python [python]
+#!/usr/bin/env python3
+# error_agent.py
+from agentproc import create_profile, ProtocolError
+
+async def handler(ctx):
+    if not ctx.message.strip():
+        raise ProtocolError("message is required")
+    return f"You said: {ctx.message}"
+
+create_profile(handler)
+```
+
+```js [node]
+#!/usr/bin/env node
+// error_agent.js
+const { createProfile, protocolError } = require('agentproc');
+
+createProfile(async (ctx) => {
+  if (!ctx.message.trim()) {
+    throw await protocolError('message is required');
+  }
+  return { response: `You said: ${ctx.message}` };
+});
+```
+
+:::
+
+Both the SDK form (raising `ProtocolError` / throwing `protocolError(...)`) and the bare `echo 'AGENT_ERROR:"..."'` form produce the same wire output. Either way, exit non-zero after emitting the line.
+
+---
+
+## Next steps
+
+- [Read the full protocol spec](/spec/) to understand all the features
+- [Use an SDK](/sdk/) to skip the boilerplate
+- [See examples](/examples/claude) for connecting real AI agents like claude CLI
+
+
+---
+
+# What is AgentProc?
+
+> Source: https://agentproc.dev/guide/what-is-agentproc  ·  Repository path: `docs/guide/what-is-agentproc.md`
+
+# What is AgentProc?
+
+AgentProc is a minimal protocol for connecting any Agent CLI to a messaging platform through a process-based interface.
+
+## The problem it solves
+
+You have an AI agent — maybe Claude Code, Codex, a custom LLM wrapper, or anything else that runs as a CLI. You want users to talk to it through a messaging app (WeChat, Slack, Telegram, etc.). The glue layer between the two is the hard part:
+
+- How does the message get to the agent?
+- How does the reply get back?
+- How do you keep conversation context across multiple turns?
+- How do you stream responses so users don't wait?
+
+AgentProc answers all of these with the simplest possible interface: **environment variables in, stdout out**.
+
+## How it works
+
+```
+Messaging Platform
+      │
+      ▼
+   Bridge                ← reads your profile YAML, manages the process
+      │   env vars
+      ▼
+ Your Script             ← reads AGENT_MESSAGE, does something, writes to stdout
+      │   stdout
+      ▼
+   Bridge                ← forwards the reply to the user
+```
+
+The bridge injects context as environment variables before starting your process. Your script reads them, calls whatever AI system it wants, and writes the response to stdout. That's the entire protocol.
+
+## What it is not
+
+- **Not an HTTP API.** There's no server to run or endpoint to implement.
+- **Not a framework.** You don't subclass anything or implement interfaces.
+- **Not platform-specific.** AgentProc doesn't know about WeChat, Slack, or any specific messaging app.
+- **Not opinionated about AI.** You can call Claude, GPT, Gemini, a local model, or a simple rule-based system.
+
+## Comparison with related protocols
+
+AgentProc occupies a specific niche. The neighboring protocols are similar in *shape* (subprocess + stdio) but different in *purpose*.
+
+### MCP — Model Context Protocol
+
+[MCP](https://modelcontextprotocol.io) connects an LLM application to **tools and data sources** over JSON-RPC. The direction is **reversed**: in MCP, the AI is the client and the tool provider is the subprocess; in AgentProc, the bridge is the client and the AI wrapper is the subprocess. They compose naturally — your AgentProc agent may internally use MCP tools.
+
+### ACP — Agent Client Protocol
+
+[ACP](https://agentclientprotocol.com) (Zed Industries) connects a code editor to an AI coding agent over long-lived, bidirectional JSON-RPC. It assumes an interactive IDE session with tool calls, file diffs, and mode switching. AgentProc assumes a single chat turn per process invocation. Use ACP if you're building an IDE; use AgentProc if you're bridging a chat bot to a CLI.
+
+### NDJSON / JSON Lines
+
+[NDJSON](https://jsonlines.org) is one JSON object per line — the wire format used internally by Claude Code, Codex, Gemini CLI streaming, and MCP. It's an alternative to AgentProc's sentinel-prefixed plain text. The trade-off: NDJSON forces every emitted line to be valid JSON, which makes `echo "You said: $AGENT_MESSAGE"` an invalid agent. AgentProc opts for sentinel lines so the common case stays trivial; the cost is one disambiguation rule (reply body must not start with `AGENT_*:`).
+
+### What AgentProc is *not*
+
+- **Not a bot framework.** Hubot, Errbot, BotKit, and Microsoft Bot Framework operate on the *consumer* side of the bridge (in-process adapters, HTTP connectors). AgentProc defines the contract *between* the bridge and the agent, and is orthogonal to those frameworks.
+- **Not an agent-to-agent protocol.** A2A / AGNTCY solve a different problem (agents talking to each other).
+- **Not an IDE protocol.** Use ACP for that.
+- **Not a tool protocol.** Use MCP for that.
+
+See the [full spec](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md) for design rationale and additional comparisons with SSE and LSP.
+
+
+---
+
+# Example: Connect the claude CLI
+
+> Source: https://agentproc.dev/examples/claude  ·  Repository path: `docs/examples/claude.md`
+
+# Connect claude CLI
+
+This example shows how to wrap the `claude` CLI as an AgentProc-compliant agent with full session continuity and streaming support.
+
+## How it works
+
+```
+Bridge
+  │  AGENT_MESSAGE, AGENT_SESSION_ID
+  ▼
+claude_bridge.py / .js
+  │  claude --resume <session_id> -p <message> --output-format stream-json
+  ▼
+claude CLI
+  │  stream-json events on stdout
+  ▼
+claude_bridge.py / .js
+  │  AGENT_SESSION:<uuid>
+  │  AGENT_PARTIAL:"chunk..."
+  ▼
+Bridge → user
+```
+
+## Python
+
+```python
+#!/usr/bin/env python3
+import json, os, subprocess, sys
+
+message = os.environ["AGENT_MESSAGE"]
+session_id = os.environ.get("AGENT_SESSION_ID", "")
+streaming = os.environ.get("AGENT_STREAMING", "1") != "0"
+
+args = [
+    "claude", "--output-format", "stream-json",
+    "--dangerously-skip-permissions",
+    "--disallowed-tools", "AskUserQuestion",
+    "-p", message,
+]
+if session_id:
+    args += ["--resume", session_id]
+
+proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+found_session_id = None
+last_partial = None
+
+for line in proc.stdout:
+    try:
+        event = json.loads(line.strip())
+    except json.JSONDecodeError:
+        continue
+
+    if event.get("type") == "assistant":
+        text = "".join(
+            b.get("text", "") for b in (event.get("message") or {}).get("content", [])
+            if b.get("type") == "text"
+        )
+        if text.strip() and streaming:
+            print(f"AGENT_PARTIAL:{json.dumps(text, ensure_ascii=False)}", flush=True)
+            last_partial = text
+
+    elif event.get("type") == "result":
+        found_session_id = event.get("session_id")
+        result_text = event.get("result", "")
+        if result_text.strip() and result_text != last_partial:
+            if streaming:
+                print(f"AGENT_PARTIAL:{json.dumps(result_text, ensure_ascii=False)}", flush=True)
+            else:
+                if found_session_id:
+                    print(f"AGENT_SESSION:{found_session_id}", flush=True)
+                print(result_text, flush=True)
+                sys.exit(0)
+
+proc.wait()
+if found_session_id:
+    print(f"AGENT_SESSION:{found_session_id}", flush=True)
+```
+
+Profile YAML:
+
+```yaml
+command: python3 ./claude_bridge.py
+cwd: /path/to/your/project
+timeout_secs: 600
+streaming: true
+```
+
+## Node.js
+
+```js
+#!/usr/bin/env node
+'use strict';
+const { spawn } = require('child_process');
+const readline = require('readline');
+
+const message = process.env.AGENT_MESSAGE || '';
+const sessionId = process.env.AGENT_SESSION_ID || '';
+const streaming = (process.env.AGENT_STREAMING || '1') !== '0';
+
+const args = [
+  '--output-format', 'stream-json',
+  '--dangerously-skip-permissions',
+  '--disallowed-tools', 'AskUserQuestion',
+  '-p', message,
+];
+if (sessionId) args.push('--resume', sessionId);
+
+const child = spawn('claude', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+const rl = readline.createInterface({ input: child.stdout });
+
+let foundSessionId = null;
+let lastPartial = null;
+
+rl.on('line', line => {
+  let event;
+  try { event = JSON.parse(line.trim()); } catch { return; }
+
+  if (event.type === 'assistant') {
+    const text = (event.message?.content || [])
+      .filter(b => b.type === 'text').map(b => b.text).join('');
+    if (text.trim() && streaming) {
+      process.stdout.write(`AGENT_PARTIAL:${JSON.stringify(text)}\n`);
+      lastPartial = text;
+    }
+  } else if (event.type === 'result') {
+    foundSessionId = event.session_id;
+    const resultText = event.result || '';
+    if (resultText.trim() && resultText !== lastPartial) {
+      if (streaming) process.stdout.write(`AGENT_PARTIAL:${JSON.stringify(resultText)}\n`);
+      else {
+        if (foundSessionId) process.stdout.write(`AGENT_SESSION:${foundSessionId}\n`);
+        process.stdout.write(resultText + '\n');
+        process.exit(0);
+      }
+    }
+  }
+});
+
+child.on('close', () => {
+  if (foundSessionId) process.stdout.write(`AGENT_SESSION:${foundSessionId}\n`);
+  process.exit(0);
+});
+```
+
+Profile YAML:
+
+```yaml
+command: node ./claude_bridge.js
+cwd: /path/to/your/project
+timeout_secs: 600
+streaming: true
+```
+
+## Local testing
+
+```bash
+AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="1" \
+python3 ./claude_bridge.py
+```
+
+
+---
+
+# Example: Bare script (no SDK)
+
+> Source: https://agentproc.dev/examples/bare  ·  Repository path: `docs/examples/bare.md`
+
+# Bare script (no SDK)
+
+You don't need an SDK. Any script that reads `AGENT_*` env vars and writes to stdout is a valid AgentProc agent.
+
+## Echo agent
+
+::: code-group
+
+```bash [bash]
+#!/usr/bin/env bash
+echo "You said: $AGENT_MESSAGE"
+```
+
+```python [python]
+#!/usr/bin/env python3
+import os
+print(f"You said: {os.environ['AGENT_MESSAGE']}")
+```
+
+```js [node]
+#!/usr/bin/env node
+console.log(`You said: ${process.env.AGENT_MESSAGE}`);
+```
+
+:::
+
+## With streaming
+
+```python
+#!/usr/bin/env python3
+import json, os, sys, time
+
+message = os.environ["AGENT_MESSAGE"]
+
+# Simulate streaming by sending chunks
+for i, word in enumerate(message.split()):
+    chunk = word + (" " if i < len(message.split()) - 1 else "")
+    print(f"AGENT_PARTIAL:{json.dumps(chunk)}", flush=True)
+    time.sleep(0.05)
+```
+
+## With session continuity
+
+```python
+#!/usr/bin/env python3
+import json, os, sys, uuid
+
+message = os.environ["AGENT_MESSAGE"]
+session_id = os.environ.get("AGENT_SESSION_ID", "")
+
+# Create a new session ID if we don't have one
+if not session_id:
+    session_id = str(uuid.uuid4())
+
+# Declare our session on the first line
+print(f"AGENT_SESSION:{session_id}", flush=True)
+
+# Then write the reply
+print(f"[session {session_id[:8]}] You said: {message}")
+```
+
+## Profile YAML
+
+```yaml
+command: python3 ./my_agent.py   # or bash, node, etc.
+timeout_secs: 30
+```
+
+
+---
+
+## End of document
+
+Canonical URL: https://agentproc.dev/llms-full.txt

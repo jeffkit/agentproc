@@ -2,12 +2,16 @@
 
 Thanks for your interest in improving AgentProc.
 
+> **If you're an AI coding agent**, read [`AGENTS.md`](./AGENTS.md) instead — it's the same information optimized for tools like Claude Code and Cursor. This file is for human contributors.
+
 ## Project layout
 
 - `spec/` — the protocol specification. EN at `protocol.md`, ZH at `protocol.zh.md`. These are the source of truth; everything else follows.
 - `sdk/python/`, `sdk/node/` — reference SDKs that implement the spec.
 - `examples/` — minimal agent scripts in bash / Python / Node.
 - `docs/` — VitePress documentation site, English root and `zh/` mirror.
+- `docs/public/` — static files served at the site root (`llms.txt`, `llms-full.txt`, `robots.txt`).
+- `AGENTS.md` — guidance for AI coding agents working in this repo.
 
 ## Spec changes
 
