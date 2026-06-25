@@ -1,0 +1,27 @@
+name: agy
+description: Connect the agy CLI as an AgentProc agent (one-shot, no built-in session continuity)
+cli: agy
+cli_install: |
+  # See the agy project for installation instructions.
+agentproc:
+  command: python3 ./bridge.py
+  cwd: ~/your-project
+  timeout_secs: 300
+  streaming: false              # agy's --print mode returns full text only
+  env:
+    AGY_MODEL: "${AGY_MODEL:-}"
+tested: community
+maintainer: jeffkit
+tags: [coding, ai]
+notes: |
+  agy's `--print` mode returns the full reply as plain text after the turn
+  completes — it does not stream chunks and does not expose a resumable
+  session id on stdout. As a result:
+
+    - No AGENT_SESSION: line is emitted (AgentProc allows this).
+    - Each turn is a fresh agy process; multi-turn continuity must be
+      maintained by the messaging bridge (e.g. via the AgentProc SDK's
+      load_history / append_history helpers) rather than by agy itself.
+
+  If agy later adds `--output-format stream-json` or a session-id flag,
+  this bridge can be upgraded to streaming + session continuity.

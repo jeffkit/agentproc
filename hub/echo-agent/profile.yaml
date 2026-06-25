@@ -1,0 +1,18 @@
+name: echo-agent
+description: Minimal AgentProc hello-world agent — echoes the user message back, for testing bridge integrations
+cli: none
+cli_install: |
+  # No CLI to install — this is a reference implementation.
+agentproc:
+  command: python3 ./bridge.py
+  cwd: .
+  timeout_secs: 10
+  streaming: false
+tested: official
+maintainer: jeffkit
+tags: [example, reference]
+notes: |
+  The echo-agent is the smallest valid AgentProc agent. It reads AGENT_MESSAGE
+  and writes it back to stdout prefixed with "You said: ". Use it to verify
+  your messaging bridge speaks the protocol correctly before plugging in a
+  real AI CLI.

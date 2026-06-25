@@ -1,0 +1,22 @@
+name: codex
+description: Connect the codex CLI (OpenAI Codex) as an AgentProc agent with streaming and session continuity
+cli: codex
+cli_install: |
+  npm install -g @openai/codex
+agentproc:
+  command: python3 ./bridge.py
+  cwd: ~/your-project
+  timeout_secs: 600
+  streaming: true
+  env:
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
+tested: official
+maintainer: jeffkit
+tags: [coding, openai, ai]
+notes: |
+  Uses `codex exec --json` and parses the NDJSON event stream:
+    - thread.started → captures thread_id as the session id
+    - item.completed (agent_message) → emits AGENT_PARTIAL: with the text
+    - turn.completed → end of turn
+
+  Session continuity uses `codex exec resume <thread_id> <prompt>` on subsequent turns.

@@ -20,6 +20,7 @@ export default defineConfig({
           { text: '快速开始', link: '/zh/guide/getting-started' },
           { text: '协议规范', link: '/zh/spec/' },
           { text: 'SDK', link: '/zh/sdk/' },
+          { text: 'Profile Hub', link: '/zh/hub/' },
           { text: '示例', link: '/zh/examples/' },
         ],
         sidebar: [
@@ -45,6 +46,12 @@ export default defineConfig({
             ],
           },
           {
+            text: 'Profile Hub',
+            items: [
+              { text: 'Hub 概览', link: '/zh/hub/' },
+            ],
+          },
+          {
             text: '示例',
             items: [
               { text: '接入 claude CLI', link: '/zh/examples/claude' },
@@ -64,6 +71,7 @@ export default defineConfig({
       { text: 'Quick Start', link: '/guide/getting-started' },
       { text: 'Specification', link: '/spec/' },
       { text: 'SDK', link: '/sdk/' },
+      { text: 'Profile Hub', link: '/hub/' },
       { text: 'Examples', link: '/examples/' },
     ],
 
@@ -92,6 +100,14 @@ export default defineConfig({
             { text: 'Overview', link: '/sdk/' },
             { text: 'Python SDK', link: '/sdk/python' },
             { text: 'Node.js SDK', link: '/sdk/node' },
+          ],
+        },
+      ],
+      '/hub/': [
+        {
+          text: 'Profile Hub',
+          items: [
+            { text: 'Overview', link: '/hub/' },
           ],
         },
       ],

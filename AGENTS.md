@@ -30,15 +30,26 @@ agentproc/
 │   ├── bash/                # echo agent (smoke test)
 │   ├── python/              # claude_bridge.py
 │   └── node/                # claude_bridge.js
+├── hub/                     # drop-in profiles for real AI CLIs
+│   ├── README.md            # hub conventions and schema
+│   ├── claude-code/         # each profile: profile.yaml + bridge.py + bridge.js + README.md
+│   ├── codex/
+│   ├── codebuddy/
+│   ├── agy/
+│   └── echo-agent/
 ├── docs/                    # VitePress site (agentproc.dev)
 │   ├── public/              # static files served at root (llms.txt, robots.txt)
-│   ├── guide/  sdk/  examples/  spec/   # English content
+│   ├── guide/  sdk/  hub/  examples/  spec/   # English content
 │   └── zh/                  # Chinese mirror
 ├── .github/workflows/       # test.yml, publish.yml, docs.yml
 ├── CHANGELOG.md             # version history
 ├── CONTRIBUTING.md          # for human contributors (mostly mirrors this file)
 └── AGENTS.md                # this file
 ```
+
+## Hub profiles
+
+`hub/<name>/` directories each contain a pure-P0 AgentProc profile for a real AI CLI. Both bridge scripts (Python and Node) MUST stay at parity — if you fix a bug in one, fix it in the other. See `hub/README.md` for the schema.
 
 ## The two SDKs MUST stay at parity
 

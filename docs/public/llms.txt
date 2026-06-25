@@ -85,8 +85,24 @@ Both SDKs are at parity: `send_partial` / `sendPartial` for streaming, `send_err
 - **Complete docs in one file** (for LLM ingestion): https://agentproc.dev/llms-full.txt
 - **Python SDK reference**: https://agentproc.dev/sdk/python
 - **Node SDK reference**: https://agentproc.dev/sdk/node
+- **Profile Hub** (ready-to-use profiles for claude/codex/codebuddy/agy): https://agentproc.dev/hub/
+  - Source: https://github.com/jeffkit/agentproc/tree/main/hub
 - **Wrapping the claude CLI**: https://agentproc.dev/examples/claude
 - **Repository**: https://github.com/jeffkit/agentproc
+
+## Profile Hub (drop-in profiles for real CLIs)
+
+The hub at https://agentproc.dev/hub/ ships pure-P0 bridge scripts for popular AI agent CLIs. Each profile is a directory with `profile.yaml`, `bridge.py`, `bridge.js`, and `README.md`. Pick one, copy it into your project, point your bridge at it.
+
+Available profiles:
+
+- **claude-code** (`claude`, Anthropic) — official, streaming + session continuity via `--resume`
+- **codex** (`codex`, OpenAI) — official, streaming + session continuity via `codex exec resume`
+- **codebuddy** (`codebuddy`, Tencent) — official, claude-compatible stream-json schema
+- **agy** — community, one-shot only (agy's `--print` doesn't expose session ids)
+- **echo-agent** — official, minimal hello-world for bridge integration testing, in Python + Node + Bash
+
+These are pure-P0 re-implementations of what bridge-specific `type:` handlers do internally — they work with any conformant bridge, not just one specific implementation.
 
 ## How AgentProc differs from neighboring protocols
 
