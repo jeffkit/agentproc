@@ -12,13 +12,15 @@ npm install @agentproc/sdk
 const { createProfile } = require('@agentproc/sdk');
 
 createProfile(async (ctx) => {
-  // ctx.message      — user message text
-  // ctx.sessionId    — previous CLI session UUID (empty = new session)
-  // ctx.sessionName  — human-readable session name
-  // ctx.fromUser     — sender identifier
-  // ctx.streaming    — true if bridge expects streaming output
-  // ctx.imageUrl     — image attachment URL (empty if none)
-  // ctx.fileUrl      — file attachment URL (empty if none)
+  // ctx.message           — user message text
+  // ctx.sessionId         — previous session id (empty = new session)
+  // ctx.sessionName       — human-readable session name
+  // ctx.fromUser          — sender identifier
+  // ctx.streaming         — true if bridge expects streaming output
+  // ctx.protocolVersion   — protocol version string (e.g. "0.1")
+  // ctx.imageUrl          — image attachment URL (empty if none)
+  // ctx.fileUrl           — file attachment URL (empty if none)
+  // ctx.attachments       — parsed AGENT_ATTACHMENTS (draft, [] if unset)
   const reply = await myLLM(ctx.message);
   return { response: reply };
 });
@@ -53,6 +55,50 @@ createProfile(async (ctx) => {
 });
 ```
 
+## Error handling
+
+Surface a user-readable error via `AGENT_ERROR:`. Two equivalent forms:
+
+```js
+const { createProfile, protocolError } = require('@agentproc/sdk');
+
+createProfile(async (ctx) => {
+  // Form 1: call sendError, then return / throw
+  if (rateLimited()) {
+    ctx.sendError('rate limited; retry in 60s');
+    return;                          // bridge discards any reply body
+  }
+
+  // Form 2: throw a protocol error — SDK emits AGENT_ERROR: and exits 1
+  if (badInput(ctx.message)) {
+    throw await protocolError('bad input');
+  }
+
+  return { response: await myLLM(ctx.message) };
+});
+```
+
+`protocolError(msg)` returns a rejected promise whose error is tagged `isProtocolError`; the SDK serializes its message as an `AGENT_ERROR:` line and exits 1. Any other uncaught error is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
+
+## Multi-attachment input (draft)
+
+When the bridge sets `AGENT_ATTACHMENTS`, the SDK parses it into `ctx.attachments`:
+
+```js
+const { createProfile } = require('@agentproc/sdk');
+
+createProfile(async (ctx) => {
+  // Prefer the multi-attachment list when present, fall back to single vars
+  const images = (ctx.attachments.filter(a => a.type === 'image').length
+    ? ctx.attachments.filter(a => a.type === 'image')
+    : (ctx.imageUrl ? [{ type: 'image', url: ctx.imageUrl }] : []));
+  const reply = await myVisionLLM(ctx.message, images.map(a => a.url));
+  return { response: reply };
+});
+```
+
+`ctx.attachments` is empty when `AGENT_ATTACHMENTS` is unset or unparseable. The single-attachment vars (`ctx.imageUrl`, `ctx.fileUrl`) remain the P0 path.
+
 ## Conversation history
 
 ```js
@@ -77,11 +123,14 @@ History is stored as JSONL files under `~/.agentproc/sessions/<session_id>.jsonl
 
 ## Local testing
 
+Test your agent without a running bridge:
+
 ```bash
 AGENT_MESSAGE="hello" \
 AGENT_SESSION_ID="" \
 AGENT_SESSION_NAME="default" \
 AGENT_FROM_USER="test" \
 AGENT_STREAMING="1" \
+AGENT_PROTOCOL_VERSION="0.1" \
 node ./agent.js
 ```

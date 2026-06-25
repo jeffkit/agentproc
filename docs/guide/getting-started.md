@@ -62,6 +62,54 @@ Point your bridge at the profile YAML. The exact steps depend on which bridge yo
 
 ---
 
+## Error handling
+
+When something goes wrong, emit an `AGENT_ERROR:` line to send the user a readable message. The bridge forwards it as an error reply and discards any reply body emitted alongside.
+
+::: code-group
+
+```bash [bash]
+#!/usr/bin/env bash
+# error_agent.sh
+if [ -z "$AGENT_MESSAGE" ]; then
+  echo 'AGENT_ERROR:"message is required"'
+  exit 1
+fi
+echo "You said: $AGENT_MESSAGE"
+```
+
+```python [python]
+#!/usr/bin/env python3
+# error_agent.py
+from agentproc import create_profile, ProtocolError
+
+async def handler(ctx):
+    if not ctx.message.strip():
+        raise ProtocolError("message is required")
+    return f"You said: {ctx.message}"
+
+create_profile(handler)
+```
+
+```js [node]
+#!/usr/bin/env node
+// error_agent.js
+const { createProfile, protocolError } = require('@agentproc/sdk');
+
+createProfile(async (ctx) => {
+  if (!ctx.message.trim()) {
+    throw await protocolError('message is required');
+  }
+  return { response: `You said: ${ctx.message}` };
+});
+```
+
+:::
+
+Both the SDK form (raising `ProtocolError` / throwing `protocolError(...)`) and the bare `echo 'AGENT_ERROR:"..."'` form produce the same wire output. Either way, exit non-zero after emitting the line.
+
+---
+
 ## Next steps
 
 - [Read the full protocol spec](/spec/) to understand all the features
