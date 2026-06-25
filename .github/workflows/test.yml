@@ -5,12 +5,14 @@ on:
     branches: [main]
     paths:
       - 'sdk/**'
+      - 'hub/**'
       - 'spec/**'
       - '.github/workflows/test.yml'
   pull_request:
     branches: [main]
     paths:
       - 'sdk/**'
+      - 'hub/**'
       - 'spec/**'
       - '.github/workflows/test.yml'
   workflow_dispatch:
@@ -47,3 +49,84 @@ jobs:
         working-directory: sdk/python
         env:
           PYTHONPATH: src
+
+  test-hub-bridges:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax-check all hub bridge scripts
+        run: |
+          set -e
+          fail=0
+          for f in hub/*/bridge.py; do
+            if ! python3 -m py_compile "$f"; then
+              echo "::error file=$f::Python syntax check failed"
+              fail=1
+            fi
+          done
+          for f in hub/*/bridge.js; do
+            if ! node --check "$f"; then
+              echo "::error file=$f::Node syntax check failed"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: End-to-end test echo-agent (Python)
+        run: |
+          output=$(AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="0" python3 hub/echo-agent/bridge.py)
+          if [ "$output" != "You said: hello" ]; then
+            echo "::error::echo-agent Python output mismatch: $output"
+            exit 1
+          fi
+
+      - name: End-to-end test echo-agent (Node)
+        run: |
+          output=$(AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="0" node hub/echo-agent/bridge.js)
+          if [ "$output" != "You said: hello" ]; then
+            echo "::error::echo-agent Node output mismatch: $output"
+            exit 1
+          fi
+
+      - name: End-to-end test echo-agent (Bash)
+        run: |
+          output=$(AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="0" bash hub/echo-agent/bridge.sh)
+          if [ "$output" != "You said: hello" ]; then
+            echo "::error::echo-agent Bash output mismatch: $output"
+            exit 1
+          fi
+
+      - name: Validate profile.yaml files
+        run: |
+          set -e
+          pip install pyyaml -q
+          python3 -c "
+          import yaml, glob, sys, os
+          required = ['name', 'description', 'cli', 'agentproc', 'tested', 'maintainer']
+          fail = False
+          for path in sorted(glob.glob('hub/*/profile.yaml')):
+              with open(path) as f:
+                  p = yaml.safe_load(f)
+              dirname = os.path.basename(os.path.dirname(path))
+              missing = [k for k in required if k not in p]
+              if missing:
+                  print(f'::error file={path}::missing fields: {missing}')
+                  fail = True
+              if p.get('name') != dirname:
+                  print(f'::error file={path}::name field ({p.get(\"name\")}) != directory name ({dirname})')
+                  fail = True
+              if p.get('tested') not in ('official', 'community', 'unverified'):
+                  print(f'::error file={path}::tested must be official/community/unverified, got {p.get(\"tested\")!r}')
+                  fail = True
+              if 'command' not in (p.get('agentproc') or {}):
+                  print(f'::error file={path}::agentproc.command is required')
+                  fail = True
+          sys.exit(1 if fail else 0)
+          "
