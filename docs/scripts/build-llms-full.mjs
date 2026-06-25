@@ -24,6 +24,7 @@ const SECTIONS = [
   ['spec/protocol.md', 'Protocol Specification'],
   ['docs/sdk/python.md', 'Python SDK'],
   ['docs/sdk/node.md', 'Node.js SDK'],
+  ['docs/cli/index.md', 'agentproc CLI'],
   ['docs/guide/getting-started.md', 'Quick Start'],
   ['docs/guide/what-is-agentproc.md', 'What is AgentProc?'],
   ['docs/hub/index.md', 'Profile Hub'],

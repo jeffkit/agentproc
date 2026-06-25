@@ -74,7 +74,8 @@ agentproc/
 ├── spec/              # Protocol specification (EN + ZH)
 ├── sdk/
 │   ├── python/        # pip install agentproc
-│   └── node/          # npm install agentproc
+│   └── node/          # npm install agentproc — also ships the CLI
+├── hub/               # Drop-in profiles for claude/codex/codebuddy/agy
 ├── examples/          # Ready-to-use agent scripts
 │   ├── python/
 │   ├── node/
@@ -88,6 +89,15 @@ agentproc/
 |----------|---------|---------|
 | Python | `agentproc` | `pip install agentproc` |
 | Node.js | `agentproc` | `npm install agentproc` |
+
+The Node.js package also ships the `agentproc` CLI — a canonical bridge runner that drives any profile against a message:
+
+```bash
+npm install -g agentproc
+agentproc --profile hub/claude-code/profile.yaml --prompt "hello"
+```
+
+See the [CLI docs](https://agentproc.dev/cli/) for details.
 
 ```python
 from agentproc import create_profile
