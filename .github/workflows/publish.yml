@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node --test src/index.test.js
+      - run: node --test src/index.test.js src/runner.test.js src/hub.test.js
         working-directory: sdk/node
 
   test-python:

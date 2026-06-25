@@ -2,6 +2,60 @@
 
 All notable changes to AgentProc are documented here. The protocol version and the SDK package versions are kept in lockstep.
 
+## 0.3.0 — 2026-06-25
+
+### `agentproc hub` subcommands
+
+Hub profiles can now be fetched and run directly from GitHub — no clone, no copy, no YAML editing.
+
+```bash
+agentproc hub list                          # list available profiles
+agentproc hub show <name>                   # print a profile's README
+agentproc hub run <name> -p "hello"         # fetch (if needed) and run
+agentproc hub install <name>                # copy to current dir for editing
+```
+
+Profiles are cached at `~/.agentproc/cache/hub/<name>/` with a 24-hour TTL. Pass `--refresh` to force re-fetch.
+
+Implementation uses the GitHub git-tree API (1 call for the entire file listing) plus raw.githubusercontent.com for downloads, so unauthenticated users stay below rate limits.
+
+### New `agentproc.hub` module
+
+Both SDKs now expose a `hub` module:
+
+```js
+// Node
+const { fetchProfile, listProfiles, showReadme, installProfile } = require('agentproc/src/hub');
+```
+
+```python
+# Python
+from agentproc import hub
+hub.fetch_profile("claude-code")
+```
+
+Zero new dependencies. Python uses `urllib.request` (stdlib), Node uses global `fetch` (Node 18+).
+
+### Python CLI version display fix
+
+`agentproc --version` now correctly shows the installed package version (was showing `0.0.0+unknown` after pip install due to pyproject.toml not being shipped in the wheel). Uses `importlib.metadata.version("agentproc")` with a pyproject.toml fallback for source checkouts.
+
+Also exposes `agentproc.__version__` for SDK users who need it.
+
+### Homepage onboarding flow updated
+
+Step ③ of the "Get started in 5 minutes" guide now uses `agentproc hub run` instead of `git clone + cp + edit YAML`, reducing the time-to-first-success from minutes to seconds.
+
+### Tests
+
+- Python: 17 new tests in `tests/test_hub.py` (mock-based, no real network)
+- Node: 16 new tests in `src/hub.test.js` (mock-based, no real network)
+- All existing tests still pass
+
+### No protocol changes
+
+0.3.0 adds tooling on the bridge runner side. The wire protocol is unchanged from 0.1. Existing agents and bridges remain compatible.
+
 ## 0.2.1 — 2026-06-25
 
 ### Python CLI

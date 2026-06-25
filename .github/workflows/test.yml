@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Run Node SDK tests
-        run: node --test src/index.test.js
+        run: node --test src/index.test.js src/runner.test.js src/hub.test.js
         working-directory: sdk/node
 
   test-python:

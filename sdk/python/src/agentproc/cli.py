@@ -25,7 +25,20 @@ from .runner import (
 
 
 def _read_pkg_version() -> str:
-    """Read version from pyproject.toml at runtime (zero-dep)."""
+    """Read installed package version.
+
+    Primary: importlib.metadata (works after pip/pipx install).
+    Fallback: parse pyproject.toml (works in source checkout, dev mode).
+    """
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            return version("agentproc")
+        except PackageNotFoundError:
+            pass
+    except ImportError:
+        pass
+    # Fallback for source checkout (development, not installed).
     try:
         toml_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
         if toml_path.exists():
@@ -261,55 +274,145 @@ def show_version() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Hub subcommand dispatcher
 # ---------------------------------------------------------------------------
 
-def main(argv: Optional[List[str]] = None) -> int:
-    if argv is None:
-        argv = sys.argv[1:]
+def _run_hub_subcommand(args: List[str]) -> int:
+    """Handle `agentproc hub <list|show|install|run> [args]`."""
+    from . import hub as hub_mod
 
-    parser = build_parser()
-    opts = parser.parse_args(argv)
-
-    if opts.help:
-        show_help()
-        return 0
-    if opts.version:
-        show_version()
+    if not args or args[0] in ("-h", "--help"):
+        _show_hub_help()
         return 0
 
-    if not opts.profile:
-        sys.stderr.write("error: --profile is required\n\n")
-        show_help()
+    sub = args[0]
+    rest = args[1:]
+
+    # Common flag
+    refresh = "--refresh" in rest
+    positional = [a for a in rest if not a.startswith("--")]
+
+    def _log(msg: str) -> None:
+        sys.stderr.write(msg + "\n")
+
+    if sub == "list":
+        profiles = hub_mod.list_profiles(on_log=_log)
+        sys.stdout.write("Available profiles in the official hub:\n\n")
+        for p in profiles:
+            sys.stdout.write(
+                f"  {p['name']:<15} {p['tested']:<12} {p['description'][:60]}\n"
+            )
+        sys.stdout.write('\nRun `agentproc hub run <name> -p "hi"` to use one.\n')
+        return 0
+
+    if sub == "show":
+        if not positional:
+            sys.stderr.write("error: hub show requires a profile name\n")
+            return 2
+        readme = hub_mod.show_readme(positional[0], refresh=refresh, on_log=_log)
+        sys.stdout.write(readme)
+        if not readme.endswith("\n"):
+            sys.stdout.write("\n")
+        return 0
+
+    if sub == "install":
+        if not positional:
+            sys.stderr.write("error: hub install requires a profile name\n")
+            return 2
+        hub_mod.install_profile(positional[0], Path.cwd(), refresh=refresh, on_log=_log)
+        return 0
+
+    if sub == "run":
+        if not positional:
+            sys.stderr.write("error: hub run requires a profile name\n")
+            return 2
+        profile_name = positional[0]
+        cache_dir = hub_mod.fetch_profile(profile_name, refresh=refresh, on_log=_log)
+        profile_path = str(cache_dir / "profile.yaml")
+
+        # Re-parse remaining args (excluding the profile name) as runner options.
+        parser = build_parser()
+        # Drop the first positional (profile name) and --refresh from rest.
+        runner_args = [a for i, a in enumerate(rest) if not (
+            (not a.startswith("--") and i == 0) or a == "--refresh"
+        )]
+        opts = parser.parse_args(runner_args)
+
+        if not opts.prompt and not opts.stdin:
+            sys.stderr.write("error: hub run requires --prompt <text> or --stdin\n")
+            return 2
+
+        return _run_agent_with_profile(profile_path, opts)
+
+    sys.stderr.write(f"error: unknown hub subcommand: {sub}\n\n")
+    _show_hub_help()
+    return 2
+
+
+def _show_hub_help() -> None:
+    sys.stdout.write("""agentproc hub — manage profiles from the official Hub
+
+Usage:
+  agentproc hub list                       List all profiles in the hub
+  agentproc hub show <name>                Show a profile's README
+  agentproc hub install <name>             Copy a profile to the current directory
+  agentproc hub run <name> [run-options]   Fetch (if needed) and run a profile
+
+Hub run options (same as the regular --profile runner):
+  -p, --prompt <text>          User message (or use --stdin)
+  --cwd <path>                 Override profile.cwd (default: current dir)
+  --env KEY=VALUE              Extra env var (repeatable)
+  --session <id>               Previous session id for multi-turn
+  --timeout <secs>             Override profile.timeout_secs
+  --no-stream                  Disable streaming
+  --verbose / --quiet          Protocol line visibility (default: verbose)
+  --stdin                      Read prompt from stdin
+
+Common options:
+  --refresh                    Force re-fetch from GitHub (ignore cache)
+  -h, --help                   Show this help
+
+Examples:
+  agentproc hub list
+  agentproc hub run echo-agent -p "hello"
+  cd ~/projects/my-app && agentproc hub run claude-code -p "explain this" --env ANTHROPIC_API_KEY=$KEY
+  agentproc hub show codex
+  agentproc hub install agy
+
+Profiles are cached at ~/.agentproc/cache/hub/<name>/ (24h TTL).
+""")
+
+
+def _run_agent_with_profile(profile_path: str, opts) -> int:
+    """Shared runner logic for both --profile path and hub run path."""
+    try:
+        yaml_text = Path(profile_path).resolve().read_text(encoding="utf-8")
+        profile_raw = parse_yaml(yaml_text)
+    except FileNotFoundError:
+        sys.stderr.write(f"error: profile not found: {profile_path}\n")
+        return 2
+    except Exception as e:
+        sys.stderr.write(f"error: failed to parse profile {profile_path}: {e}\n")
         return 2
 
+    # Read prompt.
     prompt = opts.prompt
     if opts.stdin:
         try:
             prompt = sys.stdin.read().rstrip("\n")
         except KeyboardInterrupt:
-            return EXIT_ERROR
+            return 1
     if prompt is None:
         sys.stderr.write("error: --prompt (or --stdin) is required\n")
         return 2
 
     extra_env: Dict[str, str] = {}
-    for kv in opts.env:
+    for kv in opts.env or []:
         eq = kv.find("=")
         if eq < 0:
             sys.stderr.write(f"error: --env expects KEY=VALUE, got: {kv}\n")
             return 2
         extra_env[kv[:eq]] = kv[eq + 1:]
-
-    try:
-        yaml_text = Path(opts.profile).resolve().read_text(encoding="utf-8")
-        profile_raw = parse_yaml(yaml_text)
-    except FileNotFoundError:
-        sys.stderr.write(f"error: profile not found: {opts.profile}\n")
-        return 2
-    except Exception as e:
-        sys.stderr.write(f"error: failed to parse profile {opts.profile}: {e}\n")
-        return 2
 
     streaming = False if opts.no_stream else None
 
@@ -360,13 +463,41 @@ def main(argv: Optional[List[str]] = None) -> int:
         sys.stdout.write(r.reply)
         if not r.reply.endswith("\n"):
             sys.stdout.write("\n")
-
     if r.session_id:
         sys.stderr.write(f"agentproc:session:{r.session_id}\n")
     if r.error:
         sys.stderr.write(f"agentproc:error:{r.error}\n")
-
     return 0 if r.exit_code == 0 else 1
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main(argv: Optional[List[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # `agentproc hub <subcommand>` — defer to hub dispatcher.
+    if argv and argv[0] == "hub":
+        return _run_hub_subcommand(argv[1:])
+
+    parser = build_parser()
+    opts = parser.parse_args(argv)
+
+    if opts.help:
+        show_help()
+        return 0
+    if opts.version:
+        show_version()
+        return 0
+
+    if not opts.profile:
+        sys.stderr.write("error: --profile is required\n\n")
+        show_help()
+        return 2
+
+    return _run_agent_with_profile(opts.profile, opts)
 
 
 if __name__ == "__main__":

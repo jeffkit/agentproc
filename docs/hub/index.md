@@ -1,8 +1,32 @@
 # Profile Hub
 
-Ready-to-use AgentProc profiles for popular AI agent CLIs. Each profile wraps a CLI as an AgentProc-compliant agent that any conformant bridge can drive — no bridge-specific shortcuts, no magic.
+The hub is a curated collection of ready-to-use AgentProc profiles for popular AI agent CLIs. **You don't need to clone the repo, copy files, or edit YAML** — the `agentproc` CLI fetches profiles on demand, caches them locally, and runs them.
 
-The hub lives in the repository at [`hub/`](https://github.com/jeffkit/agentproc/tree/main/hub). This page is the entry point; individual profile READMEs open directly on GitHub.
+## One-line usage
+
+```bash
+# pick any profile, point at any directory, just go
+cd ~/projects/my-app
+agentproc hub run claude-code -p "what is this codebase?"
+```
+
+That's it. The CLI:
+
+1. Fetches `hub/claude-code/` from GitHub on first use
+2. Caches it at `~/.agentproc/cache/hub/claude-code/` (24h TTL)
+3. Uses your current directory as `cwd`
+4. Forwards `AGENT_MESSAGE` and any `--env` you pass
+
+## All hub commands
+
+| Command | Purpose |
+|---------|---------|
+| `agentproc hub list` | List all profiles in the hub |
+| `agentproc hub show <name>` | Show a profile's README |
+| `agentproc hub run <name> [opts]` | Fetch (if needed) and run a profile |
+| `agentproc hub install <name>` | Copy a profile to the current directory (for editing) |
+
+Add `--refresh` to force re-fetch from GitHub.
 
 ## Available profiles
 
@@ -14,71 +38,79 @@ The hub lives in the repository at [`hub/`](https://github.com/jeffkit/agentproc
 | [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | (no CLI) | official | Python · Node · Bash |
 
-The `tested` badge means:
+`tested`:
+- **official** — verified by maintainers against the CLI's documented behavior
+- **community** — submitted and reportedly working; not verified end-to-end
+- **unverified** — submitted without verification
 
-- **official** — verified by AgentProc maintainers against the CLI's documented behavior.
-- **community** — submitted and reportedly working; not verified end-to-end by maintainers.
-- **unverified** — submitted without verification.
+## Examples
 
-## Quick start
-
-1. Pick a profile from the table above and open its README on GitHub.
-2. Copy `profile.yaml` and one bridge script (`bridge.py` or `bridge.js`) into your project.
-3. Adjust `cwd:` and any auth env vars in the profile.
-4. Point your messaging bridge at the profile YAML.
-
-For example, to wire up `claude-code`:
+### Browse and try
 
 ```bash
-cp hub/claude-code/profile.yaml     ./profile.yaml
-cp hub/claude-code/bridge.py        ./bridge.py
-# edit cwd: in profile.yaml to point at your project
+# See what's available
+agentproc hub list
+#   claude-code     official    Connect the claude CLI as an AgentProc agent...
+#   codex           official    Connect the codex CLI as an AgentProc agent...
+#   codebuddy       official    Connect the codebuddy CLI as an AgentProc agent...
+#   agy             community   Connect the agy CLI as an AgentProc agent...
+#   echo-agent      official    Minimal AgentProc hello-world agent...
+
+# Read its docs
+agentproc hub show claude-code
+
+# Run a smoke test (no API key needed)
+agentproc hub run echo-agent -p "hello"
+# → You said: hello
 ```
 
-Local sanity check (no messaging bridge needed):
+### Use a real CLI
 
 ```bash
-AGENT_MESSAGE="hello" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="1" \
-ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-python3 bridge.py
+cd ~/projects/my-app
+
+# claude-code
+agentproc hub run claude-code \
+  -p "explain this codebase" \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+
+# codex
+agentproc hub run codex \
+  -p "find the bug in src/auth.py" \
+  --env OPENAI_API_KEY="$OPENAI_API_KEY"
+
+# codebuddy (uses its own login)
+agentproc hub run codebuddy -p "refactor this function"
 ```
 
-Expected:
+### Multi-turn
 
-```
-AGENT_PARTIAL:"Hi! How can I help?"
-AGENT_SESSION:13c2f6ec-1f97-42c4-be9e-9475129e243c
-```
-
-## What's in a profile?
-
-```
-hub/<name>/
-├── profile.yaml         # AgentProc P0 profile (uses command:, not type:)
-├── bridge.py            # Python bridge script
-├── bridge.js            # Node.js bridge script
-└── README.md            # Setup, usage, caveats
+```bash
+agentproc hub run claude-code -p "what files are in this dir?" 2>/tmp/err.log
+session=$(grep '^agentproc:session:' /tmp/err.log | cut -d: -f3)
+agentproc hub run claude-code -p "now read src/main.py" --session "$session"
 ```
 
-The bridge script is what actually translates the wrapped CLI's output (NDJSON, plain text, whatever) into the AgentProc sentinel-prefixed stdout protocol. Both Python and Node versions are maintained at parity — pick whichever fits your stack.
+### Install for local editing
 
-## Design principles
+If you want to own a profile and customize it:
 
-- **Pure P0 only.** No `type:` shortcuts, no `routing:` blocks, no bridge-specific extensions. Any conformant bridge works.
-- **One profile per directory.** If you want multiple variants (different models, different prompts), copy and rename the directory.
-- **Bilingual bridges.** Python and Node, both maintained at parity. Bash only for `echo-agent` (a reference impl, not a real wrapper).
-- **No secrets.** Profile YAMLs reference env vars (`${ANTHROPIC_API_KEY}`); they never embed credentials.
+```bash
+agentproc hub install claude-code
+# → installed to: ./claude-code/
 
-## Contributing a new profile
+# Edit ./claude-code/profile.yaml however you like
+agentproc --profile ./claude-code/profile.yaml -p "hi" --cwd ./claude-code
+```
 
-1. Create `hub/<cli-name>/` with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md`.
-2. Set `tested: unverified` in the profile metadata unless you've verified end-to-end.
-3. Add an entry to the table in [`hub/README.md`](https://github.com/jeffkit/agentproc/blob/main/hub/README.md).
-4. Open a PR. A maintainer will review, possibly test, and bump `tested` accordingly.
+## How the cache works
 
-See [`CONTRIBUTING.md`](https://github.com/jeffkit/agentproc/blob/main/CONTRIBUTING.md) for repo-wide conventions.
+- Cache location: `~/.agentproc/cache/hub/<name>/`
+- TTL: 24 hours (after fetch, cached copy used without network)
+- Force refresh: pass `--refresh` to any hub command
+- Each profile is a flat directory containing `profile.yaml`, `bridge.py`, `bridge.js`, and `README.md`
+
+The CLI uses GitHub's git-tree API (1 request lists everything) and raw.githubusercontent.com (no rate limit) so the experience stays fast even for unauthenticated users.
 
 ## Profile schema
 
@@ -90,11 +122,11 @@ cli_install: |                  # how to install the CLI itself
   npm install -g ...
 agentproc:                      # the actual AgentProc P0 profile
   command: python3 ./bridge.py  # or: node ./bridge.js
-  cwd: ~/your-project
+  cwd: ~/your-project           # gets overridden by `--cwd` from CLI
   timeout_secs: 600
   streaming: true
   env:
-    API_KEY: "${API_KEY}"
+    API_KEY: "${API_KEY}"       # env-var references resolved at run time
 tested: official | community | unverified
 maintainer: <github-handle>
 tags: [<category>, ...]
@@ -102,8 +134,19 @@ notes: |                        # optional caveats, gotchas
   ...
 ```
 
+Hub profiles are **pure AgentProc P0** — they don't use bridge-specific `type:` shortcuts. Any conformant bridge can drive them.
+
+## Contributing a new profile
+
+1. Create `hub/<cli-name>/` with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md` in the [agentproc repo](https://github.com/jeffkit/agentproc).
+2. Set `tested: unverified` unless you've verified end-to-end.
+3. Add an entry to the table in [`hub/README.md`](https://github.com/jeffkit/agentproc/blob/main/hub/README.md).
+4. Open a PR. A maintainer will review, possibly test, and bump `tested` accordingly.
+
+See [`CONTRIBUTING.md`](https://github.com/jeffkit/agentproc/blob/main/CONTRIBUTING.md) for repo-wide conventions.
+
 ## Relationship to ilink-hub-bridge
 
-AgentProc was extracted from [`ilink-hub-bridge`](https://github.com/jeffkit), a messaging-platform bridge with built-in `type:` handlers for `claude-code`, `cursor`, `codebuddy-code`, and others. During production use we realized the bridge↔agent contract was reusable independently — and AgentProc was born.
+AgentProc was extracted from [`ilink-hub-bridge`](https://github.com/jeffkit), a messaging-platform bridge with built-in `type:` handlers for `claude-code`, `cursor`, `codebuddy-code`, and others. We realized the bridge↔agent contract was reusable independently — and AgentProc was born.
 
-These hub profiles are **pure P0** re-implementations of what those `type:` handlers do internally. They exist so any bridge can speak to `claude` / `codex` / `codebuddy` / `agy` without shipping type handlers of its own. If your bridge already has `type:` shortcuts, you don't need these profiles.
+Hub profiles are **pure-P0 re-implementations** of what those `type:` handlers do internally. They work with any conformant bridge, not just one specific implementation.

@@ -57,39 +57,35 @@ agentproc --version
 # agentproc 0.2.0 (protocol 0.1)
 ```
 
-## ② Pick a profile
-
-Browse the [Profile Hub](/hub/) — every profile is a directory containing `profile.yaml`, a bridge script, and a README. Five official profiles to start with:
-
-| Profile | CLI | Status |
-|---------|-----|--------|
-| [claude-code](https://github.com/jeffkit/agentproc/tree/main/hub/claude-code) | `claude` (Anthropic) | official |
-| [codex](https://github.com/jeffkit/agentproc/tree/main/hub/codex) | `codex` (OpenAI) | official |
-| [codebuddy](https://github.com/jeffkit/agentproc/tree/main/hub/codebuddy) | `codebuddy` (Tencent) | official |
-| [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community |
-| [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | (hello world) | official |
-
-## ③ Run it
-
-Clone the repo and try `echo-agent` first (no API key needed):
+## ② Browse the hub
 
 ```bash
-git clone https://github.com/jeffkit/agentproc
-cd agentproc
+agentproc hub list
+#   claude-code   official    Connect the claude CLI (Anthropic) as an AgentProc agent
+#   codex         official    Connect the codex CLI (OpenAI) as an AgentProc agent
+#   codebuddy     official    Connect the codebuddy CLI (Tencent) as an AgentProc agent
+#   agy           community   Connect the agy CLI as an AgentProc agent
+#   echo-agent    official    Minimal hello-world agent
+```
 
-agentproc --profile hub/echo-agent/profile.yaml \
-          --prompt "hello" \
-          --cwd hub/echo-agent
+The [Profile Hub](/hub/) is a curated set of drop-in profiles for popular AI CLIs. No clone, no copy, no YAML editing — the CLI fetches and caches them on demand.
+
+## ③ Run it in one line
+
+Start with the smoke test (no API key needed):
+
+```bash
+agentproc hub run echo-agent -p "hello"
 # → You said: hello
 ```
 
-Now a real one. With `claude-code`, you get streaming output and multi-turn session continuity:
+Then go real. With `claude-code`, you get streaming output and multi-turn session continuity:
 
 ```bash
-agentproc --profile hub/claude-code/profile.yaml \
-          --prompt "what is this codebase?" \
-          --cwd ~/projects/my-app \
-          --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+cd ~/projects/my-app
+agentproc hub run claude-code \
+  -p "what is this codebase?" \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 ```
 
 You'll see protocol lines stream on stderr in real time, and the final reply on stdout:
@@ -103,11 +99,10 @@ agentproc:session:13c2f6ec-1f97-42c4-be9e-9475129e243c
 Capture that session id and continue the conversation:
 
 ```bash
-agentproc --profile hub/claude-code/profile.yaml \
-          --prompt "tell me about the auth module" \
-          --cwd ~/projects/my-app \
-          --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-          --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
+agentproc hub run claude-code \
+  -p "tell me about the auth module" \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
 ## ④ Connect to your messaging platform

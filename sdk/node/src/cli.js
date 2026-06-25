@@ -41,6 +41,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const runner = require('./runner.js');
+const hub = require('./hub.js');
 const { PROTOCOL_VERSION } = runner;
 
 const PKG_VERSION = require('../package.json').version;
@@ -57,7 +58,7 @@ function parseArgs(argv) {
     sessionName: 'default',
     from: '',
     cwd: null,
-    env: {},
+    env: [],  // array of "KEY=VALUE" strings; --env can repeat
     timeout: null,
     stream: true,
     verbose: true,
@@ -83,25 +84,224 @@ function parseArgs(argv) {
       case '--session-name': opts.sessionName = next(); break;
       case '--from': opts.from = next(); break;
       case '--cwd': opts.cwd = next(); break;
-      case '--env': {
-        const kv = next();
-        const eq = kv.indexOf('=');
-        if (eq < 0) throw new Error(`--env expects KEY=VALUE, got: ${kv}`);
-        opts.env[kv.slice(0, eq)] = kv.slice(eq + 1);
+      case '--env':
+        opts.env.push(next());
         break;
-      }
       case '--timeout': opts.timeout = parseInt(next(), 10); break;
-      case '--no-stream': opts.stream = false; break;
+      case '--no-stream': opts.noStream = true; break;
       case '--verbose': opts.verbose = true; break;
       case '--quiet': opts.verbose = false; break;
       case '--raw': opts.raw = true; break;
       case '--stdin': opts.stdin = true; break;
       default:
+        if (a === 'hub' && extras.length === 0) {
+          opts.hub = true;
+          opts.hubArgs = argv.slice(i + 1);
+          return { opts, extras };
+        }
         if (a.startsWith('--')) throw new Error(`unknown option: ${a}`);
         extras.push(a);
     }
   }
   return { opts, extras };
+}
+
+// ---------------------------------------------------------------------------
+// Hub subcommand dispatcher
+// ---------------------------------------------------------------------------
+
+async function runHubSubcommand(args) {
+  const sub = args[0];
+  const rest = args.slice(1);
+
+  if (!sub || sub === '--help' || sub === '-h') {
+    showHubHelp();
+    return 0;
+  }
+
+  // Parse common flags
+  const refresh = rest.includes('--refresh');
+  const positional = rest.filter(a => !a.startsWith('--'));
+
+  if (sub === 'list') {
+    const profiles = await hub.listProfiles({
+      onLog: m => process.stderr.write(m + '\n'),
+    });
+    process.stdout.write('Available profiles in the official hub:\n\n');
+    for (const p of profiles) {
+      process.stdout.write(
+        `  ${p.name.padEnd(15)} ${p.tested.padEnd(12)} ${p.description.slice(0, 60)}\n`
+      );
+    }
+    process.stdout.write(`\nRun \`agentproc hub run <name> -p "hi"\` to use one.\n`);
+    return 0;
+  }
+
+  if (sub === 'show') {
+    if (!positional[0]) {
+      process.stderr.write('error: hub show requires a profile name\n');
+      return 2;
+    }
+    const readme = await hub.showReadme(positional[0], {
+      refresh,
+      onLog: m => process.stderr.write(m + '\n'),
+    });
+    process.stdout.write(readme);
+    if (!readme.endsWith('\n')) process.stdout.write('\n');
+    return 0;
+  }
+
+  if (sub === 'install') {
+    if (!positional[0]) {
+      process.stderr.write('error: hub install requires a profile name\n');
+      return 2;
+    }
+    const target = process.cwd();
+    await hub.installProfile(positional[0], target, {
+      refresh,
+      onLog: m => process.stderr.write(m + '\n'),
+    });
+    return 0;
+  }
+
+  if (sub === 'run') {
+    if (!positional[0]) {
+      process.stderr.write('error: hub run requires a profile name\n');
+      return 2;
+    }
+    const profileName = positional[0];
+    const cacheDir = await hub.fetchProfile(profileName, {
+      refresh,
+      onLog: m => process.stderr.write(m + '\n'),
+    });
+    const profilePath = path.join(cacheDir, 'profile.yaml');
+
+    // Re-parse the remaining args as the runner options (--prompt, --cwd, etc.).
+    const { opts: runOpts } = parseArgs(rest);
+    if (!runOpts.prompt && !runOpts.stdin) {
+      process.stderr.write('error: hub run requires --prompt <text> or --stdin\n');
+      return 2;
+    }
+
+    return await runAgent(profilePath, runOpts);
+  }
+
+  process.stderr.write(`error: unknown hub subcommand: ${sub}\n\n`);
+  showHubHelp();
+  return 2;
+}
+
+function showHubHelp() {
+  process.stdout.write(`agentproc hub — manage profiles from the official Hub
+
+Usage:
+  agentproc hub list                       List all profiles in the hub
+  agentproc hub show <name>                Show a profile's README
+  agentproc hub install <name>             Copy a profile to the current directory
+  agentproc hub run <name> [run-options]   Fetch (if needed) and run a profile
+
+Hub run options (same as the regular --profile runner):
+  -p, --prompt <text>          User message (or use --stdin)
+  --cwd <path>                 Override profile.cwd (default: current dir)
+  --env KEY=VALUE              Extra env var (repeatable)
+  --session <id>               Previous session id for multi-turn
+  --timeout <secs>             Override profile.timeout_secs
+  --no-stream                  Disable streaming
+  --verbose / --quiet          Protocol line visibility (default: verbose)
+  --stdin                      Read prompt from stdin
+
+Common options:
+  --refresh                    Force re-fetch from GitHub (ignore cache)
+  -h, --help                   Show this help
+
+Examples:
+  agentproc hub list
+  agentproc hub run echo-agent -p "hello"
+  cd ~/projects/my-app && agentproc hub run claude-code -p "explain this" --env ANTHROPIC_API_KEY=$KEY
+  agentproc hub show codex
+  agentproc hub install agy
+
+Profiles are cached at ~/.agentproc/cache/hub/<name>/ (24h TTL).
+`);
+}
+
+/**
+ * Shared runner logic used by both `agentproc --profile` and `agentproc hub run`.
+ * Kept here for the hub subcommand to reuse; the legacy main() path also calls it.
+ */
+async function runAgent(profilePath, opts) {
+  let profileRaw;
+  try {
+    const yamlText = fs.readFileSync(path.resolve(profilePath), 'utf8');
+    profileRaw = parseYaml(yamlText);
+  } catch (e) {
+    process.stderr.write(`error: failed to read profile ${profilePath}: ${e.message}\n`);
+    return 2;
+  }
+
+  // Read prompt.
+  let prompt = opts.prompt;
+  if (opts.stdin) {
+    prompt = fs.readFileSync(0, 'utf8').replace(/\n$/, '');
+  }
+  if (prompt == null) {
+    process.stderr.write('error: --prompt (or --stdin) is required\n');
+    return 2;
+  }
+
+  // opts.env is an array of "KEY=VALUE" strings (from repeated --env flags)
+  const extraEnv = {};
+  for (const kv of opts.env || []) {
+    const eq = kv.indexOf('=');
+    if (eq < 0) {
+      process.stderr.write(`error: --env expects KEY=VALUE, got: ${kv}\n`);
+      return 2;
+    }
+    extraEnv[kv.slice(0, eq)] = kv.slice(eq + 1);
+  }
+
+  const streaming = opts.noStream ? false : null;
+
+  if (opts.raw) {
+    const r = await runner.run(profileRaw, {
+      message: prompt,
+      sessionId: opts.session || '',
+      sessionName: opts.sessionName || 'default',
+      fromUser: opts.from || '',
+      streaming,
+      cwd: opts.cwd,
+      extraEnv,
+      timeoutSecs: opts.timeout,
+    });
+    process.stdout.write(r.reply);
+    if (r.reply && !r.reply.endsWith('\n')) process.stdout.write('\n');
+    return r.exitCode === 0 ? 0 : 1;
+  }
+
+  const verbose = opts.verbose || !opts.quiet || (opts.verbose === undefined && opts.quiet === undefined) || opts.verbose;
+
+  const r = await runner.run(profileRaw, {
+    message: prompt,
+    sessionId: opts.session || '',
+    sessionName: opts.sessionName || 'default',
+    fromUser: opts.from || '',
+    streaming,
+    cwd: opts.cwd,
+    extraEnv,
+    timeoutSecs: opts.timeout,
+    onPartial: (t) => { if (verbose) process.stderr.write(`AGENT_PARTIAL:${JSON.stringify(t)}\n`); },
+    onSession: (id) => { if (verbose) process.stderr.write(`AGENT_SESSION:${id}\n`); },
+    onError: (msg) => { if (verbose) process.stderr.write(`AGENT_ERROR:${JSON.stringify(msg)}\n`); },
+    onStderr: (line) => { if (verbose) process.stderr.write(`[agent stderr] ${line}\n`); },
+  });
+
+  if (r.reply) {
+    process.stdout.write(r.reply);
+    if (!r.reply.endsWith('\n')) process.stdout.write('\n');
+  }
+  if (r.sessionId) process.stderr.write(`agentproc:session:${r.sessionId}\n`);
+  if (r.error) process.stderr.write(`agentproc:error:${r.error}\n`);
+  return r.exitCode === 0 ? 0 : 1;
 }
 
 function showHelp() {
@@ -392,6 +592,11 @@ async function main() {
   if (opts.help) { showHelp(); process.exit(0); }
   if (opts.version) { showVersion(); process.exit(0); }
 
+  // `agentproc hub <subcommand>` — defer to hub dispatcher.
+  if (opts.hub) {
+    return await runHubSubcommand(opts.hubArgs);
+  }
+
   if (!opts.profile) {
     process.stderr.write('error: --profile is required\n\n');
     showHelp();
@@ -408,89 +613,12 @@ async function main() {
     process.exit(2);
   }
 
-  // Read & parse profile YAML.
-  let profileRaw;
+  // Read & parse profile YAML, then delegate to the shared runner path.
   try {
-    const yamlText = fs.readFileSync(path.resolve(opts.profile), 'utf8');
-    profileRaw = parseYaml(yamlText);
-  } catch (e) {
-    process.stderr.write(`error: failed to read profile ${opts.profile}: ${e.message}\n`);
-    process.exit(2);
-  }
-
-  // ---- Raw mode: spawn agent, pipe stdout through, exit with agent code ----
-  if (opts.raw) {
-    const { spawn } = require('node:child_process');
-    try {
-      const r = await runner.run(profileRaw, {
-        message: prompt,
-        sessionId: opts.session,
-        sessionName: opts.sessionName,
-        fromUser: opts.from,
-        streaming: opts.stream,
-        cwd: opts.cwd,
-        extraEnv: opts.env,
-        timeoutSecs: opts.timeout,
-        // No callbacks — we replace stdout forwarding below.
-      });
-      // The runner buffers reply; for raw mode we want streaming verbatim,
-      // so we re-implement with raw pipes. Simpler: just print the reply
-      // (which equals the agent's stdout minus protocol lines).
-      // For TRUE raw output (including protocol lines), users should use
-      // the bridge script directly.
-      process.stdout.write(r.reply);
-      if (r.reply && !r.reply.endsWith('\n')) process.stdout.write('\n');
-      process.exit(r.exitCode === 0 ? 0 : 1);
-    } catch (e) {
-      process.stderr.write(`error: ${e.message}\n`);
-      process.exit(1);
-    }
-  }
-
-  // ---- Default mode: classify and pretty-print ----
-  try {
-    const r = await runner.run(profileRaw, {
-      message: prompt,
-      sessionId: opts.session,
-      sessionName: opts.sessionName,
-      fromUser: opts.from,
-      streaming: opts.stream,
-      cwd: opts.cwd,
-      extraEnv: opts.env,
-      timeoutSecs: opts.timeout,
-      onPartial: (text) => {
-        if (opts.verbose) process.stderr.write(`AGENT_PARTIAL:${JSON.stringify(text)}\n`);
-      },
-      onSession: (id) => {
-        if (opts.verbose) process.stderr.write(`AGENT_SESSION:${id}\n`);
-      },
-      onError: (msg) => {
-        if (opts.verbose) process.stderr.write(`AGENT_ERROR:${JSON.stringify(msg)}\n`);
-      },
-      onStderr: (line) => {
-        if (opts.verbose) process.stderr.write(`[agent stderr] ${line}\n`);
-      },
-    });
-
-    // Print final reply body to stdout.
-    if (r.reply) {
-      process.stdout.write(r.reply);
-      if (!r.reply.endsWith('\n')) process.stdout.write('\n');
-    }
-
-    // Final session id on stderr (for shell capture).
-    if (r.sessionId) {
-      process.stderr.write(`agentproc:session:${r.sessionId}\n`);
-    }
-
-    if (r.error) {
-      process.stderr.write(`agentproc:error:${r.error}\n`);
-    }
-
-    process.exit(r.exitCode === 0 ? 0 : 1);
+    return await runAgent(opts.profile, opts);
   } catch (e) {
     process.stderr.write(`error: ${e.message}\n`);
-    process.exit(1);
+    return 1;
   }
 }
 

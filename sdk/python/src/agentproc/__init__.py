@@ -47,7 +47,34 @@ __all__ = [
     "load_history",
     "append_history",
     "session_file_path",
+    "__version__",
 ]
+
+
+def _read_version() -> str:
+    try:
+        from importlib.metadata import version, PackageNotFoundError
+        try:
+            return version("agentproc")
+        except PackageNotFoundError:
+            pass
+    except ImportError:
+        pass
+    try:
+        from pathlib import Path
+        toml_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        if toml_path.exists():
+            import re
+            text = toml_path.read_text(encoding="utf-8")
+            m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+            if m:
+                return m.group(1)
+    except Exception:
+        pass
+    return "0.0.0+unknown"
+
+
+__version__ = _read_version()
 
 PROTOCOL_VERSION = "0.1"
 

@@ -1,8 +1,32 @@
 # Profile Hub
 
-主流 AI agent CLI 的开箱即用 AgentProc profile 合集。每个 profile 都把一个 CLI 包装成符合 AgentProc 协议的 agent，任何遵循协议的 bridge 都能直接驱动——不依赖任何 bridge 专属快捷方式，没有魔法。
+Hub 是一组开箱即用的 AgentProc profile，覆盖主流 AI agent CLI。**不用 clone 仓库、不用复制文件、不用改 YAML**——`agentproc` CLI 按需从 GitHub 拉取 profile，本地缓存，直接运行。
 
-Hub 存放在仓库的 [`hub/`](https://github.com/jeffkit/agentproc/tree/main/hub) 目录下。本页是入口；单个 profile 的详细文档直接在 GitHub 上阅读。
+## 一行命令上手
+
+```bash
+# 挑一个 profile、指定一个目录、就跑
+cd ~/projects/my-app
+agentproc hub run claude-code -p "what is this codebase?"
+```
+
+就是这样。CLI 会自动：
+
+1. 首次使用时从 GitHub 拉 `hub/claude-code/`
+2. 缓存到 `~/.agentproc/cache/hub/claude-code/`（24 小时 TTL）
+3. 用你的当前目录作 `cwd`
+4. 转发 `AGENT_MESSAGE` 和你传的任何 `--env`
+
+## 全部 hub 命令
+
+| 命令 | 用途 |
+|------|------|
+| `agentproc hub list` | 列出 hub 里所有 profile |
+| `agentproc hub show <name>` | 显示某个 profile 的 README |
+| `agentproc hub run <name> [opts]` | 拉取（必要时）并运行某个 profile |
+| `agentproc hub install <name>` | 把 profile 复制到当前目录（便于自己改） |
+
+加 `--refresh` 强制从 GitHub 重新拉取。
 
 ## 现有 profile
 
@@ -14,71 +38,74 @@ Hub 存放在仓库的 [`hub/`](https://github.com/jeffkit/agentproc/tree/main/h
 | [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | （无 CLI） | official | Python · Node · Bash |
 
-`测试状态` 含义：
+`tested` 含义：
+- **official** — 维护者按 CLI 官方行为验证过
+- **community** — 社区提交且报告可用，但维护者未端到端验证
+- **unverified** — 提交时未验证
 
-- **official** — AgentProc 维护者按 CLI 的官方行为验证过。
-- **community** — 社区提交且报告可用，但维护者未端到端验证。
-- **unverified** — 提交时未验证。
+## 示例
 
-## 快速开始
-
-1. 从上表挑一个 profile，在 GitHub 上打开它的 README。
-2. 把 `profile.yaml` 和一个 bridge 脚本（`bridge.py` 或 `bridge.js`）复制到你的项目里。
-3. 在 profile 里调整 `cwd:` 和必要的鉴权环境变量。
-4. 把你的消息 bridge 指向这个 profile YAML。
-
-例如要接入 `claude-code`：
+### 浏览和试用
 
 ```bash
-cp hub/claude-code/profile.yaml     ./profile.yaml
-cp hub/claude-code/bridge.py        ./bridge.py
-# 修改 profile.yaml 里的 cwd: 指向你的项目
+# 看看有什么
+agentproc hub list
+
+# 读它的文档
+agentproc hub show claude-code
+
+# 跑冒烟测试（不需要 API key）
+agentproc hub run echo-agent -p "hello"
+# → You said: hello
 ```
 
-本地自检（不需要消息 bridge）：
+### 用真实的 CLI
 
 ```bash
-AGENT_MESSAGE="hello" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="1" \
-ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-python3 bridge.py
+cd ~/projects/my-app
+
+# claude-code
+agentproc hub run claude-code \
+  -p "explain this codebase" \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+
+# codex
+agentproc hub run codex \
+  -p "find the bug in src/auth.py" \
+  --env OPENAI_API_KEY="$OPENAI_API_KEY"
+
+# codebuddy（用它自己的登录）
+agentproc hub run codebuddy -p "refactor this function"
 ```
 
-预期输出：
+### 多轮对话
 
-```
-AGENT_PARTIAL:"Hi! How can I help?"
-AGENT_SESSION:13c2f6ec-1f97-42c4-be9e-9475129e243c
-```
-
-## 一个 profile 里有什么？
-
-```
-hub/<name>/
-├── profile.yaml         # AgentProc P0 profile（用 command:，不用 type:）
-├── bridge.py            # Python bridge 脚本
-├── bridge.js            # Node.js bridge 脚本
-└── README.md            # 安装、用法、注意事项
+```bash
+agentproc hub run claude-code -p "what files are in this dir?" 2>/tmp/err.log
+session=$(grep '^agentproc:session:' /tmp/err.log | cut -d: -f3)
+agentproc hub run claude-code -p "now read src/main.py" --session "$session"
 ```
 
-bridge 脚本是真正把目标 CLI 的输出（NDJSON、纯文本等）翻译成 AgentProc 哨兵前缀 stdout 协议的部分。Python 和 Node 两个版本保持对等——挑适合你技术栈的。
+### 安装到本地编辑
 
-## 设计原则
+如果想长期持有一个 profile 并自己改：
 
-- **仅 P0。** 不使用 `type:` 快捷方式、不使用 `routing:` 块、不依赖任何 bridge 扩展。任何遵循协议的 bridge 都能跑。
-- **一个目录一个 profile。** 想要多个变体（不同模型、不同提示词），复制并重命名目录即可。
-- **双语言 bridge。** Python 和 Node 都维护到对等。Bash 仅 `echo-agent` 用（它是参考实现，不是真正的 CLI 包装）。
-- **不含密钥。** Profile YAML 通过环境变量引用（`${ANTHROPIC_API_KEY}`），从不内嵌凭证。
+```bash
+agentproc hub install claude-code
+# → installed to: ./claude-code/
 
-## 贡献新 profile
+# 随意编辑 ./claude-code/profile.yaml
+agentproc --profile ./claude-code/profile.yaml -p "hi" --cwd ./claude-code
+```
 
-1. 创建 `hub/<cli-name>/` 目录，包含 `profile.yaml`、`bridge.py`、`bridge.js`、`README.md`。
-2. 在 profile 元数据里设置 `tested: unverified`，除非你已端到端验证过。
-3. 在 [`hub/README.md`](https://github.com/jeffkit/agentproc/blob/main/hub/README.md) 的表格里加一行。
-4. 提交 PR。维护者会评审、必要时实测，并相应升级 `tested` 等级。
+## 缓存机制
 
-仓库范围的约定见 [`CONTRIBUTING.md`](https://github.com/jeffkit/agentproc/blob/main/CONTRIBUTING.md)。
+- 缓存位置：`~/.agentproc/cache/hub/<name>/`
+- TTL：24 小时（拉取后这段时间内直接用本地副本，不联网）
+- 强制刷新：任何 hub 命令加 `--refresh`
+- 每个 profile 是平铺目录：`profile.yaml`、`bridge.py`、`bridge.js`、`README.md`
+
+CLI 用 GitHub 的 git-tree API（1 个请求拿到全部文件清单）+ raw.githubusercontent.com（无 rate limit），所以未鉴权用户也能保持流畅。
 
 ## Profile schema
 
@@ -90,20 +117,31 @@ cli_install: |                  # CLI 的安装方法
   npm install -g ...
 agentproc:                      # 真正的 AgentProc P0 profile
   command: python3 ./bridge.py  # 或：node ./bridge.js
-  cwd: ~/your-project
+  cwd: ~/your-project           # CLI 的 --cwd 会覆盖这个
   timeout_secs: 600
   streaming: true
   env:
-    API_KEY: "${API_KEY}"
+    API_KEY: "${API_KEY}"       # 运行时解析的环境变量引用
 tested: official | community | unverified
 maintainer: <github-handle>
 tags: [<分类>, ...]
-notes: |                        # 可选：注意事项、坑
+notes: |                        # 可选：注意事项
   ...
 ```
 
+Hub profile 是**纯 AgentProc P0**——不使用 bridge 专属的 `type:` 快捷方式。任何遵循协议的 bridge 都能驱动它们。
+
+## 贡献新 profile
+
+1. 在 [agentproc 仓库](https://github.com/jeffkit/agentproc)里创建 `hub/<cli-name>/` 目录，包含 `profile.yaml`、`bridge.py`、`bridge.js`、`README.md`。
+2. 设置 `tested: unverified`，除非你已端到端验证过。
+3. 在 [`hub/README.md`](https://github.com/jeffkit/agentproc/blob/main/hub/README.md) 的表格里加一行。
+4. 提交 PR。维护者会评审、必要时实测，并相应升级 `tested` 等级。
+
+仓库范围的约定见 [`CONTRIBUTING.md`](https://github.com/jeffkit/agentproc/blob/main/CONTRIBUTING.md)。
+
 ## 与 ilink-hub-bridge 的关系
 
-AgentProc 脱胎于 [`ilink-hub-bridge`](https://github.com/jeffkit)——一个带内置 `type:` 处理器（支持 `claude-code`、`cursor`、`codebuddy-code` 等）的消息平台 bridge。在实际生产使用中，我们意识到 bridge↔agent 的协议本身可以独立复用——于是有了 AgentProc。
+AgentProc 脱胎于 [`ilink-hub-bridge`](https://github.com/jeffkit)——一个带内置 `type:` 处理器（支持 `claude-code`、`cursor`、`codebuddy-code` 等）的消息平台 bridge。在实际生产使用中我们意识到 bridge↔agent 协议本身可以独立复用，于是有了 AgentProc。
 
-Hub 中的 profile 是那些 `type:` 处理器内部逻辑的**纯 P0 重写**。它们存在的意义是：让任何 bridge 都能驱动 `claude` / `codex` / `codebuddy` / `agy`，而不需要自己实现 type 处理器。如果你的 bridge 已经有 `type:` 快捷方式，你不需要这些 profile。
+Hub 中的 profile 是那些 `type:` 处理器内部逻辑的**纯 P0 重写**。它们适用于任何 conformant bridge，不仅是某个特定实现。

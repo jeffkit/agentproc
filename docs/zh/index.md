@@ -57,39 +57,35 @@ agentproc --version
 # agentproc 0.2.0 (protocol 0.1)
 ```
 
-## ② 选一个 profile
-
-浏览 [Profile Hub](/zh/hub/)——每个 profile 是一个目录，包含 `profile.yaml`、bridge 脚本和 README。官方首批 5 个 profile：
-
-| Profile | CLI | 状态 |
-|---------|-----|------|
-| [claude-code](https://github.com/jeffkit/agentproc/tree/main/hub/claude-code) | `claude`（Anthropic） | official |
-| [codex](https://github.com/jeffkit/agentproc/tree/main/hub/codex) | `codex`（OpenAI） | official |
-| [codebuddy](https://github.com/jeffkit/agentproc/tree/main/hub/codebuddy) | `codebuddy`（腾讯） | official |
-| [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community |
-| [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | （hello world） | official |
-
-## ③ 跑起来
-
-先 clone 仓库，用 `echo-agent` 试一下（不需要 API key）：
+## ② 浏览 hub
 
 ```bash
-git clone https://github.com/jeffkit/agentproc
-cd agentproc
+agentproc hub list
+#   claude-code   official    Connect the claude CLI (Anthropic) as an AgentProc agent
+#   codex         official    Connect the codex CLI (OpenAI) as an AgentProc agent
+#   codebuddy     official    Connect the codebuddy CLI (Tencent) as an AgentProc agent
+#   agy           community   Connect the agy CLI as an AgentProc agent
+#   echo-agent    official    Minimal hello-world agent
+```
 
-agentproc --profile hub/echo-agent/profile.yaml \
-          --prompt "hello" \
-          --cwd hub/echo-agent
+[Profile Hub](/zh/hub/) 收录了主流 AI CLI 的开箱即用 profile。不用 clone、不用复制、不用改 YAML——CLI 按需拉取并缓存。
+
+## ③ 一行命令跑起来
+
+先跑冒烟测试（不需要 API key）：
+
+```bash
+agentproc hub run echo-agent -p "hello"
 # → You said: hello
 ```
 
-然后跑真实的 CLI。以 `claude-code` 为例，支持流式输出和多轮会话续接：
+然后跑真实的。`claude-code` 支持流式输出和多轮会话续接：
 
 ```bash
-agentproc --profile hub/claude-code/profile.yaml \
-          --prompt "what is this codebase?" \
-          --cwd ~/projects/my-app \
-          --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+cd ~/projects/my-app
+agentproc hub run claude-code \
+  -p "what is this codebase?" \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 ```
 
 stderr 上会实时看到协议行，stdout 是最终回复：
@@ -103,11 +99,10 @@ agentproc:session:13c2f6ec-1f97-42c4-be9e-9475129e243c
 捕获 session id，继续对话：
 
 ```bash
-agentproc --profile hub/claude-code/profile.yaml \
-          --prompt "tell me about the auth module" \
-          --cwd ~/projects/my-app \
-          --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
-          --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
+agentproc hub run claude-code \
+  -p "tell me about the auth module" \
+  --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
 ## ④ 接到你的消息平台
