@@ -1,0 +1,20 @@
+{
+  "name": "@agentproc/sdk",
+  "version": "0.1.0",
+  "description": "AgentProc Protocol SDK — connect any Agent CLI to a messaging platform",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "scripts": {
+    "test": "node --test src/index.test.js"
+  },
+  "keywords": ["agentproc", "agent", "bridge", "protocol", "cli", "ai"],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jeffkit/agentproc.git"
+  },
+  "homepage": "https://agentproc.dev"
+}

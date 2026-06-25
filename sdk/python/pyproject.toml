@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentproc"
+version = "0.1.0"
+description = "AgentProc SDK — connect any Agent CLI to a messaging platform with a single function"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/jeffkit/agentproc"
+Documentation = "https://agentproc.dev"
+Repository = "https://github.com/jeffkit/agentproc"
+Issues = "https://github.com/jeffkit/agentproc/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
