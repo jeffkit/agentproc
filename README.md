@@ -2,7 +2,7 @@
 
 A minimal protocol for connecting any Agent CLI to a messaging platform through a process-based interface.
 
-**[Documentation](https://jeffkit.github.io/agentproc/) · **[中文文档](https://jeffkit.github.io/agentproc/zh/) · **[Protocol Spec](./spec/protocol.md)**
+**[Documentation](https://agentproc.dev/) · **[中文文档](https://agentproc.dev/zh/) · **[Protocol Spec](./spec/protocol.md)**
 
 ---
 

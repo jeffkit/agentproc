@@ -5,7 +5,7 @@ export default defineConfig({
   description: 'A minimal protocol for connecting any Agent CLI to a messaging platform',
   lang: 'en-US',
 
-  base: '/agentproc/',
+  base: '/',
 
   locales: {
     root: {
