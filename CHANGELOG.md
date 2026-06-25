@@ -2,6 +2,12 @@
 
 All notable changes to AgentProc are documented here. The protocol version and the SDK package versions are kept in lockstep.
 
+## 0.1.1 — 2026-06-25
+
+Republish to align the PyPI release with npm. The initial 0.1.0 tag fired the publish workflow before tests were wired into CI; the Python package was uploaded to PyPI from a pre-revision commit and never received the protocol/SDK improvements. npm 0.1.0 was published from the correct tree.
+
+**No protocol or API changes vs 0.1.0.** Use 0.1.1+ for both SDKs.
+
 ## 0.1.0 — 2026-06-25
 
 First public draft of the protocol and SDKs.
