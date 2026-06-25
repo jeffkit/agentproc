@@ -2,6 +2,30 @@
 
 All notable changes to AgentProc are documented here. The protocol version and the SDK package versions are kept in lockstep.
 
+## 0.2.1 — 2026-06-25
+
+### Python CLI
+
+The Python package now ships the `agentproc` CLI alongside the SDK. After `pip install agentproc` (or `pipx install agentproc`), the `agentproc` command is available — same flags, same output semantics as the Node CLI.
+
+- New `sdk/python/src/agentproc/runner.py` — the canonical bridge-side engine in Python (mirrors `sdk/node/src/runner.js`)
+- New `sdk/python/src/agentproc/cli.py` — argparse-based CLI entry point
+- `[project.scripts] agentproc = "agentproc.cli:main"` added to `pyproject.toml`
+- 60 new tests in `tests/test_runner.py` (parity with Node's `runner.test.js`)
+
+Both language implementations stay at parity: same protocol behavior, same exit codes, same CLI flags. Pick whichever language fits your stack.
+
+### Docs: homepage onboarding flow
+
+The homepage (`/` and `/zh/`) now has a 4-step "Get started in 5 minutes" guide:
+
+1. **Install** — npm / pipx / pip in a code-group
+2. **Pick a profile** — links to the 5 official hub profiles
+3. **Run it** — echo-agent smoke test, then a real claude-code call with session capture
+4. **Connect to messaging** — a ~30-line Node.js bridge example showing how AgentProc fits between your platform and the agent
+
+Feature cards updated to lead with concrete value (5-minute setup, supported CLIs, any platform, open spec) instead of protocol mechanics.
+
 ## 0.2.0 — 2026-06-25
 
 ### agentproc CLI
