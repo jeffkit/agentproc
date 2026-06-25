@@ -3,13 +3,13 @@
 ## Install
 
 ```bash
-npm install @agentproc/sdk
+npm install agentproc
 ```
 
 ## Basic usage
 
 ```js
-const { createProfile } = require('@agentproc/sdk');
+const { createProfile } = require('agentproc');
 
 createProfile(async (ctx) => {
   // ctx.message           — user message text
@@ -60,7 +60,7 @@ createProfile(async (ctx) => {
 Surface a user-readable error via `AGENT_ERROR:`. Two equivalent forms:
 
 ```js
-const { createProfile, protocolError } = require('@agentproc/sdk');
+const { createProfile, protocolError } = require('agentproc');
 
 createProfile(async (ctx) => {
   // Form 1: call sendError, then return / throw
@@ -85,7 +85,7 @@ createProfile(async (ctx) => {
 When the bridge sets `AGENT_ATTACHMENTS`, the SDK parses it into `ctx.attachments`:
 
 ```js
-const { createProfile } = require('@agentproc/sdk');
+const { createProfile } = require('agentproc');
 
 createProfile(async (ctx) => {
   // Prefer the multi-attachment list when present, fall back to single vars
@@ -102,7 +102,7 @@ createProfile(async (ctx) => {
 ## Conversation history
 
 ```js
-const { createProfile, loadHistory, appendHistory } = require('@agentproc/sdk');
+const { createProfile, loadHistory, appendHistory } = require('agentproc');
 
 createProfile(async ({ message, sessionId }) => {
   const history = loadHistory(sessionId);

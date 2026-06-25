@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Tests for @agentproc/sdk.
+ * Tests for agentproc.
  *
  * Run with: `node --test src/index.test.js`
  *
