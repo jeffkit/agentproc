@@ -4,14 +4,16 @@ agentproc — AgentProc Protocol SDK (Python)
 Implements the AgentProc P0 protocol so you can write a single async handler
 instead of manually reading env vars and formatting stdout.
 
-Protocol contract:
+Protocol contract (spec/protocol.md, v0.1.0):
   Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,
-                     AGENT_FROM_USER, AGENT_STREAMING
-  Output — stdout:
-             optional first line  "AGENT_SESSION:<uuid>"
-             optional partial lines "AGENT_PARTIAL:<json-string>"
-             remaining lines = final reply text
-  Exit   — 0 = success, non-zero = error
+                     AGENT_FROM_USER, AGENT_STREAMING, AGENT_PROTOCOL_VERSION,
+                     AGENT_IMAGE_URL, AGENT_FILE_URL, AGENT_ATTACHMENTS (draft)
+  Output — stdout (sentinel-prefixed lines):
+             AGENT_SESSION:<opaque-id>     — declare session id (last wins)
+             AGENT_PARTIAL:<json-string>   — streaming chunk
+             AGENT_ERROR:<json-string>     — error message to forward to user
+             everything else               = final reply body
+  Exit   — 0 success, 1 error, 124 timeout, 130 SIGINT, 143 SIGTERM
 
 Example::
 
@@ -33,21 +35,43 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Union
+from typing import Awaitable, Callable, List, Optional, Sequence, Union
 
 __all__ = [
     "AgentContext",
     "AgentResult",
+    "Attachment",
+    "HistoryEntry",
+    "ProtocolError",
     "create_profile",
     "load_history",
     "append_history",
-    "HistoryEntry",
+    "session_file_path",
 ]
 
+PROTOCOL_VERSION = "0.1"
 
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
+
+class ProtocolError(Exception):
+    """Raised by the handler to signal an error that should reach the user.
+
+    The SDK emits an ``AGENT_ERROR:`` line with the message and exits non-zero.
+    """
+
+
+@dataclass
+class Attachment:
+    """A single attachment on the user message (draft, multi-attachment)."""
+
+    type: str
+    """Kind of attachment: ``image`` | ``file`` | ``audio`` | ``video``."""
+
+    url: str
+    """URL the bridge has made available for fetching the attachment."""
+
+    name: str = ""
+    """Optional filename or display name."""
+
 
 @dataclass
 class AgentContext:
@@ -57,7 +81,7 @@ class AgentContext:
     """User message text (AGENT_MESSAGE)."""
 
     session_id: str
-    """Session UUID from the previous turn (AGENT_SESSION_ID). Empty = new session."""
+    """Session ID from the previous turn (AGENT_SESSION_ID). Empty = new session."""
 
     session_name: str
     """Human-readable session name (AGENT_SESSION_NAME)."""
@@ -68,11 +92,17 @@ class AgentContext:
     streaming: bool
     """Whether the bridge expects streaming output (AGENT_STREAMING == "1")."""
 
+    protocol_version: str
+    """Protocol version the bridge implements (AGENT_PROTOCOL_VERSION)."""
+
     image_url: str
     """Image attachment URL (AGENT_IMAGE_URL). Empty if no image."""
 
     file_url: str
     """File attachment URL (AGENT_FILE_URL). Empty if no file."""
+
+    attachments: List[Attachment]
+    """Parsed attachments from AGENT_ATTACHMENTS (draft). Empty list when unset."""
 
     async def send_partial(self, text: str) -> None:
         """Send a streaming chunk to the user immediately.
@@ -88,6 +118,20 @@ class AgentContext:
         sys.stdout.write(line)
         sys.stdout.flush()
 
+    async def send_error(self, text: str) -> None:
+        """Send an error message to the user.
+
+        Writes an ``AGENT_ERROR:<json>`` line to stdout and flushes.
+        Honored regardless of ``streaming`` mode. After calling this, the
+        handler should typically raise ProtocolError or return — any reply
+        body produced alongside will be discarded by the bridge.
+        """
+        if not text:
+            return
+        line = f"AGENT_ERROR:{json.dumps(text, ensure_ascii=False)}\n"
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
 
 @dataclass
 class AgentResult:
@@ -97,7 +141,7 @@ class AgentResult:
     """Final reply text. Can be empty if all content was sent via send_partial."""
 
     session_id: str = ""
-    """CLI session UUID to persist. Bridge will pass it back next turn as AGENT_SESSION_ID."""
+    """Session ID to persist. Bridge will pass it back next turn as AGENT_SESSION_ID."""
 
 
 @dataclass
@@ -112,6 +156,11 @@ class HistoryEntry:
 # ---------------------------------------------------------------------------
 
 def session_file_path(session_id: str, base_dir: Optional[str] = None) -> Path:
+    """Resolve the JSONL history file path for a session.
+
+    Returns the path even if the file does not yet exist. Raises ``ValueError``
+    when ``session_id`` is empty — callers should guard with ``if session_id``.
+    """
     if not session_id:
         raise ValueError("session_id must be non-empty")
     root = Path(base_dir) if base_dir else Path.home() / ".agentproc" / "sessions"
@@ -120,9 +169,14 @@ def session_file_path(session_id: str, base_dir: Optional[str] = None) -> Path:
 
 
 def load_history(session_id: str, base_dir: Optional[str] = None) -> List[HistoryEntry]:
+    """Load conversation history for a session. Returns ``[]`` if no session
+    or no file exists."""
     if not session_id:
         return []
-    path = session_file_path(session_id, base_dir)
+    try:
+        path = session_file_path(session_id, base_dir)
+    except ValueError:
+        return []
     if not path.exists():
         return []
     entries: List[HistoryEntry] = []
@@ -132,28 +186,72 @@ def load_history(session_id: str, base_dir: Optional[str] = None) -> List[Histor
             continue
         try:
             d = json.loads(line)
-            entries.append(HistoryEntry(
-                role=d.get("role", ""),
-                content=d.get("content", ""),
-                timestamp=d.get("timestamp", ""),
-            ))
         except json.JSONDecodeError:
             continue
+        entries.append(HistoryEntry(
+            role=d.get("role", ""),
+            content=d.get("content", ""),
+            timestamp=d.get("timestamp", ""),
+        ))
     return entries
 
 
 def append_history(
     session_id: str,
-    entries: List[HistoryEntry],
+    entries: Sequence[HistoryEntry],
     base_dir: Optional[str] = None,
 ) -> None:
+    """Append entries to a session's JSONL history file. No-op if no session_id."""
     if not session_id or not entries:
         return
     path = session_file_path(session_id, base_dir)
     with path.open("a", encoding="utf-8") as f:
         for e in entries:
-            f.write(json.dumps({"role": e.role, "content": e.content, "timestamp": e.timestamp}, ensure_ascii=False))
+            f.write(json.dumps(
+                {"role": e.role, "content": e.content, "timestamp": e.timestamp},
+                ensure_ascii=False,
+            ))
             f.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Env parsing helpers
+# ---------------------------------------------------------------------------
+
+def _parse_attachments(raw: str) -> List[Attachment]:
+    """Parse AGENT_ATTACHMENTS JSON. Returns [] on parse failure."""
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(items, list):
+        return []
+    out: List[Attachment] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        t = str(it.get("type", ""))
+        u = str(it.get("url", ""))
+        if not t or not u:
+            continue
+        out.append(Attachment(type=t, url=u, name=str(it.get("name", "") or "")))
+    return out
+
+
+def _context_from_env() -> AgentContext:
+    return AgentContext(
+        message=os.environ.get("AGENT_MESSAGE", ""),
+        session_id=os.environ.get("AGENT_SESSION_ID", ""),
+        session_name=os.environ.get("AGENT_SESSION_NAME", "default"),
+        from_user=os.environ.get("AGENT_FROM_USER", ""),
+        streaming=os.environ.get("AGENT_STREAMING", "1") != "0",
+        protocol_version=os.environ.get("AGENT_PROTOCOL_VERSION", PROTOCOL_VERSION),
+        image_url=os.environ.get("AGENT_IMAGE_URL", ""),
+        file_url=os.environ.get("AGENT_FILE_URL", ""),
+        attachments=_parse_attachments(os.environ.get("AGENT_ATTACHMENTS", "")),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -171,34 +269,39 @@ def create_profile(handler: Handler) -> None:
     and then exits the process.
 
     Args:
-        handler: An async function that takes an AgentContext and returns either
-                 a plain string or an AgentResult.
+        handler: An async function taking an :class:`AgentContext` and returning
+            either a plain string (treated as ``AgentResult(response=...)``)
+            or an :class:`AgentResult`.
     """
-    ctx = AgentContext(
-        message=os.environ.get("AGENT_MESSAGE", ""),
-        session_id=os.environ.get("AGENT_SESSION_ID", ""),
-        session_name=os.environ.get("AGENT_SESSION_NAME", "default"),
-        from_user=os.environ.get("AGENT_FROM_USER", ""),
-        streaming=os.environ.get("AGENT_STREAMING", "1") != "0",
-        image_url=os.environ.get("AGENT_IMAGE_URL", ""),
-        file_url=os.environ.get("AGENT_FILE_URL", ""),
-    )
+    ctx = _context_from_env()
 
     try:
         result = asyncio.run(handler(ctx))
+    except ProtocolError as e:
+        # Handler already-signaled error surfaced via exception.
+        sys.stdout.write(
+            f"AGENT_ERROR:{json.dumps(str(e) or 'unknown error', ensure_ascii=False)}\n"
+        )
+        sys.stdout.flush()
+        sys.exit(1)
     except Exception as e:
         sys.stderr.write(f"[agentproc] handler error: {e}\n")
         sys.exit(1)
 
+    # Handler may return None when it has already signaled everything via
+    # send_partial / send_error. Treat None as an empty AgentResult.
+    if result is None:
+        sys.exit(0)
+
     if isinstance(result, str):
         result = AgentResult(response=result)
 
-    # Emit session line first if we have one
+    # session line — emitted last in the typical "I just learned it" flow,
+    # but the spec says last wins, so emitting it at the end is correct.
     if result.session_id:
         sys.stdout.write(f"AGENT_SESSION:{result.session_id}\n")
         sys.stdout.flush()
 
-    # Emit final reply body
     if result.response:
         sys.stdout.write(result.response)
         if not result.response.endswith("\n"):

@@ -37,6 +37,27 @@ The bridge injects context as environment variables before starting your process
 - **Not platform-specific.** AgentProc doesn't know about WeChat, Slack, or any specific messaging app.
 - **Not opinionated about AI.** You can call Claude, GPT, Gemini, a local model, or a simple rule-based system.
 
-## Comparison with MCP
+## Comparison with related protocols
 
-[MCP (Model Context Protocol)](https://modelcontextprotocol.io) defines how AI models call external tools. AgentProc defines how a messaging platform calls an AI agent. They solve different problems and complement each other — your AgentProc script can internally use MCP tools.
+AgentProc occupies a specific niche. The neighboring protocols are similar in *shape* (subprocess + stdio) but different in *purpose*.
+
+### MCP — Model Context Protocol
+
+[MCP](https://modelcontextprotocol.io) connects an LLM application to **tools and data sources** over JSON-RPC. The direction is **reversed**: in MCP, the AI is the client and the tool provider is the subprocess; in AgentProc, the bridge is the client and the AI wrapper is the subprocess. They compose naturally — your AgentProc agent may internally use MCP tools.
+
+### ACP — Agent Client Protocol
+
+[ACP](https://agentclientprotocol.com) (Zed Industries) connects a code editor to an AI coding agent over long-lived, bidirectional JSON-RPC. It assumes an interactive IDE session with tool calls, file diffs, and mode switching. AgentProc assumes a single chat turn per process invocation. Use ACP if you're building an IDE; use AgentProc if you're bridging a chat bot to a CLI.
+
+### NDJSON / JSON Lines
+
+[NDJSON](https://jsonlines.org) is one JSON object per line — the wire format used internally by Claude Code, Codex, Gemini CLI streaming, and MCP. It's an alternative to AgentProc's sentinel-prefixed plain text. The trade-off: NDJSON forces every emitted line to be valid JSON, which makes `echo "You said: $AGENT_MESSAGE"` an invalid agent. AgentProc opts for sentinel lines so the common case stays trivial; the cost is one disambiguation rule (reply body must not start with `AGENT_*:`).
+
+### What AgentProc is *not*
+
+- **Not a bot framework.** Hubot, Errbot, BotKit, and Microsoft Bot Framework operate on the *consumer* side of the bridge (in-process adapters, HTTP connectors). AgentProc defines the contract *between* the bridge and the agent, and is orthogonal to those frameworks.
+- **Not an agent-to-agent protocol.** A2A / AGNTCY solve a different problem (agents talking to each other).
+- **Not an IDE protocol.** Use ACP for that.
+- **Not a tool protocol.** Use MCP for that.
+
+See the [full spec](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md) for design rationale and additional comparisons with SSE and LSP.

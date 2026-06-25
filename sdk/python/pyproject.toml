@@ -13,7 +13,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/jeffkit/agentproc"
-Documentation = "https://agentproc.dev"
+Documentation = "https://jeffkit.github.io/agentproc/"
 Repository = "https://github.com/jeffkit/agentproc"
 Issues = "https://github.com/jeffkit/agentproc/issues"
 
