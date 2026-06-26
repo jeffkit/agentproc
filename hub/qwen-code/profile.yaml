@@ -1,0 +1,26 @@
+name: qwen-code
+description: Connect the qwen CLI (Alibaba Qwen Code) as an AgentProc agent with streaming and session continuity
+cli: qwen
+cli_install: |
+  npm install -g @qwen-code/qwen-code
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
+  timeout_secs: 600
+  streaming: true
+  env:
+    QWEN_API_KEY: "${QWEN_API_KEY}"
+    # Alternative auth paths:
+    #   DASHSCOPE_API_KEY — Alibaba Cloud DashScope
+    #   OPENAI_API_KEY    — any OpenAI-compatible endpoint via Qwen's settings
+    # Optional overrides:
+    # QWEN_MODEL: "qwen3-coder-plus"
+tested: community
+maintainer: jeffkit
+tags: [coding, alibaba, ai]
+notes: |
+  Qwen Code is a fork of gemini-cli, so its `--output-format stream-json` schema
+  is expected to match gemini's (init/message/error/result events). The bridge
+  reuses the gemini-cli parser. Marked `community` because QwenLM's published
+  stream-json schema has not been independently verified end-to-end against
+  this bridge. Please report drift at https://github.com/jeffkit/agentproc/issues.

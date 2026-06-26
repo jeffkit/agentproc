@@ -2,6 +2,114 @@
 
 All notable changes to AgentProc are documented here. The protocol version and the SDK package versions are kept in lockstep.
 
+## Unreleased
+
+### Hub: two new profiles + shared bridge module
+
+Added two new NDJSON-based hub profiles and extracted the duplicated bridge logic into a shared module.
+
+**New profiles:**
+
+| Profile | CLI | Tested |
+|---------|-----|--------|
+| `gemini-cli` | `gemini` (Google Gemini CLI) | official |
+| `cursor` | `agent` (Cursor Agent) | official |
+| `qwen-code` | `qwen` (Alibaba Qwen Code) | community |
+
+`gemini-cli` was verified end-to-end against the CLI's published `stream-json` event schema (`init` / `message` / `error` / `result`) by reading the source at `google-gemini/gemini-cli/packages/core/src/output/types.ts`. Session id is emitted up-front in the `init` event (unlike claude/codex where it appears in the terminal `result` event).
+
+`cursor` wraps the Cursor Agent CLI (binary name `agent`, not `cursor` — the binary is a standalone download separate from the Cursor IDE). Verified end-to-end against the installed CLI (2026.06.24): schema is claude-code-compatible (`system/init` → session_id, `assistant` content blocks → text deltas, `result` → session_id + result text). Cursor's `--stream-partial-output` flag emits N delta chunks AND THEN a final `assistant` event with the full assembled text; the bridge tracks accumulated emitted text and drops the duplicate via `make_parse_event()` closure state. Multi-turn resume via `--resume <chatId>` confirmed working.
+
+`qwen-code` is a fork of gemini-cli; its `--output-format stream-json` flag set matches gemini's (`-p / -o / -r / -y`), and the bridge reuses the gemini-cli parser. Marked `community` because the published stream-json schema was not verified against a real `qwen` invocation — please report drift.
+
+**Shared bridge module (`hub/_shared/`):**
+
+Three of the existing bridges (`claude-code`, `codex`, `codebuddy`) shared ~80% identical logic: subprocess spawn, NDJSON line reading, JSON decoding, AGENT_* emission, exit-code mapping. Extracted to:
+
+- `hub/_shared/stream_utils.py` — `EventResult` dataclass + `run_bridge()` / `main_entry()`
+- `hub/_shared/stream_utils.js` — `runBridge()` + emit helpers
+
+Each bridge is now ~30 lines supplying two functions: `build_args()` (CLI-specific) and `parse_event()` (event-shape-specific). The shared module handles subprocess lifecycle, line reading, dedup, and the streaming-vs-non-streaming emission policy.
+
+**New `partial_text` vs `final_text` split in `EventResult`:**
+
+The previous bridges had a latent duplicate-emission bug: when a CLI streams partial chunks AND THEN emits a `result` event containing the full assembled text (the common Claude / CodeBuddy pattern), the user received the text twice. The shared module fixes this by distinguishing incremental `partial_text` (streamed live) from terminal `final_text` (emitted only in non-streaming mode, or as fallback when nothing was streamed). See `hub/_shared/README.md`.
+
+**Other:**
+
+- Added a coverage matrix to `hub/README.md` tracking AgentProc Hub's coverage of the [ACP Registry](https://agentclientprotocol.com/get-started/registry) agent list. Five ACP-listed agents are covered (4 official, 1 community); seven are explicitly out of scope with documented reasons (Cursor ships inside its app, Goose is cargo-install, Copilot's JSONL schema is undocumented, Junie/Cline/GLM-Agent have no standalone CLI to wrap).
+- Bridges that don't fit the NDJSON abstraction (`agy`, `echo-agent`) keep their bespoke implementations — `stream_utils` is opt-in.
+
+### No protocol changes
+
+Still protocol `0.1`. The new profiles and the shared module are bridge-side concerns; agents see the same env vars and emit the same stdout protocol.
+
+## 0.4.0 — 2026-06-26
+
+A round of UX and resilience fixes after running the CLI as a non-coder would. The 5-minute path now actually works on the first try. No protocol changes — `AGENT_*` env vars, stdout sentinels, and profile schema are all backward-compatible.
+
+### Highlights
+
+- **`agentproc hub run <name> -p "hi"` finally works.** The `-p` short flag was treated as a positional in the hub subcommand parser (it's `--profile` short form in the main parser), so the homepage's own smoke-test command failed. Fixed in both Node and Python CLIs.
+- **Hub fetch failures are now human-readable.** GitHub 403/404/network errors used to dump raw stack traces. They now raise a typed `HubError` with a remediation hint (set `GITHUB_TOKEN`, run against a local checkout, etc.).
+- **Hub profiles no longer ship a `cwd: ~/your-project` placeholder.** All 5 profiles switched to `command: python3 {{PROFILE_DIR}}/bridge.py` with cwd unset — `hub run` defaults cwd to your current directory, so the wrapped CLI operates on whatever project you're in. The `{{PROFILE_DIR}}` placeholder decouples bridge-script location from agent cwd.
+- **New troubleshooting page** at `/guide/troubleshooting` (EN + ZH) — decision tree for the most common errors.
+
+### CLI fixes (Node + Python parity)
+
+- `agentproc hub run echo-agent -p "hello"` works (was: "requires --prompt").
+- `agentproc hub run echo-agent --refresh` works (was: `unknown option: --refresh`).
+- `agentproc hub run --help` shows the hub help (was: "requires a profile name").
+- `agentproc hub runn ...` exits 2 (was: exit 0 — shell scripts couldn't detect the failure).
+- `agentproc hub install <name>` prints a "Next:" hint with the exact command to run.
+- Top-level `agentproc --help` now leads with the hub three-liner; `--profile` mode moved under "Advanced".
+
+### Runner resilience (Node + Python parity)
+
+- New `{{PROFILE_DIR}}` placeholder in `command`, `args`, `cwd`, and `env` values. Resolves to the profile's own directory.
+- Relative `cwd` now resolves against `{{PROFILE_DIR}}`, not the bridge process cwd.
+- `spawn ENOENT` errors get a tailored hint: "cwd does not exist" / "command not on PATH" / "argument file not found" / "permission denied".
+- When the wrapped interpreter (python/node/bash) writes "No such file" to its own stderr before exiting non-zero, the runner surfaces it as `AGENT_ERROR:"agent script not found: ..."` instead of letting raw text leak through.
+- stderr accumulated as a sliding 8KB window (last 8KB wins, not first) for post-mortem diagnosis.
+
+### Hub fetch resilience (Node + Python parity)
+
+- `HubError` class with `.hint` and `.status` fields.
+- `GITHUB_TOKEN` / `GH_TOKEN` env vars add `Authorization: Bearer <token>`, raising the rate limit from ~60/hr to ~5,000/hr.
+- 403/429 hint lists the rate-limit fix; 404 hint suggests `agentproc hub list`.
+- Typo'd profile names get a "Did you mean X?" suggestion via prefix match + edit distance (length-scaled threshold).
+
+### Hub profile schema
+
+The five hub profiles (`claude-code`, `codex`, `codebuddy`, `agy`, `echo-agent`) changed shape:
+
+```yaml
+# Before (0.3.0)
+agentproc:
+  command: python3 ./bridge.py
+  cwd: ~/your-project
+
+# After (0.4.0)
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd intentionally omitted: `hub run` defaults it to your current directory.
+```
+
+**Compatibility**: this is technically a breaking change for users who hand-edited hub profile templates. The hub design has always been "don't edit, use `hub run`," so impact is limited. Custom profiles (outside the hub) are unaffected — relative `./xxx` paths still work, they just resolve against `{{PROFILE_DIR}}` instead of process cwd.
+
+### Docs
+
+- New `/guide/troubleshooting` (EN + ZH): rate limit, wrong name, spawn ENOENT, agent AGENT_ERROR, timeout, network down.
+- Homepage: `hub run` smoke test leads, GITHUB_TOKEN tip, "short replies may not show AGENT_PARTIAL" tip, macOS `pip`-via-`ensurepip` tip.
+- `cli/`, `hub/`, `guide/`, `spec/` rewritten to lead with `hub run` and document `{{PROFILE_DIR}}`.
+- SDK pages: "Local testing" now uses `agentproc --profile` first; raw env-var forms moved under `<details>`.
+- All 5 hub profile READMEs reorganized: "Quick test" leads, raw-env-var tests under `<details>`.
+- `CLAUDE_MODEL` / `CODEX_MODEL` env-var comments added to profile.yaml templates.
+
+### Protocol
+
+No changes. Still protocol `0.1`. The `{{PROFILE_DIR}}` placeholder is a bridge-level convention; agents don't see it (the bridge resolves it before spawning).
+
 ## 0.3.0 — 2026-06-25
 
 ### `agentproc hub` subcommands

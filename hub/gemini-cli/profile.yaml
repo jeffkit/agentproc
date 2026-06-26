@@ -1,0 +1,28 @@
+name: gemini-cli
+description: Connect the gemini CLI (Google Gemini CLI) as an AgentProc agent with streaming and session continuity
+cli: gemini
+cli_install: |
+  npm install -g @google/gemini-cli
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd is intentionally left unset. `agentproc hub run` defaults it to your
+  # current directory (so `gemini` runs against your project); you can also
+  # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
+  # bridge script regardless of cwd.
+  timeout_secs: 600
+  streaming: true
+  env:
+    GEMINI_API_KEY: "${GEMINI_API_KEY}"
+    # Alternative auth: Google Cloud login. Run `gemini` once interactively
+    # to use OAuth, or set GOOGLE_API_KEY / GOOGLE_GENAI_USE_VERTEXAI etc.
+    # Optional overrides (uncomment to use):
+    # GEMINI_MODEL: "gemini-2.5-pro"   # any alias or model name gemini accepts
+    # GEMINI_SANDBOX: "false"          # set to "false" to disable sandbox
+tested: official
+maintainer: jeffkit
+tags: [coding, google, ai]
+notes: |
+  The bridge script invokes `gemini -p <message> --output-format stream-json
+  --yolo` and re-emits the stream as AGENT_PARTIAL: lines. The session id
+  emitted by gemini's `init` event is forwarded via AGENT_SESSION: and replayed
+  as `--resume <id>` on the next turn.

@@ -8,9 +8,32 @@ Ready-to-use [AgentProc](https://agentproc.dev) profiles for popular AI agent CL
 |---------|-----|--------|-----------|
 | [claude-code](./claude-code/) | `claude` (Anthropic) | official | Python · Node |
 | [codex](./codex/) | `codex` (OpenAI) | official | Python · Node |
-| [agy](./agy/) | `agy` | community | Python · Node |
 | [codebuddy](./codebuddy/) | `codebuddy` (Tencent) | official | Python · Node |
+| [gemini-cli](./gemini-cli/) | `gemini` (Google) | official | Python · Node |
+| [cursor](./cursor/) | `agent` (Cursor Agent) | official | Python · Node |
+| [qwen-code](./qwen-code/) | `qwen` (Alibaba) | community | Python · Node |
+| [agy](./agy/) | `agy` | community | Python · Node |
 | [echo-agent](./echo-agent/) | (no CLI — hello world) | official | Python · Node · Bash |
+
+## Coverage vs ACP Registry
+
+The [ACP Registry](https://agentclientprotocol.com/get-started/registry) maintains a list of agents implementing the Agent Client Protocol — a neighbor protocol with significant overlap in supported CLIs. The matrix below tracks AgentProc Hub coverage of that list.
+
+| Agent | ACP listed | Hub profile | Status |
+|-------|------------|-------------|--------|
+| Claude Agent | ✅ | [claude-code](./claude-code/) | ✅ official |
+| Codex | ✅ | [codex](./codex/) | ✅ official |
+| Gemini CLI | ✅ | [gemini-cli](./gemini-cli/) | ✅ official |
+| Cursor | ✅ | [cursor](./cursor/) | ✅ official |
+| Codebuddy Code | ✅ | [codebuddy](./codebuddy/) | ✅ official |
+| Qwen Code | ✅ | [qwen-code](./qwen-code/) | 🟡 community (schema unverified) |
+| Goose | ✅ | — | ❌ (Goose uses cargo/brew install, not npm — PR welcome) |
+| GitHub Copilot | ✅ | — | ❌ (`--output-format json` JSONL schema undocumented — PR welcome) |
+| Junie (JetBrains) | ✅ | — | ❌ (TUI-only; `--acp` mode integrates via ACP, not stdout — out of scope) |
+| Cline | ✅ | — | ❌ (Cline is a VS Code extension, not a standalone CLI) |
+| GLM Agent | ✅ | — | ❌ (community ACP wrapper, no upstream CLI to wrap) |
+
+Status legend: ✅ verified end-to-end · 🟡 reportedly works, schema not independently verified · ❌ not yet covered.
 
 `tested` is one of:
 - **official** — verified by the AgentProc maintainers against the CLI's documented behavior.
@@ -30,6 +53,10 @@ hub/<name>/
 ```
 
 Pick whichever bridge language you prefer — both produce identical AgentProc output.
+
+### Shared bridge utilities
+
+NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text profiles (`agy`, `echo-agent`) keep bespoke bridges.
 
 ## How to use a profile
 
@@ -64,9 +91,11 @@ AGENT_SESSION:cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c
 Add a new profile:
 
 1. Create `hub/<cli-name>/` with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md`.
-2. Set `tested: unverified` in the profile metadata unless you've verified end-to-end.
-3. Add an entry to the table above.
-4. Open a PR. A maintainer will review, possibly test, and bump `tested` accordingly.
+2. **If the CLI emits NDJSON** (one JSON object per line on stdout, like claude/codex/gemini), reuse [`_shared/stream_utils`](./_shared/). Your bridge only needs `build_args()` and `parse_event()` — see `gemini-cli/bridge.py` for a minimal example.
+3. **If the CLI emits plain text**, write a bespoke bridge (`subprocess.run` + emit). See `agy/bridge.py`.
+4. Set `tested: unverified` in the profile metadata unless you've verified end-to-end.
+5. Add an entry to the table above and (if the agent is on the ACP Registry) the coverage matrix.
+6. Open a PR. A maintainer will review, possibly test, and bump `tested` accordingly.
 
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for repo-wide conventions.
 

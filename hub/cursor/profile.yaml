@@ -1,0 +1,43 @@
+name: cursor
+description: Connect the Cursor Agent CLI (`agent`) as an AgentProc agent with streaming and session continuity
+cli: agent
+cli_install: |
+  # Cursor Agent ships as a standalone binary separate from the Cursor IDE.
+  # Install via Homebrew:
+  brew install cursor-agent
+  # Or download from https://cursor.com/downloads
+  # Then log in: agent login
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd is intentionally left unset. `agentproc hub run` defaults it to your
+  # current directory (so `agent` runs against your project); you can also
+  # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
+  # bridge script regardless of cwd.
+  timeout_secs: 600
+  streaming: true
+  env:
+    CURSOR_API_KEY: "${CURSOR_API_KEY}"
+    # Auth: run `agent login` once interactively, OR set CURSOR_API_KEY.
+    # Optional overrides (uncomment to use):
+    # CURSOR_MODEL: "gpt-5"            # any model name `agent --list-models` shows
+    # CURSOR_FORCE: "1"                # set to "1" to add --yolo (skip approvals)
+tested: official
+maintainer: jeffkit
+tags: [coding, cursor, ai]
+notes: |
+  The bridge invokes `agent -p <message> --output-format stream-json
+  --stream-partial-output --yolo` and re-emits as AGENT_PARTIAL: lines.
+
+  Note the Cursor Agent CLI binary is named `agent`, not `cursor`. It is a
+  standalone download separate from the Cursor IDE.
+
+  Schema (verified end-to-end against agent 2026.06.24):
+    system/init      → session_id (forwarded as AGENT_SESSION:)
+    assistant        → content[].text delta → AGENT_PARTIAL:
+    result/success   → terminal; carries session_id (last wins) and full result
+    result/error     → AGENT_ERROR:
+
+  Cursor emits both delta chunks AND a final assembled `assistant` event with
+  the full text — the bridge's accumulated-prefix dedup drops the duplicate.
+
+  Session resume uses `--resume <chatId>` (Cursor calls sessions "chats").
