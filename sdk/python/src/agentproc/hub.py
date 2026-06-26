@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 HUB_REPO = "jeffkit/agentproc"
 HUB_REF = "main"
@@ -36,6 +36,38 @@ HUB_CACHE_TTL_SECS = 24 * 60 * 60  # 24 hours
 GITHUB_API = "https://api.github.com/repos/{repo}/contents/{path}?ref={ref}"
 GITHUB_TREES = "https://api.github.com/repos/{repo}/git/trees/{ref}?recursive=1"
 GITHUB_RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}"
+
+
+class HubError(RuntimeError):
+    """Hub fetch failure with a human-readable remediation hint.
+
+    The CLI prints `message` + `hint` to stderr instead of dumping a stack
+    trace. `status` is the HTTP status (0 for network errors).
+
+    Inherits from RuntimeError so existing `except RuntimeError` callers
+    continue to work.
+    """
+
+    def __init__(self, message: str, *, hint: str = "", status: int = 0) -> None:
+        super().__init__(message)
+        self.hint = hint
+        self.status = status
+
+
+def _auth_headers(*, json: bool = False) -> Dict[str, str]:
+    """Build HTTP headers, adding Authorization if a token is in env.
+
+    GITHUB_TOKEN (the env var GitHub Actions injects) or GH_TOKEN (what
+    the `gh` CLI sets) raises GitHub's anonymous rate limit from ~60/hr
+    to ~5000/hr.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    h: Dict[str, str] = {"User-Agent": "agentproc-cli"}
+    if json:
+        h["Accept"] = "application/vnd.github+json"
+    if token:
+        h["Authorization"] = f"Bearer {token}"
+    return h
 
 
 def _cache_root() -> Path:
@@ -73,19 +105,95 @@ def _write_cache_meta(name: str) -> None:
 
 
 def _http_get_json(url: str, timeout: int = 30) -> Any:
-    """GET a URL, return parsed JSON. Raises urllib.error.HTTPError on failure."""
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "agentproc-cli",
-    })
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+    """GET a URL, return parsed JSON. Raises HubError on failure."""
+    req = urllib.request.Request(url, headers=_auth_headers(json=True))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise _http_error_to_hub(e.code, body[:200], url, is_json=True) from e
+    except urllib.error.URLError as e:
+        # Network/DNS/connection-level errors (no HTTP status).
+        raise HubError(
+            "could not reach GitHub while fetching hub profile",
+            status=0,
+            hint=(
+                "This is usually a transient network issue. Try:\n"
+                "  1. Re-run the command (often succeeds on retry).\n"
+                "  2. If your network requires a proxy, set HTTPS_PROXY.\n"
+                "  3. To avoid the network entirely, run against a local checkout:\n"
+                "       agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\""
+            ),
+        ) from e
 
 
 def _http_get_text(url: str, timeout: int = 30) -> str:
-    req = urllib.request.Request(url, headers={"User-Agent": "agentproc-cli"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read().decode("utf-8")
+    req = urllib.request.Request(url, headers=_auth_headers(json=False))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        raise _http_error_to_hub(e.code, body[:200], url, is_json=False) from e
+    except urllib.error.URLError as e:
+        raise HubError(
+            "could not reach GitHub while fetching hub profile",
+            status=0,
+            hint=(
+                "This is usually a transient network issue. Try:\n"
+                "  1. Re-run the command (often succeeds on retry).\n"
+                "  2. If your network requires a proxy, set HTTPS_PROXY.\n"
+                "  3. To avoid the network entirely, run against a local checkout:\n"
+                "       agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\""
+            ),
+        ) from e
+
+
+def _http_error_to_hub(status: int, body: str, url: str, *, is_json: bool) -> HubError:
+    """Translate a GitHub HTTP error into a HubError with a remediation hint."""
+    authed = bool(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
+    if status in (403, 429):
+        if authed:
+            hint = (
+                "Your GITHUB_TOKEN is set but still rate-limited. Wait a few minutes and retry,\n"
+                "or run against a local checkout instead:\n"
+                "  agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\"\n"
+                "\n"
+                "Not sure the profile name is right? Check with: agentproc hub list"
+            )
+        else:
+            hint = (
+                "GitHub limits anonymous hub fetches to ~60/hour. To raise this to 5,000/hour:\n"
+                "  export GITHUB_TOKEN=$(gh auth token)   # if you have the GitHub CLI\n"
+                "  # or set GITHUB_TOKEN to any personal access token\n"
+                "\n"
+                "To skip the network entirely, run against a local checkout:\n"
+                "  git clone https://github.com/jeffkit/agentproc && cd agentproc\n"
+                "  agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\"\n"
+                "\n"
+                "Not sure the profile name is right? Check with: agentproc hub list"
+            )
+        return HubError(f"GitHub rate-limited the hub fetch (HTTP {status})", status=status, hint=hint)
+    if status == 404:
+        return HubError(
+            "profile not found on GitHub (HTTP 404)",
+            status=404,
+            hint="Check the profile name with `agentproc hub list`. (Typos are case-sensitive.)",
+        )
+    return HubError(
+        f"GitHub returned HTTP {status} for hub fetch",
+        status=status,
+        hint=body or "No additional detail from GitHub.",
+    )
 
 
 def _list_remote_files(subpath: str) -> List[Dict[str, str]]:
@@ -157,6 +265,83 @@ def _list_remote_profile_files(name: str) -> List[Dict[str, str]]:
     return out
 
 
+def _list_profile_names() -> List[str]:
+    """List top-level profile names (directories directly under hub/).
+
+    Cheap: uses the same tree fetch as everything else, so this is one
+    network call at most (cached in-memory by urllib).
+    """
+    url = GITHUB_TREES.format(repo=HUB_REPO, ref=HUB_REF)
+    data = _http_get_json(url)
+    if not isinstance(data, dict) or "tree" not in data:
+        return []
+    names: List[str] = []
+    seen = set()
+    for entry in data["tree"]:
+        if not isinstance(entry, dict):
+            continue
+        p = str(entry.get("path", ""))
+        if not p.startswith("hub/"):
+            continue
+        seg = p[len("hub/"):].split("/")[0]
+        if seg and seg not in seen:
+            seen.add(seg)
+            names.append(seg)
+    return sorted(names)
+
+
+def _suggest_close_name(input_name: str, candidates: List[str]) -> str:
+    """Lightweight "did you mean" hint.
+
+    Two paths to a match:
+      1. Prefix match — `claude` matches `claude-code`, `echo` matches
+         `echo-agent`. Common typo pattern (user forgot a suffix).
+         Only accepts an unambiguous prefix.
+      2. Edit distance with length-scaled threshold (≤6 → 1 edit,
+         7-12 → 2, >12 → 3). Catches transpositions and small typos.
+    """
+    if not input_name or not candidates:
+        return ""
+    n = input_name.lower()
+    # Path 1: unique prefix match.
+    prefix_matches = [c for c in candidates if c.lower().startswith(n)]
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+    # Path 2: edit distance.
+    threshold = 1 if len(input_name) <= 6 else (2 if len(input_name) <= 12 else 3)
+    best = ""
+    best_dist = float("inf")
+    for c in candidates:
+        d = _edit_distance(n, c.lower())
+        if d < best_dist:
+            best_dist = d
+            best = c
+    if best and best_dist <= threshold:
+        return best
+    return ""
+
+
+def _edit_distance(a: str, b: str) -> int:
+    m, n = len(a), len(b)
+    if m == 0:
+        return n
+    if n == 0:
+        return m
+    prev = list(range(n + 1))
+    curr = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr[0] = i
+        for j in range(1, n + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            curr[j] = min(
+                prev[j] + 1,        # deletion
+                curr[j - 1] + 1,    # insertion
+                prev[j - 1] + cost  # substitution
+            )
+        prev, curr = curr, prev
+    return prev[n]
+
+
 def _download_file(remote_path: str, local_path: Path) -> None:
     """Download a single file from raw.githubusercontent.com."""
     url = GITHUB_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=remote_path)
@@ -196,7 +381,27 @@ def fetch_profile(
 
     entries = _list_remote_profile_files(name)
     if not entries:
-        raise RuntimeError(f"profile '{name}' not found in hub")
+        # getTree succeeded (otherwise _list_remote_profile_files would have
+        # raised HubError already). So the name is genuinely wrong — surface
+        # the list of available names so the user can correct the typo.
+        known: List[str] = []
+        try:
+            known = _list_profile_names()
+        except Exception:
+            pass
+        suggestion = _suggest_close_name(name, known)
+        lines = []
+        if suggestion:
+            lines.append(f"Did you mean `{suggestion}`?")
+            lines.append("")
+        lines.append("Available profiles:")
+        for k in known:
+            lines.append(f"  - {k}")
+        raise HubError(
+            f"profile '{name}' not found in hub",
+            status=404,
+            hint="\n".join(lines),
+        )
 
     # Clear cache, then re-download every file in the profile directory.
     if cached.exists():

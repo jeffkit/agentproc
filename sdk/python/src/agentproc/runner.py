@@ -91,6 +91,7 @@ class RunOptions:
     streaming: Optional[bool] = None
     extra_env: Dict[str, str] = field(default_factory=dict)
     cwd: Optional[str] = None
+    profile_dir: Optional[str] = None
     timeout_secs: Optional[int] = None
     on_partial: Optional[Callable[[str], None]] = None
     on_session: Optional[Callable[[str], None]] = None
@@ -173,6 +174,7 @@ def substitute(value: str, ctx: Dict[str, str]) -> str:
         .replace("{{MESSAGE}}", ctx.get("message", ""))
         .replace("{{SESSION_ID}}", ctx.get("session_id", ""))
         .replace("{{SESSION_NAME}}", ctx.get("session_name", ""))
+        .replace("{{PROFILE_DIR}}", ctx.get("profile_dir", ""))
     )
 
 
@@ -182,6 +184,102 @@ def expand_env_ref(value: str, env: Dict[str, str]) -> str:
         lambda m: env.get(m.group(1), ""),
         str(value),
     )
+
+
+def _diagnose_spawn_error(
+    err: BaseException,
+    *,
+    argv: List[str],
+    cwd: Optional[str],
+    env: Dict[str, str],
+) -> str:
+    """Produce a human-friendly hint for a spawn FileNotFoundError / ENOENT.
+
+    Subprocess raises FileNotFoundError when either the command isn't on
+    PATH or the cwd doesn't exist — Python folds both into the same
+    exception attributed to argv[0], which is misleading. Disambiguate.
+    """
+    # (a) cwd doesn't exist or isn't a directory
+    if cwd:
+        p = Path(cwd)
+        try:
+            if not p.is_dir():
+                return f"profile.cwd is not a directory: {cwd}"
+        except PermissionError:
+            return f"profile.cwd is not accessible (permission denied): {cwd}"
+        except OSError:
+            return f"profile.cwd does not exist: {cwd}. Pass --cwd <path> to point at a real directory."
+
+    # (b) the command (argv[0]) is not on PATH (bare name, no slash)
+    cmd = argv[0] if argv else ""
+    is_pathed = "/" in cmd or "\\" in cmd
+    if not is_pathed and cmd:
+        from shutil import which
+        if not which(cmd):
+            return (
+                f"'{cmd}' not found on PATH. Install it, or if it's installed, "
+                "make sure PATH is set correctly when the bridge spawns the agent."
+            )
+
+    # (c) argv[0] looks like a path — check whether the file itself exists
+    if is_pathed and cmd:
+        if not Path(cmd).exists():
+            return f"command path does not exist or is not executable: {cmd}"
+
+    # (d) Command exists; suspect an argv file argument (e.g. python3 ./bridge.py)
+    for a in argv[1:]:
+        if a.startswith("-"):
+            continue
+        if "/" in a or "\\" in a:
+            resolved = a if Path(a).is_absolute() else (
+                str(Path(cwd) / a) if cwd else str(Path(a).resolve())
+            )
+            if not Path(resolved).exists():
+                return (
+                    f"argument file not found: {a} (resolved to {resolved}). "
+                    "The profile likely needs --cwd or the bundled script path is wrong."
+                )
+
+    return ""
+
+
+def _diagnose_stderr_failure(stderr_text: str) -> str:
+    """Best-effort pattern check against the agent's accumulated stderr.
+
+    Catches "bridge file not found" failures that the wrapped interpreter
+    writes to its own stderr before exiting non-zero. Returns a friendly
+    hint, or '' if nothing recognizable.
+    """
+    if not stderr_text:
+        return ""
+    lower = stderr_text.lower()
+
+    # python3: "can't open file '/path/x.py': [Errno 2] No such file or directory"
+    m = re.search(r"(?:can'?t|cannot) open file '([^']+)': \[Errno 2\] No such file or directory", stderr_text)
+    if m:
+        return (
+            f"agent script not found: {m.group(1)}. Check the profile's command "
+            "path (likely a {{PROFILE_DIR}} issue or a typo)."
+        )
+
+    # node: "Error: Cannot find module '/path/x.js'"
+    m = re.search(r"Cannot find module '([^']+)'", stderr_text)
+    if m:
+        return (
+            f"agent script not found: {m.group(1)}. Check the profile's command "
+            "path (likely a {{PROFILE_DIR}} issue or a typo)."
+        )
+
+    # bash: "bash: line N: ./x.sh: No such file or directory"
+    m = re.search(r"(?:^|\n)[^:]+: line \d+: ([^:]+): No such file or directory", stderr_text)
+    if m:
+        return f"agent script not found: {m.group(1)}. Check the profile's command path."
+
+    # Generic errno 2 / ENOENT sentinel.
+    if re.search(r"errno 2|enoent|no such file or directory", lower):
+        return "agent reported a missing file. Check the profile's command and cwd."
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -224,14 +322,22 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         options.timeout_secs if options.timeout_secs is not None else profile["timeout_secs"]
     )
     cwd = options.cwd or profile["cwd"]
+    # Resolve relative cwd against the profile's own directory (if known),
+    # so profiles written as `cwd: .` work no matter where the user invokes
+    # from. Absolute paths and ~-prefixed paths are already absolute.
+    if cwd and not Path(cwd).is_absolute() and options.profile_dir:
+        cwd = str(Path(options.profile_dir) / cwd)
 
     subst_ctx = {
         "message": options.message,
         "session_id": options.session_id,
         "session_name": options.session_name,
+        "profile_dir": options.profile_dir or "",
     }
 
-    argv = list(profile["argv"])
+    # Substitute placeholders in argv (command) too, not just args — so
+    # `command: python3 {{PROFILE_DIR}}/bridge.py` resolves correctly.
+    argv = [substitute(a, subst_ctx) for a in profile["argv"]]
     for a in profile["args"]:
         argv.append(substitute(a, subst_ctx))
 
@@ -252,6 +358,14 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     result = RunResult()
     body_lines: List[str] = []
+    stderr_all: List[str] = []  # capped sliding window, for post-mortem
+    STDERR_CAP = 8192
+
+    def _append_stderr(text: str) -> None:
+        stderr_all.append(text)
+        total = sum(len(s) for s in stderr_all)
+        while total > STDERR_CAP and len(stderr_all) > 1:
+            total -= len(stderr_all.pop(0))
 
     try:
         proc = subprocess.Popen(
@@ -265,13 +379,24 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             bufsize=1,
         )
     except FileNotFoundError as e:
+        tip = _diagnose_spawn_error(e, argv=argv, cwd=cwd, env=env)
         if options.on_stderr:
             options.on_stderr(f"[agentproc runner] spawn error: {e}")
+            if tip:
+                options.on_stderr(f"[agentproc runner] hint: {tip}")
+        if options.on_error:
+            options.on_error(f"failed to start agent: {tip or str(e)}")
+        if not result.error:
+            result.error = tip or str(e)
         result.exit_code = EXIT_ERROR
         return result
     except PermissionError as e:
         if options.on_stderr:
             options.on_stderr(f"[agentproc runner] spawn error: {e}")
+        if options.on_error:
+            options.on_error(f"failed to start agent: {e}")
+        if not result.error:
+            result.error = str(e)
         result.exit_code = EXIT_ERROR
         return result
 
@@ -285,6 +410,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     def _drain_stderr() -> None:
         assert proc.stderr is not None
         for line in proc.stderr:
+            _append_stderr(line)
             line = line.rstrip("\r\n")
             if options.on_stderr:
                 options.on_stderr(line)
@@ -363,12 +489,31 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         exit_code = proc.wait()
 
     stdout_thread.join(timeout=5)
-    stderr_thread.join(timeout=2)
+    # Drain stderr fully before reading stderr_all. The post-mortem
+    # diagnosis depends on having the full stderr text. Generous timeout
+    # since the process has already exited — at most we wait for the
+    # pipe buffer to flush.
+    stderr_thread.join(timeout=10)
+    if stderr_thread.is_alive():
+        # Very rare; indicates a pathological agent that keeps stderr open.
+        # The diagnosis may be incomplete, but we don't want to hang forever.
+        if options.on_stderr:
+            options.on_stderr("[agentproc runner] warning: stderr drain timed out; diagnosis may be incomplete")
 
     result.reply = "\n".join(body_lines)
     if len(result.reply) > profile["max_reply_chars"]:
         suffix = "\n\n…(truncated)" if profile["max_reply_chars"] == DEFAULT_MAX_REPLY_CHARS else ""
         result.reply = result.reply[: profile["max_reply_chars"]] + suffix
+
+    # If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
+    # common "command/file not found" patterns and surface a friendly hint.
+    if not timed_out and not result.error and exit_code != 0:
+        stderr_text = "".join(stderr_all)
+        hint = _diagnose_stderr_failure(stderr_text)
+        if hint:
+            result.error = hint
+            if options.on_error:
+                options.on_error(hint)
 
     if timed_out:
         result.timed_out = True

@@ -339,7 +339,9 @@ MCP connects an LLM application (the client) to **tools and data sources** (the 
 
 ACP connects a code editor to an AI coding agent. Transport: JSON-RPC 2.0 over stdio, bidirectional, long-lived.
 
-**Relationship to AgentProc:** **Richer cousin.** ACP assumes an interactive IDE session with tool calls, file diffs, and mode switching. AgentProc assumes a single chat turn per process invocation. Use ACP if you're building an IDE; use AgentProc if you're bridging a chat bot to a CLI.
+**Relationship to AgentProc:** **Richer cousin, different job.** ACP assumes an interactive IDE session with tool calls, file diffs, and mode switching. AgentProc assumes a single chat turn per process invocation. Use ACP if you're building an IDE; use AgentProc if you're bridging a chat bot to a CLI.
+
+The overlap is only superficial. An ACP client must implement file-system, terminal, and permission callbacks because the IDE owns the files the user is editing; an AgentProc bridge owns no user files and renders no diffs. Conversely, ACP offers no unattended-runtime semantics — no timeout, no `SIGTERM`/`SIGKILL` grace, no "tell the user when the agent errored" contract — because an IDE user stops a runaway agent by hand. A messaging bridge runs unattended, so those are load-bearing for AgentProc and out of scope for ACP. Even when the underlying CLI happens to be ACP-compatible (e.g. Claude Code driven over ACP by Zed), building an IM bridge on top of an ACP client is over-engineering: the bridge would implement capabilities it never uses and still miss the timeout/error-reply guarantees the chat scenario requires. AgentProc's contract — env vars in, sentinel-prefixed stdout out, one process per turn — is the smallest one that fits the bridge-to-CLI job.
 
 - Spec: https://agentclientprotocol.com/
 

@@ -227,6 +227,27 @@ def build_parser() -> argparse.ArgumentParser:
 def show_help() -> None:
     sys.stdout.write(f"""agentproc v{PKG_VERSION} (protocol {PROTOCOL_VERSION})
 
+The fastest way in:
+  agentproc hub list                          # see what's available
+  agentproc hub run echo-agent -p "hello"     # smoke test (no API key)
+  cd ~/projects/my-app && agentproc hub run claude-code -p "explain this"
+
+The CLI fetches the profile from the GitHub hub on first use, caches it at
+~/.agentproc/cache/hub/<name>/ (24h TTL), and uses your current directory as
+the agent's cwd. Set GITHUB_TOKEN to raise the rate limit (see `agentproc hub --help`).
+
+Hub subcommands:
+  hub list                          List all profiles in the hub
+  hub show <name>                   Show a profile's README
+  hub run <name> [run-options]      Fetch (if needed) and run a profile
+  hub install <name>                Copy a profile to the current directory
+
+Run `agentproc hub --help` for the full hub reference.
+
+───────────────────────────────────────────────────────────────────────────────
+
+Advanced: run a local profile YAML directly (no hub fetch)
+
 Usage:
   agentproc --profile <path.yaml> --prompt "hello" [options]
 
@@ -240,7 +261,8 @@ Session:
   --from <user>             Sender identifier
 
 Execution:
-  --cwd <path>              Override profile.cwd
+  --cwd <path>              Override profile.cwd (relative paths resolve
+                            against the profile.yaml's directory)
   --env KEY=VALUE           Extra env var (repeatable)
   --timeout <secs>          Override profile.timeout_secs
   --no-stream               Set AGENT_STREAMING=0
@@ -263,9 +285,16 @@ Output semantics:
 The final session id is printed on stderr as: agentproc:session:<id>
 
 Examples:
-  agentproc --profile hub/echo-agent/profile.yaml --prompt "hi"
-  agentproc -p hub/claude-code/profile.yaml --prompt "hello" --verbose
-  cat prompt.txt | agentproc -p prof.yaml --stdin
+  # Local profile (relative cwd resolves next to profile.yaml):
+  agentproc --profile ./hub/echo-agent/profile.yaml --prompt "hi"
+
+  # Local claude-code profile, claude runs against your project:
+  agentproc --profile ./hub/claude-code/profile.yaml \\
+            --prompt "explain this codebase" \\
+            --cwd /path/to/your/project
+
+  # Prompt from stdin:
+  cat prompt.txt | agentproc --profile prof.yaml --stdin
 """)
 
 
@@ -288,9 +317,46 @@ def _run_hub_subcommand(args: List[str]) -> int:
     sub = args[0]
     rest = args[1:]
 
+    # Any subcommand with --help/-h shows the hub help uniformly.
+    if "--help" in rest or "-h" in rest:
+        _show_hub_help()
+        return 0
+
     # Common flag
     refresh = "--refresh" in rest
-    positional = [a for a in rest if not a.startswith("--")]
+
+    # Separate hub-level flags from runner-level flags and positional args.
+    # In the `hub run` context, `-p` means `--prompt` (the profile name is
+    # positional, not a path), so normalize it before handing off to argparse.
+    positional: List[str] = []
+    runner_args: List[str] = []
+    takes_value = {"--prompt", "-p", "--session", "--session-name", "--from",
+                   "--cwd", "--env", "--timeout"}
+    boolean_flags = {"--no-stream", "--verbose", "--quiet", "--raw", "--stdin"}
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in ("--refresh", "-h", "--help"):
+            i += 1
+            continue
+        if a in takes_value:
+            runner_args.append("--prompt" if a == "-p" else a)
+            if i + 1 < len(rest):
+                runner_args.append(rest[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if a in boolean_flags:
+            runner_args.append(a)
+            i += 1
+            continue
+        if a.startswith("-"):
+            sys.stderr.write(f"error: unknown option: {a}\n\n")
+            _show_hub_help()
+            return 2
+        positional.append(a)
+        i += 1
 
     def _log(msg: str) -> None:
         sys.stderr.write(msg + "\n")
@@ -319,7 +385,14 @@ def _run_hub_subcommand(args: List[str]) -> int:
         if not positional:
             sys.stderr.write("error: hub install requires a profile name\n")
             return 2
-        hub_mod.install_profile(positional[0], Path.cwd(), refresh=refresh, on_log=_log)
+        dest = hub_mod.install_profile(positional[0], Path.cwd(), refresh=refresh, on_log=_log)
+        # Tell the user exactly what they got and how to run it next.
+        rel_profile = os.path.relpath(str(dest / "profile.yaml"), str(Path.cwd()))
+        sys.stderr.write("\n")
+        sys.stderr.write(f"Next: edit {rel_profile} if you want, then run:\n")
+        sys.stderr.write(
+            f'  agentproc --profile {rel_profile} --prompt "hi" --cwd <your-project>\n'
+        )
         return 0
 
     if sub == "run":
@@ -330,17 +403,19 @@ def _run_hub_subcommand(args: List[str]) -> int:
         cache_dir = hub_mod.fetch_profile(profile_name, refresh=refresh, on_log=_log)
         profile_path = str(cache_dir / "profile.yaml")
 
-        # Re-parse remaining args (excluding the profile name) as runner options.
+        # Parse the runner-level flags we separated out above.
         parser = build_parser()
-        # Drop the first positional (profile name) and --refresh from rest.
-        runner_args = [a for i, a in enumerate(rest) if not (
-            (not a.startswith("--") and i == 0) or a == "--refresh"
-        )]
         opts = parser.parse_args(runner_args)
 
         if not opts.prompt and not opts.stdin:
             sys.stderr.write("error: hub run requires --prompt <text> or --stdin\n")
             return 2
+
+        # hub run uses the user's current directory as the agent's cwd when
+        # --cwd is not given. Matches the hub docs and the right default for
+        # AI-CLI profiles where the agent should operate on the user's project.
+        if not opts.cwd:
+            opts.cwd = str(Path.cwd())
 
         return _run_agent_with_profile(profile_path, opts)
 
@@ -385,6 +460,7 @@ Profiles are cached at ~/.agentproc/cache/hub/<name>/ (24h TTL).
 
 def _run_agent_with_profile(profile_path: str, opts) -> int:
     """Shared runner logic for both --profile path and hub run path."""
+    profile_dir = str(Path(profile_path).resolve().parent)
     try:
         yaml_text = Path(profile_path).resolve().read_text(encoding="utf-8")
         profile_raw = parse_yaml(yaml_text)
@@ -426,6 +502,7 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
                 from_user=opts.from_user,
                 streaming=streaming,
                 cwd=opts.cwd,
+                profile_dir=profile_dir,
                 extra_env=extra_env,
                 timeout_secs=opts.timeout,
             ),
@@ -446,6 +523,7 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
             from_user=opts.from_user,
             streaming=streaming,
             cwd=opts.cwd,
+            profile_dir=profile_dir,
             extra_env=extra_env,
             timeout_secs=opts.timeout,
             on_partial=lambda t: verbose and sys.stderr.write(
@@ -478,26 +556,48 @@ def main(argv: Optional[List[str]] = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
 
-    # `agentproc hub <subcommand>` — defer to hub dispatcher.
-    if argv and argv[0] == "hub":
-        return _run_hub_subcommand(argv[1:])
+    try:
+        # `agentproc hub <subcommand>` — defer to hub dispatcher.
+        if argv and argv[0] == "hub":
+            return _run_hub_subcommand(argv[1:])
 
-    parser = build_parser()
-    opts = parser.parse_args(argv)
+        parser = build_parser()
+        opts = parser.parse_args(argv)
 
-    if opts.help:
-        show_help()
-        return 0
-    if opts.version:
-        show_version()
-        return 0
+        if opts.help:
+            show_help()
+            return 0
+        if opts.version:
+            show_version()
+            return 0
 
-    if not opts.profile:
-        sys.stderr.write("error: --profile is required\n\n")
-        show_help()
-        return 2
+        if not opts.profile:
+            sys.stderr.write("error: --profile is required\n\n")
+            show_help()
+            return 2
 
-    return _run_agent_with_profile(opts.profile, opts)
+        return _run_agent_with_profile(opts.profile, opts)
+    except KeyboardInterrupt:
+        return 130
+    except Exception as e:
+        # Friendly handling for known hub errors: print the message + hint,
+        # never a raw stack trace.
+        from .hub import HubError
+        if isinstance(e, HubError):
+            sys.stderr.write(f"error: {e}\n")
+            if e.hint:
+                sys.stderr.write(f"\n{e.hint}\n")
+            return 1
+        # Network errors that slipped through unwrapped.
+        msg = str(e)
+        if any(s in msg for s in ("fetch failed", "ENOTFOUND", "ECONNREFUSED", "ECONNRESET", "urlopen error")):
+            sys.stderr.write(f"error: network error talking to GitHub: {msg}\n")
+            sys.stderr.write("\nThis is usually transient. Re-run the command, or run against a local checkout:\n")
+            sys.stderr.write('  agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"\n')
+            return 1
+        # Everything else: surface the message without dumping a traceback.
+        sys.stderr.write(f"error: {msg}\n")
+        return 1
 
 
 if __name__ == "__main__":
