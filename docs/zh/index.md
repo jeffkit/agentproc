@@ -50,11 +50,15 @@ pip install agentproc
 
 :::
 
+::: tip macOS 用户：找不到 `pip`/`pipx`？
+Homebrew 的 Python 默认不暴露 `pip`。可以跑 `python3 -m ensurepip && python3 -m pip install --user pipx`，或者直接用上面的 `npm`——反正 `agentproc` CLI 本来就是 npm 包，Node 是必需的。
+:::
+
 验证可用：
 
 ```bash
 agentproc --version
-# agentproc 0.2.0 (protocol 0.1)
+# agentproc 0.3.0 (protocol 0.1)
 ```
 
 ## ② 浏览 hub
@@ -68,7 +72,17 @@ agentproc hub list
 #   echo-agent    official    Minimal hello-world agent
 ```
 
-[Profile Hub](/zh/hub/) 收录了主流 AI CLI 的开箱即用 profile。不用 clone、不用复制、不用改 YAML——CLI 按需拉取并缓存。
+[Profile Hub](/zh/hub/) 收录了主流 AI CLI 的开箱即用 profile。不用 clone、不用复制、不用改 YAML——CLI 首次使用时从 GitHub 拉取，缓存在 `~/.agentproc/cache/hub/<name>/`（24 小时 TTL）。
+
+::: tip 遇到 GitHub 限流？
+匿名拉取每个 IP 每小时 ~60 次。设置 token 可以提到 5,000 次/小时：
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
+```
+
+如果你想完全绕开网络，可以用本地仓库：`agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"`。
+:::
 
 ## ③ 一行命令跑起来
 
@@ -82,11 +96,15 @@ agentproc hub run echo-agent -p "hello"
 然后跑真实的。`claude-code` 支持流式输出和多轮会话续接：
 
 ```bash
-cd ~/projects/my-app
+cd ~/projects/my-app          # agent 在哪个目录跑，就 cd 到哪里
 agentproc hub run claude-code \
   -p "what is this codebase?" \
   --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 ```
+
+::: tip 不需要改任何 profile YAML
+`agentproc hub run` 自动把**你当前所在目录**作为 agent 的 `cwd`，并通过 `{{PROFILE_DIR}}` 占位符找到打包的 bridge 脚本。只要 cd 到你想让 agent 操作的项目目录，跑就行。
+:::
 
 stderr 上会实时看到协议行，stdout 是最终回复：
 
@@ -104,6 +122,10 @@ agentproc hub run claude-code \
   --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
+
+::: tip 短回复可能看不到 AGENT_PARTIAL:
+有些 agent 在回答较短时一次性吐完全部内容——你只会看到 `AGENT_SESSION:` 和回复正文，没有 `AGENT_PARTIAL:` 行。这是正常的；流式只分片长回复。
+:::
 
 ## ④ 接到你的消息平台
 
@@ -146,6 +168,7 @@ handleMessage(process.argv[2] || 'hello', '');
 - **[CLI 参考](/zh/cli/)** —— 每个选项和参数
 - **[Python SDK](/zh/sdk/python) / [Node SDK](/zh/sdk/node)** —— 在你 bridge 里嵌入 AgentProc
 - **[示例](/zh/examples/)** —— claude_code bridge、裸脚本等
+- **[故障排除](/zh/guide/troubleshooting)** —— 卡住了？常见错误和确切修法
 
 </div>
 

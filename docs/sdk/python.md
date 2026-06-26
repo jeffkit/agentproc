@@ -135,7 +135,25 @@ History is stored as JSONL files under `~/.agentproc/sessions/<session_id>.jsonl
 
 ## Local testing
 
-Test your agent without a running bridge:
+Test your agent through the same CLI the hub uses — the most faithful end-to-end check:
+
+```bash
+agentproc --profile ./myagent.yaml --prompt "hello"
+```
+
+::: tip Don't have a profile YAML yet?
+Save this as `myagent.yaml` next to your agent:
+
+```yaml
+command: python3 ./agent.py
+timeout_secs: 60
+```
+:::
+
+<details>
+<summary>Prefer to drive the script directly?</summary>
+
+Set the env vars the bridge would inject. This is exactly what the CLI does internally:
 
 ```bash
 AGENT_MESSAGE="hello" \
@@ -146,3 +164,6 @@ AGENT_STREAMING="1" \
 AGENT_PROTOCOL_VERSION="0.1" \
 python3 ./agent.py
 ```
+
+Useful when debugging the script in isolation.
+</details>

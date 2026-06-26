@@ -14,8 +14,19 @@ That's it. The CLI:
 
 1. Fetches `hub/claude-code/` from GitHub on first use
 2. Caches it at `~/.agentproc/cache/hub/claude-code/` (24h TTL)
-3. Uses your current directory as `cwd`
-4. Forwards `AGENT_MESSAGE` and any `--env` you pass
+3. Uses **your current directory** as the agent's `cwd` (override with `--cwd`)
+4. Locates the bundled bridge script via a `{{PROFILE_DIR}}` placeholder, so `cwd` and script location are decoupled
+5. Forwards `AGENT_MESSAGE` and any `--env` you pass
+
+::: tip Hitting GitHub rate limits?
+Anonymous fetches are capped at ~60/hour per IP. Raise to 5,000/hour with:
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)   # or any personal access token
+```
+
+The CLI sends `Authorization: Bearer <token>` when `GITHUB_TOKEN` (or `GH_TOKEN`) is set. If you'd rather skip the network entirely, run against a local checkout: `agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"`.
+:::
 
 ## All hub commands
 
@@ -121,8 +132,10 @@ cli: <command-name>             # the executable this wraps
 cli_install: |                  # how to install the CLI itself
   npm install -g ...
 agentproc:                      # the actual AgentProc P0 profile
-  command: python3 ./bridge.py  # or: node ./bridge.js
-  cwd: ~/your-project           # gets overridden by `--cwd` from CLI
+  command: python3 {{PROFILE_DIR}}/bridge.py   # {{PROFILE_DIR}} resolves to the profile's own directory
+  # cwd intentionally omitted: `hub run` defaults it to the user's current
+  # directory (so the wrapped CLI operates on their project). The bridge
+  # script is located via {{PROFILE_DIR}} regardless of cwd.
   timeout_secs: 600
   streaming: true
   env:

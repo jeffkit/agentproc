@@ -4,8 +4,9 @@ cli: none
 cli_install: |
   # No CLI to install — this is a reference implementation.
 agentproc:
-  command: python3 ./bridge.py
-  cwd: .
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`;
+  # echo-agent doesn't touch the filesystem, so any cwd works.
   timeout_secs: 10
   streaming: false
 tested: official

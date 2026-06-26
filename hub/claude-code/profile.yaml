@@ -4,14 +4,18 @@ cli: claude
 cli_install: |
   npm install -g @anthropic-ai/claude-code
 agentproc:
-  command: python3 ./bridge.py
-  cwd: ~/your-project
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd is intentionally left unset. `agentproc hub run` defaults it to your
+  # current directory (so `claude` runs against your project); you can also
+  # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
+  # bridge script regardless of cwd.
   timeout_secs: 600
   streaming: true
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
-    # Optional: override the default model
-    # ANTHROPIC_MODEL: "claude-sonnet-4-6"
+    # Optional overrides (uncomment to use):
+    # CLAUDE_MODEL: "claude-sonnet-4-6"                    # any alias or full name claude accepts
+    # CLAUDE_DISALLOW_TOOLS: "AskUserQuestion,WebSearch"   # default: AskUserQuestion
 tested: official
 maintainer: jeffkit
 tags: [coding, anthropic, ai]

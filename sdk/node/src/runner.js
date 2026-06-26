@@ -26,6 +26,7 @@
  */
 
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
@@ -100,14 +101,131 @@ function expandPath(p) {
 }
 
 /**
- * Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}} placeholders
- * in a string value. Per spec, no shell is involved.
+ * Best-effort pattern check against the agent's accumulated stderr to spot
+ * common "bridge file not found" / "module not found" failures that the
+ * wrapped interpreter writes to its own stderr before exiting non-zero.
+ * Returns a human-friendly hint, or '' if nothing recognizable.
+ *
+ * This is intentionally narrow — we only flag high-confidence patterns to
+ * avoid mis-diagnosing genuine agent errors.
+ */
+function diagnoseStderrFailure(stderrText, { argv }) {
+  if (!stderrText) return '';
+  const lower = stderrText.toLowerCase();
+
+  // python3: "can't open file '/path/x.py': [Errno 2] No such file or directory"
+  // Also covers "cannot open file" (localized variants).
+  const pyMatch = stderrText.match(/(?:can'?t|cannot) open file '([^']+)': \[Errno 2\] No such file or directory/);
+  if (pyMatch) {
+    const file = pyMatch[1];
+    return `agent script not found: ${file}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).`;
+  }
+
+  // node: "Error: Cannot find module '/path/x.js'"
+  const nodeMatch = stderrText.match(/Cannot find module '([^']+)'/);
+  if (nodeMatch) {
+    const mod = nodeMatch[1];
+    return `agent script not found: ${mod}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).`;
+  }
+
+  // bash: "bash: line N: ./x.sh: No such file or directory"
+  const bashMatch = stderrText.match(/(?:^|\n)[^:]+: line \d+: ([^:]+): No such file or directory/);
+  if (bashMatch) {
+    const file = bashMatch[1];
+    return `agent script not found: ${file}. Check the profile's command path.`;
+  }
+
+  // Generic Errno 2 sentinel, in case the interpreter phrasing differs.
+  if (/errno 2|enoent|no such file or directory/.test(lower)) {
+    return `agent reported a missing file. Check the profile's command and cwd.`;
+  }
+
+  return '';
+}
+
+/**
+ * Produce a human-friendly hint for a spawn ENOENT-style error.
+ *
+ * Node's spawn attributes the error to argv[0] regardless of whether it was
+ * the command itself or a referenced file (e.g. `./bridge.py`) that wasn't
+ * found, which is very confusing. We inspect cwd + argv to give a better
+ * diagnosis. Returns '' when nothing useful can be said.
+ */
+function diagnoseSpawnError(err, { argv, cwd, env }) {
+  const code = err && err.code;
+  const message = (err && err.message) || '';
+  if (code !== 'ENOENT' && !/ENOENT/.test(message)) return '';
+
+  // (a) cwd doesn't exist or isn't a directory
+  if (cwd) {
+    try {
+      const stat = fs.statSync(cwd);
+      if (!stat.isDirectory()) {
+        return `profile.cwd is not a directory: ${cwd}`;
+      }
+    } catch (e) {
+      if (e && (e.code === 'EACCES' || e.code === 'EPERM')) {
+        return `profile.cwd is not accessible (permission denied): ${cwd}`;
+      }
+      return `profile.cwd does not exist: ${cwd}. Pass --cwd <path> to point at a real directory.`;
+    }
+  }
+
+  // (b) the command (argv[0]) is not on PATH
+  const cmd = argv[0];
+  const isPathed = /[\\/]/.test(cmd);
+  if (!isPathed) {
+    // Bare command like 'python3' or 'claude' — check PATH ourselves.
+    const PATH = (env && env.PATH) || '';
+    if (PATH) {
+      const found = PATH.split(path.delimiter).some(d => {
+        try {
+          const p = path.join(d, cmd);
+          fs.accessSync(p, fs.constants.X_OK);
+          return true;
+        } catch { return false; }
+      });
+      if (!found) {
+        return `'${cmd}' not found on PATH. Install it, or if it's installed, make sure PATH is set correctly when the bridge spawns the agent.`;
+      }
+    }
+    return `'${cmd}' could not be executed. Verify it is installed and on PATH.`;
+  }
+
+  // (c) argv[0] looks like a path — check whether the file itself exists
+  try {
+    fs.accessSync(cmd, fs.constants.X_OK);
+  } catch {
+    return `command path does not exist or is not executable: ${cmd}`;
+  }
+
+  // (d) Command exists; suspect an argv file argument (e.g. python3 ./bridge.py).
+  for (let i = 1; i < argv.length; i++) {
+    const a = argv[i];
+    if (!a.startsWith('-') && (a.includes('/') || a.includes('\\'))) {
+      // Resolve relative to cwd (mirrors spawn's resolution)
+      const resolved = path.isAbsolute(a) ? a : (cwd ? path.resolve(cwd, a) : path.resolve(a));
+      try {
+        fs.accessSync(resolved, fs.constants.R_OK);
+      } catch {
+        return `argument file not found: ${a} (resolved to ${resolved}). The profile likely needs --cwd or the bundled script path is wrong.`;
+      }
+    }
+  }
+
+  return '';
+}
+
+/**
+ * Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}}
+ * placeholders in a string value. Per spec, no shell is involved.
  */
 function substitute(value, ctx) {
   return String(value)
     .replace(/\{\{MESSAGE\}\}/g, ctx.message || '')
     .replace(/\{\{SESSION_ID\}\}/g, ctx.sessionId || '')
-    .replace(/\{\{SESSION_NAME\}\}/g, ctx.sessionName || '');
+    .replace(/\{\{SESSION_NAME\}\}/g, ctx.sessionName || '')
+    .replace(/\{\{PROFILE_DIR\}\}/g, ctx.profileDir || '');
 }
 
 /**
@@ -211,17 +329,28 @@ async function run(profileRaw, options) {
   const sessionName = options.sessionName || 'default';
   const streaming = options.streaming !== undefined ? !!options.streaming : profile.streaming;
   const timeoutSecs = options.timeoutSecs !== undefined ? options.timeoutSecs : profile.timeout_secs;
-  const cwd = options.cwd || profile.cwd;
+  let cwd = options.cwd || profile.cwd;
+  // Resolve relative cwd against the profile's directory (if known) so that
+  // profiles written as `cwd: .` work no matter where the user invokes from.
+  // Absolute paths and `~`-prefixed paths are already absolute post-expand.
+  if (cwd && !path.isAbsolute(cwd) && options.profileDir) {
+    cwd = path.resolve(options.profileDir, cwd);
+  }
 
   // Build the substitution context for {{MESSAGE}} etc.
+  // {{PROFILE_DIR}} resolves to the directory the profile YAML lives in
+  // (passed by the CLI; undefined when run programmatically without it),
+  // letting profiles reference bundled scripts via absolute paths while
+  // still allowing the agent's cwd to be anywhere.
   const substCtx = {
     message: options.message,
     sessionId,
     sessionName,
+    profileDir: options.profileDir || '',
   };
 
   // Build argv: command + args (with placeholders substituted).
-  const argv = [...profile.argv];
+  const argv = profile.argv.map(a => substitute(a, substCtx));
   for (const a of profile.args) {
     argv.push(substitute(a, substCtx));
   }
@@ -303,8 +432,19 @@ async function run(profileRaw, options) {
 
   // ---- stderr: forward as debug ----
   let stderrBuf = '';
+  // Keep a sliding window of the most recent stderr for post-mortem
+  // diagnosis on failure. The *last* 8KB matters more than the first — a
+  // noisy agent can fill the buffer with progress junk before the real
+  // error appears at the end.
+  let stderrAll = '';
+  const STDERR_CAP = 8192;
   child.stderr.on('data', chunk => {
-    stderrBuf += chunk.toString();
+    const text = chunk.toString();
+    stderrBuf += text;
+    stderrAll += text;
+    if (stderrAll.length > STDERR_CAP) {
+      stderrAll = stderrAll.slice(stderrAll.length - STDERR_CAP);
+    }
     let nl;
     while ((nl = stderrBuf.indexOf('\n')) >= 0) {
       const line = stderrBuf.slice(0, nl);
@@ -340,8 +480,20 @@ async function run(profileRaw, options) {
   const exitCode = await new Promise(resolve => {
     child.on('close', code => resolve(code));
     child.on('error', err => {
-      // spawn error (ENOENT etc.)
-      if (options.onStderr) options.onStderr(`[agentproc runner] spawn error: ${err.message}`);
+      // spawn error — usually ENOENT. Node attributes it to argv[0]
+      // regardless of whether it was the command or a referenced file that
+      // wasn't found, so disambiguate for the user.
+      const tip = diagnoseSpawnError(err, { argv, cwd, env });
+      if (options.onStderr) {
+        options.onStderr(`[agentproc runner] spawn error: ${err.message}`);
+        if (tip) options.onStderr(`[agentproc runner] hint: ${tip}`);
+      }
+      // Surface as an AGENT_ERROR so the user sees it on the bridge too.
+      if (options.onError) {
+        const msg = tip || err.message;
+        options.onError(`failed to start agent: ${msg}`);
+      }
+      if (!result.error) result.error = tip || err.message;
       resolve(EXIT_ERROR);
     });
   });
@@ -353,7 +505,23 @@ async function run(profileRaw, options) {
     handleLine(stdoutBuf.replace(/\r$/, ''));
   }
 
-  // Compose reply body.
+  // Flush any remaining stderr (the chunk handler only emits on newlines).
+  if (stderrBuf.length > 0) {
+    if (options.onStderr) options.onStderr(stderrBuf.replace(/\r$/, ''));
+  }
+
+  // If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
+  // common "command/file not found" patterns and surface a friendly hint.
+  // Bridges that depend on shell-level errors (python's "can't open file",
+  // node's "Cannot find module", etc.) would otherwise leak raw text to users.
+  if (!killed && !result.error && exitCode !== 0) {
+    const hint = diagnoseStderrFailure(stderrAll, { argv });
+    if (hint) {
+      result.error = hint;
+      if (options.onError) options.onError(hint);
+    }
+  }
+
   result.reply = bodyLines.join('\n');
   if (result.reply.length > profile.max_reply_chars) {
     const suffix = profile.max_reply_chars === DEFAULT_MAX_REPLY_CHARS

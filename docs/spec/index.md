@@ -9,10 +9,13 @@ The full specification is maintained in the repository at [`spec/protocol.md`](h
 ## Profile YAML
 
 ```yaml
-command: ./my_agent.py        # executable to run, split on whitespace (no shell)
-args: []                      # supports {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}
+command: python3 {{PROFILE_DIR}}/my_agent.py   # executable, split on whitespace (no shell)
+                                              # {{PROFILE_DIR}} = profile's own directory
+args: []                      # supports {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}}
 stdin: none                   # none | message (message = write + EOF)
 
+# cwd is optional. If omitted, defaults to the bridge's process cwd.
+# If relative, resolves against {{PROFILE_DIR}} (the profile's directory).
 cwd: /path/to/workspace
 env:
   MY_API_KEY: "${MY_API_KEY}"

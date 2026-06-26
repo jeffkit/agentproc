@@ -2,7 +2,23 @@
 
 Wraps the [`codex`](https://github.com/openai/codex) CLI (OpenAI Codex) as an AgentProc agent with streaming and multi-turn session continuity.
 
-## Setup
+## Quick test (zero config)
+
+```bash
+# 1. Install codex once:
+npm install -g @openai/codex
+
+# 2. Auth either via codex login OR by exporting a key:
+export OPENAI_API_KEY="sk-..."
+
+# 3. From your project directory:
+cd ~/projects/my-app
+agentproc hub run codex -p "what is this codebase?"
+```
+
+No YAML editing. `agentproc hub run` uses your current directory as the agent's `cwd`, and locates the bundled `bridge.py` via `{{PROFILE_DIR}}` — so `codex` runs against your project, no matter where you invoke from.
+
+## Setup (if you can't use `hub run`)
 
 1. Install the `codex` CLI:
 
@@ -12,22 +28,29 @@ Wraps the [`codex`](https://github.com/openai/codex) CLI (OpenAI Codex) as an Ag
 
 2. Authenticate — set `OPENAI_API_KEY` or run `codex login`.
 
-3. Copy `profile.yaml` and one bridge script into your project:
+3. Copy the profile into your project:
 
    ```bash
-   cp hub/codex/profile.yaml     ./profile.yaml
-   cp hub/codex/bridge.py        ./bridge.py    # Python
-   # or
-   cp hub/codex/bridge.js        ./bridge.js    # Node.js
+   agentproc hub install codex    # creates ./codex/
+   # or, from a repo checkout:
+   cp -r hub/codex ./codex
    ```
 
-4. Edit `cwd:` in `profile.yaml` to point at the directory `codex` should work in.
+4. Run against the local copy. Use `--cwd` to tell `codex` which project to work on:
+
+   ```bash
+   agentproc --profile ./codex/profile.yaml \
+             --prompt "explain this codebase" \
+             --cwd /path/to/your/project \
+             --env OPENAI_API_KEY="$OPENAI_API_KEY"
+   ```
 
 ## Profile
 
 ```yaml
-command: python3 ./bridge.py          # or: node ./bridge.js
-cwd: ~/your-project
+command: python3 {{PROFILE_DIR}}/bridge.py    # or: node {{PROFILE_DIR}}/bridge.js
+# cwd: omitted — `hub run` defaults it to your current directory.
+#       With --profile, pass --cwd explicitly.
 timeout_secs: 600
 streaming: true
 env:
@@ -39,6 +62,21 @@ env:
 ## Local test
 
 ```bash
+cd ~/projects/my-app
+agentproc hub run codex -p "reply with exactly: codex ok" --env OPENAI_API_KEY=$OPENAI_API_KEY
+```
+
+Expected output (on stderr / stdout):
+
+```
+AGENT_SESSION:019efead-1a89-7ff3-887a-cd11f3c0843f
+codex ok
+```
+
+<details>
+<summary>Drive the bridge script directly (without the CLI)</summary>
+
+```bash
 cd hub/codex
 AGENT_MESSAGE="reply with exactly: codex ok" \
 AGENT_SESSION_ID="" \
@@ -47,12 +85,7 @@ OPENAI_API_KEY="$OPENAI_API_KEY" \
 python3 bridge.py
 ```
 
-Expected output:
-
-```
-AGENT_SESSION:019efead-1a89-7ff3-887a-cd11f3c0843f
-codex ok
-```
+</details>
 
 ## How it works
 

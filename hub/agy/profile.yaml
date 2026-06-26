@@ -4,8 +4,8 @@ cli: agy
 cli_install: |
   # See the agy project for installation instructions.
 agentproc:
-  command: python3 ./bridge.py
-  cwd: ~/your-project
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
   timeout_secs: 300
   streaming: false              # agy's --print mode returns full text only
   env:

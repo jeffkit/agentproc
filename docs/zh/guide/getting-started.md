@@ -2,6 +2,11 @@
 
 5 分钟跑起一个 AgentProc 兼容的 agent。
 
+::: tip 两条路径，选一条
+- **只是想用主流 AI CLI（claude、codex、codebuddy 等）？** 不用看本页。直接去[首页](/zh/)用 `agentproc hub run <name>`——零配置。
+- **想从零写一个自己的 agent 脚本？** 本页就是写给你的。你会写一个 3 行脚本、一个 2 行 profile YAML，然后用同一个 `agentproc` CLI 跑起来。
+:::
+
 ## 第一步：写 agent 脚本
 
 最简单的 agent 读取 `AGENT_MESSAGE`，然后把回复写到 stdout。
@@ -37,9 +42,21 @@ command: bash ./echo_agent.sh
 timeout_secs: 10
 ```
 
-## 第三步：本地测试
+## 第三步：用 agentproc CLI 本地测试
 
-不需要启动 bridge，手动设置环境变量即可测试：
+用 hub 用的同一个 CLI 跑你的 profile——这是对真实 bridge 行为最忠实的测试：
+
+```bash
+agentproc --profile ./myagent.yaml --prompt "你好"
+# → 你说：你好
+```
+
+协议行（如果有）出现在 stderr，回复正文出现在 stdout。CLI 的退出码和 bridge 看到的一致：`0` 成功、`1` 错误、`124` 超时。
+
+<details>
+<summary>不想用 CLI 测试？</summary>
+
+也可以直接设环境变量驱动脚本。CLI 内部就是这么做的：
 
 ```bash
 AGENT_MESSAGE="你好" \
@@ -50,15 +67,12 @@ AGENT_STREAMING="1" \
 bash ./echo_agent.sh
 ```
 
-预期输出：
-
-```
-你说：你好
-```
+调试脚本本身时有用；但端到端行为请优先用上面的 `agentproc --profile ...`。
+</details>
 
 ## 第四步：接入 bridge
 
-将 profile YAML 的路径告诉 bridge。具体步骤取决于你用的 bridge 实现，请参考对应 bridge 的文档。
+将 profile YAML 的路径告诉 bridge。具体步骤取决于你用的 bridge 实现，请参考对应 bridge 的文档。[Node SDK 的 `run()` 函数](/zh/sdk/node)是 bridge 行为的标准参考。
 
 ---
 
@@ -149,3 +163,7 @@ createProfile(async (ctx) => {
 - [阅读完整协议规范](/zh/spec/) 了解所有特性
 - [使用 SDK](/zh/sdk/) 省去样板代码
 - [查看示例](/zh/examples/claude) 了解如何接入 claude 等真实 AI agent
+
+::: tip 卡住了？
+看 [故障排除](/zh/guide/troubleshooting)，覆盖了最常见的几类错误（限流、`spawn ENOENT`、模型不存在、超时等），每类都给出确切修法。
+:::

@@ -63,13 +63,25 @@ session_line_prefix: "AGENT_SESSION:"  # prefix that marks a session line
 
 ### Placeholders
 
-Placeholders in `args`, `cwd`, and `env` values are replaced before the process starts. They are **not** passed through a shell.
+Placeholders in `command`, `args`, `cwd`, and `env` values are replaced before the process starts. They are **not** passed through a shell.
 
 | Placeholder | Value |
 |-------------|-------|
 | `{{MESSAGE}}` | User message text |
 | `{{SESSION_ID}}` | Session ID from the previous turn (empty = new session) |
 | `{{SESSION_NAME}}` | Human-readable session name |
+| `{{PROFILE_DIR}}` | Absolute path to the directory containing the profile YAML. Lets a profile reference a bundled script (e.g. `command: python3 {{PROFILE_DIR}}/bridge.py`) independently of the agent's `cwd`. Bridges set this when invoking a profile by path; if unset (e.g. programmatic use without a file), it expands to empty. |
+
+### `cwd` semantics
+
+| Source | What happens |
+|--------|--------------|
+| `cwd` in profile (absolute path) | Used as-is |
+| `cwd` in profile (relative path) | Resolved against `{{PROFILE_DIR}}` (the profile's own directory), not the bridge's process cwd. This makes `cwd: .` mean "the profile's directory" |
+| `cwd` omitted | Defaults to the bridge's process cwd (typically the user's current directory) |
+| `--cwd` flag (if the bridge's CLI exposes one) | Overrides all of the above |
+
+The split between `{{PROFILE_DIR}}` (locates bundled scripts) and `cwd` (where the agent actually runs) is intentional: a hub profile can bundle a bridge script and still let `claude`/`codex`/etc. operate on whatever project the user is in.
 
 ### Command execution model
 

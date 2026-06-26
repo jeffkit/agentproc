@@ -13,19 +13,31 @@ Available in three languages — all produce identical output:
 ## Profile
 
 ```yaml
-command: python3 ./bridge.py          # or: node ./bridge.js / bash ./bridge.sh
-cwd: .
+command: python3 {{PROFILE_DIR}}/bridge.py   # or: node {{PROFILE_DIR}}/bridge.js / bash {{PROFILE_DIR}}/bridge.sh
+# cwd intentionally omitted: hub run defaults to your current directory.
 timeout_secs: 10
 streaming: false
 ```
 
-## Local test
+## Quick test
+
+```bash
+agentproc hub run echo-agent -p "hello"
+# → You said: hello
+```
+
+## Local test (without the CLI)
+
+<details>
+<summary>Drive the script directly</summary>
 
 ```bash
 cd hub/echo-agent
 AGENT_MESSAGE="hello" AGENT_STREAMING="0" python3 bridge.py
 # → You said: hello
 ```
+
+</details>
 
 ## When to use
 

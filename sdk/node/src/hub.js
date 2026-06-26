@@ -74,24 +74,105 @@ function writeCacheMeta(name) {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Custom error type for hub fetch failures. Carries a short, user-facing
+ * `hint` with remediation, so the CLI can print something helpful instead
+ * of a raw Node stack trace.
+ */
+class HubError extends Error {
+  constructor(message, { hint = '', cause = null, status = 0 } = {}) {
+    super(message);
+    this.name = 'HubError';
+    this.hint = hint;
+    this.status = status;
+    if (cause) this.cause = cause;
+  }
+}
+
+function authHeaders({ json = false } = {}) {
+  // Optional: an explicit token raises GitHub's anonymous rate limit from
+  // 60 req/hour to 5,000. We accept either GITHUB_TOKEN (the env var GitHub
+  // Actions injects) or GH_TOKEN (what `gh` CLI users typically have).
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
+  const h = { 'User-Agent': 'agentproc-cli' };
+  if (json) h.Accept = 'application/vnd.github+json';
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+}
+
 async function httpGetJson(url) {
-  const r = await fetch(url, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'agentproc-cli',
-    },
-  });
+  let r;
+  try {
+    r = await fetch(url, { headers: authHeaders({ json: true }) });
+  } catch (e) {
+    throw new HubError(
+      `could not reach GitHub while fetching hub profile`,
+      {
+        status: 0,
+        cause: e,
+        hint: [
+          'This is usually a transient network issue. Try:',
+          '  1. Re-run the command (often succeeds on retry).',
+          '  2. If your network requires a proxy, set HTTPS_PROXY.',
+          '  3. To avoid the network entirely, run against a local checkout:',
+          '       agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
+        ].join('\n'),
+      }
+    );
+  }
   if (!r.ok) {
     const text = await r.text().catch(() => '');
-    throw new Error(`GitHub API ${r.status}: ${text.slice(0, 200)}`);
+    if (r.status === 403 || r.status === 429) {
+      const authed = !!(process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
+      throw new HubError(
+        `GitHub rate-limited the hub fetch (HTTP ${r.status})`,
+        {
+          status: r.status,
+          hint: authed
+            ? [
+              'Your GITHUB_TOKEN is set but still rate-limited. Wait a few minutes and retry,',
+              'or run against a local checkout instead:',
+              '  agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
+              '',
+              `Not sure the profile name is right? Check with: agentproc hub list`,
+            ].join('\n')
+            : [
+              'GitHub limits anonymous hub fetches to ~60/hour. To raise this to 5,000/hour:',
+              '  export GITHUB_TOKEN=$(gh auth token)   # if you have the GitHub CLI',
+              '  # or set GITHUB_TOKEN to any personal access token',
+              '',
+              'To skip the network entirely, run against a local checkout:',
+              '  git clone https://github.com/jeffkit/agentproc && cd agentproc',
+              '  agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
+              '',
+              `Not sure the profile name is right? Check with: agentproc hub list`,
+            ].join('\n'),
+        }
+      );
+    }
+    if (r.status === 404) {
+      throw new HubError(`profile not found on GitHub (HTTP 404)`, {
+        status: 404,
+        hint: 'Check the profile name with `agentproc hub list`. (Typos are case-sensitive.)',
+      });
+    }
+    throw new HubError(`GitHub returned HTTP ${r.status} for hub fetch`, {
+      status: r.status,
+      hint: text.slice(0, 200) || 'No additional detail from GitHub.',
+    });
   }
   return r.json();
 }
 
 async function httpGetText(url) {
-  const r = await fetch(url, { headers: { 'User-Agent': 'agentproc-cli' } });
+  const r = await fetch(url, { headers: authHeaders({ json: false }) });
   if (!r.ok) {
-    throw new Error(`fetch ${r.status}: ${url}`);
+    // raw.githubusercontent.com is essentially unrate-limited; a failure
+    // here is more likely a genuine 404 (profile file missing) than 403.
+    throw new HubError(`fetch failed (HTTP ${r.status}) for ${url}`, {
+      status: r.status,
+      hint: 'Profile files should exist in the hub repo. Try `agentproc hub list` to verify.',
+    });
   }
   return r.text();
 }
@@ -160,6 +241,81 @@ async function listRemoteProfileFiles(name) {
     }));
 }
 
+/**
+ * List top-level profile names (the directories directly under hub/).
+ * Cheap: uses the same in-memory tree cache as getTree(), so calling this
+ * after listRemoteProfileFiles does not cost an extra API request.
+ * @returns {Promise<string[]>}
+ */
+async function listProfileNames() {
+  const tree = await getTree();
+  const seen = new Set();
+  for (const e of tree) {
+    if (!e.path.startsWith('hub/')) continue;
+    const seg = e.path.slice('hub/'.length).split('/')[0];
+    if (seg && !seen.has(seg)) seen.add(seg);
+  }
+  return [...seen].sort();
+}
+
+/**
+ * Lightweight "did you mean" hint using edit distance + prefix matching.
+ * Returns the best candidate name, or '' if none is close enough.
+ *
+ * Two paths to a match:
+ *   1. Prefix match — `claude` matches `claude-code`, `echo` matches
+ *      `echo-agent`. This is the common typo pattern (user forgot a suffix).
+ *      Only accepts an unambiguous prefix — if multiple candidates share
+ *      the prefix, none is returned (better no suggestion than a wrong one).
+ *   2. Edit distance — tolerate ~1/3 of the input length in edits. Catches
+ *      transpositions (`calude`) and small typos (`coudex` → `codex`).
+ */
+function suggestCloseName(input, candidates) {
+  if (!input || !candidates || candidates.length === 0) return '';
+
+  const n = input.toLowerCase();
+
+  // Path 1: unique prefix match.
+  const prefixMatches = candidates.filter(c => c.toLowerCase().startsWith(n));
+  if (prefixMatches.length === 1) return prefixMatches[0];
+
+  // Path 2: edit distance. Threshold scales with input length:
+  //   - short (≤6): allow 1 edit (typos in `agy`, `codex`)
+  //   - medium (7-12): allow 2 edits (transpositions in `calude-code`)
+  //   - long (>12): allow 3 edits
+  const threshold = input.length <= 6 ? 1 : input.length <= 12 ? 2 : 3;
+  let best = '';
+  let bestDist = Infinity;
+  for (const c of candidates) {
+    const dist = editDistance(n, c.toLowerCase());
+    if (dist < bestDist) { bestDist = dist; best = c; }
+  }
+  if (best && bestDist <= threshold) return best;
+  return '';
+}
+
+function editDistance(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const prev = new Array(n + 1);
+  const curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(
+        prev[j] + 1,        // deletion
+        curr[j - 1] + 1,    // insertion
+        prev[j - 1] + cost  // substitution
+      );
+    }
+    for (let j = 0; j <= n; j++) prev[j] = curr[j];
+  }
+  return prev[n];
+}
+
 async function downloadFile(remotePath, localPath) {
   const text = await httpGetText(GITHUB_RAW(remotePath));
   fs.mkdirSync(path.dirname(localPath), { recursive: true });
@@ -203,7 +359,18 @@ async function fetchProfile(name, opts = {}) {
 
   const entries = await listRemoteProfileFiles(name);
   if (entries.length === 0) {
-    throw new Error(`profile '${name}' not found in hub`);
+    // getTree succeeded (otherwise listRemoteProfileFiles would have thrown
+    // a HubError already). So the name is genuinely wrong — surface the list
+    // of available names so the user can correct the typo.
+    const known = await listProfileNames();
+    const suggestion = suggestCloseName(name, known);
+    const hint = suggestion
+      ? [`Did you mean \`${suggestion}\`?`, '', 'Available profiles:', ...known.map(n => `  - ${n}`)].join('\n')
+      : ['Available profiles:', ...known.map(n => `  - ${n}`)].join('\n');
+    throw new HubError(`profile '${name}' not found in hub`, {
+      status: 404,
+      hint,
+    });
   }
 
   // Clear cache, then re-download every file in the profile directory.
@@ -300,6 +467,7 @@ module.exports = {
   HUB_REPO,
   HUB_REF,
   HUB_CACHE_TTL_SECS,
+  HubError,
   cacheRoot,
   cacheDir,
   cacheAgeSecs,

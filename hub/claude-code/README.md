@@ -2,7 +2,25 @@
 
 Wraps the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI (Anthropic Claude Code) as an AgentProc agent with full streaming and multi-turn session continuity.
 
-## Setup
+## Quick test (zero config)
+
+```bash
+# 1. Install claude once:
+npm install -g @anthropic-ai/claude-code
+
+# 2. Auth either via claude's own login OR by exporting a key:
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# 3. From your project directory:
+cd ~/projects/my-app
+agentproc hub run claude-code -p "what is this codebase?"
+```
+
+No YAML editing. `agentproc hub run` uses your current directory as the agent's `cwd`, and locates the bundled `bridge.py` via `{{PROFILE_DIR}}` — so `claude` runs against your project, no matter where you invoke from.
+
+## Setup (if you can't use `hub run`)
+
+If you prefer to keep a local copy of the profile (e.g. offline, custom edits, or a non-hub bridge):
 
 1. Install the `claude` CLI:
 
@@ -16,22 +34,29 @@ Wraps the [`claude`](https://docs.claude.com/en/docs/claude-code) CLI (Anthropic
    claude setup-token        # or set ANTHROPIC_API_KEY in your environment
    ```
 
-3. Copy `profile.yaml` and one bridge script into your project:
+3. Copy the profile into your project:
 
    ```bash
-   cp hub/claude-code/profile.yaml     ./profile.yaml
-   cp hub/claude-code/bridge.py        ./bridge.py    # Python
-   # or
-   cp hub/claude-code/bridge.js        ./bridge.js    # Node.js
+   agentproc hub install claude-code    # creates ./claude-code/
+   # or, from a repo checkout:
+   cp -r hub/claude-code ./claude-code
    ```
 
-4. Edit `cwd:` in `profile.yaml` to point at the directory `claude` should work in.
+4. Run against the local copy. Use `--cwd` to tell `claude` which project to work on:
+
+   ```bash
+   agentproc --profile ./claude-code/profile.yaml \
+             --prompt "explain this codebase" \
+             --cwd /path/to/your/project \
+             --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
+   ```
 
 ## Profile
 
 ```yaml
-command: python3 ./bridge.py          # or: node ./bridge.js
-cwd: ~/your-project
+command: python3 {{PROFILE_DIR}}/bridge.py    # or: node {{PROFILE_DIR}}/bridge.js
+# cwd: omitted — `hub run` defaults it to your current directory.
+#       With --profile, pass --cwd explicitly.
 timeout_secs: 600
 streaming: true
 env:
@@ -44,6 +69,23 @@ env:
 ## Local test
 
 ```bash
+cd ~/projects/my-app
+agentproc hub run claude-code -p "say hi in 5 words" --env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
+```
+
+Expected output (streaming mode):
+
+```
+AGENT_PARTIAL:"Hi"
+AGENT_PARTIAL:" there"
+AGENT_PARTIAL:", how can I help?"
+AGENT_SESSION:13c2f6ec-1f97-42c4-be9e-9475129e243c
+```
+
+<details>
+<summary>Drive the bridge script directly (without the CLI)</summary>
+
+```bash
 cd hub/claude-code
 AGENT_MESSAGE="say hi in 5 words" \
 AGENT_SESSION_ID="" \
@@ -52,14 +94,7 @@ ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
 python3 bridge.py
 ```
 
-Expected output (streaming mode):
-
-```
-AGENT_PARTIAL:"Hi"
-AGENT_PARTIAL:" there"
-AGENT_PARTIAL,", how can I help?"
-AGENT_SESSION:13c2f6ec-1f97-42c4-be9e-9475129e243c
-```
+</details>
 
 ## How it works
 

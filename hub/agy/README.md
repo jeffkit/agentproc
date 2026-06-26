@@ -2,26 +2,45 @@
 
 Wraps the `agy` CLI as an AgentProc agent. **One-shot mode only** — agy doesn't expose a resumable session id or stream chunks in `--print` mode, so this bridge forwards the final reply as a single AgentProc message body.
 
-## Setup
+## Quick test (zero config)
+
+```bash
+# 1. Install agy (see the agy project for installation instructions).
+# 2. Authenticate per agy's docs.
+
+# 3. From your project directory:
+cd ~/projects/my-app
+agentproc hub run agy -p "what is this codebase?"
+```
+
+No YAML editing. `agentproc hub run` uses your current directory as the agent's `cwd`, and locates the bundled `bridge.py` via `{{PROFILE_DIR}}`.
+
+## Setup (if you can't use `hub run`)
 
 1. Install `agy` (see the agy project for installation instructions).
 2. Authenticate per agy's docs.
-3. Copy `profile.yaml` and one bridge script into your project:
+3. Copy the profile into your project:
 
    ```bash
-   cp hub/agy/profile.yaml     ./profile.yaml
-   cp hub/agy/bridge.py        ./bridge.py    # Python
-   # or
-   cp hub/agy/bridge.js        ./bridge.js    # Node.js
+   agentproc hub install agy    # creates ./agy/
+   # or, from a repo checkout:
+   cp -r hub/agy ./agy
    ```
 
-4. Edit `cwd:` in `profile.yaml` to point at the directory `agy` should work in.
+4. Run against the local copy. Use `--cwd` to tell `agy` which project to work on:
+
+   ```bash
+   agentproc --profile ./agy/profile.yaml \
+             --prompt "explain this codebase" \
+             --cwd /path/to/your/project
+   ```
 
 ## Profile
 
 ```yaml
-command: python3 ./bridge.py          # or: node ./bridge.js
-cwd: ~/your-project
+command: python3 {{PROFILE_DIR}}/bridge.py    # or: node {{PROFILE_DIR}}/bridge.js
+# cwd: omitted — `hub run` defaults it to your current directory.
+#       With --profile, pass --cwd explicitly.
 timeout_secs: 300
 streaming: false                      # agy doesn't stream
 env:
@@ -32,6 +51,22 @@ env:
 ## Local test
 
 ```bash
+cd ~/projects/my-app
+agentproc hub run agy -p "reply with exactly: agy ok"
+```
+
+Expected output (on stdout):
+
+```
+agy ok
+```
+
+(No `AGENT_SESSION:` line — see "Session continuity" below.)
+
+<details>
+<summary>Drive the bridge script directly (without the CLI)</summary>
+
+```bash
 cd hub/agy
 AGENT_MESSAGE="reply with exactly: agy ok" \
 AGENT_SESSION_ID="" \
@@ -39,13 +74,7 @@ AGENT_STREAMING="0" \
 python3 bridge.py
 ```
 
-Expected output:
-
-```
-agy ok
-```
-
-(No `AGENT_SESSION:` line — see "Session continuity" below.)
+</details>
 
 ## How it works
 

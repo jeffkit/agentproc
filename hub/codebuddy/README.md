@@ -4,26 +4,45 @@ Wraps the [`codebuddy`](https://copilot.tencent.com) CLI (Tencent CodeBuddy) as 
 
 CodeBuddy's `--output-format stream-json` produces a schema compatible with Anthropic's `claude` CLI, so this bridge is structurally identical to the [claude-code bridge](../claude-code/) — only the command name, the resume flag (`-r` instead of `--resume`), and the auth flow differ.
 
-## Setup
+## Quick test (zero config)
+
+```bash
+# 1. Install codebuddy (distributed by Tencent — see your internal docs).
+# 2. Authenticate by running `codebuddy` once interactively (login flow).
+
+# 3. From your project directory:
+cd ~/projects/my-app
+agentproc hub run codebuddy -p "what is this codebase?"
+```
+
+No YAML editing. `agentproc hub run` uses your current directory as the agent's `cwd`, and locates the bundled `bridge.py` via `{{PROFILE_DIR}}`.
+
+## Setup (if you can't use `hub run`)
 
 1. Install `codebuddy` (distributed by Tencent — see your internal docs).
 2. Authenticate by running `codebuddy` once interactively and following the login flow.
-3. Copy `profile.yaml` and one bridge script into your project:
+3. Copy the profile into your project:
 
    ```bash
-   cp hub/codebuddy/profile.yaml   ./profile.yaml
-   cp hub/codebuddy/bridge.py      ./bridge.py    # Python
-   # or
-   cp hub/codebuddy/bridge.js      ./bridge.js    # Node.js
+   agentproc hub install codebuddy    # creates ./codebuddy/
+   # or, from a repo checkout:
+   cp -r hub/codebuddy ./codebuddy
    ```
 
-4. Edit `cwd:` in `profile.yaml` to point at the directory `codebuddy` should work in.
+4. Run against the local copy. Use `--cwd` to tell `codebuddy` which project to work on:
+
+   ```bash
+   agentproc --profile ./codebuddy/profile.yaml \
+             --prompt "explain this codebase" \
+             --cwd /path/to/your/project
+   ```
 
 ## Profile
 
 ```yaml
-command: python3 ./bridge.py          # or: node ./bridge.js
-cwd: ~/your-project
+command: python3 {{PROFILE_DIR}}/bridge.py    # or: node {{PROFILE_DIR}}/bridge.js
+# cwd: omitted — `hub run` defaults it to your current directory.
+#       With --profile, pass --cwd explicitly.
 timeout_secs: 600
 streaming: true
 env:
@@ -36,6 +55,21 @@ env:
 ## Local test
 
 ```bash
+cd ~/projects/my-app
+agentproc hub run codebuddy -p "reply with exactly: codebuddy ok"
+```
+
+Expected output (on stderr / stdout):
+
+```
+AGENT_SESSION:53bb6352-4b47-43fc-bce6-eaf808d419da
+codebuddy ok
+```
+
+<details>
+<summary>Drive the bridge script directly (without the CLI)</summary>
+
+```bash
 cd hub/codebuddy
 AGENT_MESSAGE="reply with exactly: codebuddy ok" \
 AGENT_SESSION_ID="" \
@@ -43,12 +77,7 @@ AGENT_STREAMING="0" \
 python3 bridge.py
 ```
 
-Expected output:
-
-```
-AGENT_SESSION:53bb6352-4b47-43fc-bce6-eaf808d419da
-codebuddy ok
-```
+</details>
 
 ## How it works
 

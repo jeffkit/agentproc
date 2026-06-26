@@ -4,12 +4,15 @@ cli: codex
 cli_install: |
   npm install -g @openai/codex
 agentproc:
-  command: python3 ./bridge.py
-  cwd: ~/your-project
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
+  # Override with --cwd if you want codex to run elsewhere.
   timeout_secs: 600
   streaming: true
   env:
     OPENAI_API_KEY: "${OPENAI_API_KEY}"
+    # Optional override (uncomment to use):
+    # CODEX_MODEL: "gpt-5"                # model name; sets -c model="..." on first turn
 tested: official
 maintainer: jeffkit
 tags: [coding, openai, ai]

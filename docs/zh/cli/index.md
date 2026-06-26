@@ -10,28 +10,65 @@ npm install -g agentproc       # 全局安装
 npx agentproc ...              # 不装直接跑
 ```
 
+## 两种调用方式
+
+CLI 有两个等价入口：
+
+| 入口 | 适用场景 |
+|------|---------|
+| `agentproc hub <subcommand>` | **推荐**。零本地文件运行官方 hub 里的 profile。CLI 首次使用时从 GitHub 拉取，缓存在 `~/.agentproc/cache/hub/<name>/`（24 小时 TTL），默认把你的当前目录作为 agent 的 `cwd`。 |
+| `agentproc --profile <path>` | 运行本地已有的 profile YAML（你自己的、安装到本地的 hub profile、或仓库 checkout）。用 `--cwd` 控制 agent 的工作目录。 |
+
 ## 快速开始
 
 ```bash
-agentproc --profile hub/echo-agent/profile.yaml --prompt "hello"
+# 冒烟测试，不需要 API key、不需要 clone：
+agentproc hub run echo-agent -p "hello"
 # → You said: hello
+
+# 真实 agent，对当前目录操作：
+cd ~/projects/my-app
+agentproc hub run claude-code -p "explain this codebase" --env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 ```
 
-驱动 hub 里的真实 CLI profile：
+驱动本地 profile（不联网拉取）：
 
 ```bash
 git clone https://github.com/jeffkit/agentproc
 cd agentproc
 
-# echo-agent（不需要 API key，用于冒烟测试）
-agentproc --profile hub/echo-agent/profile.yaml \
-          --prompt "hello" --cwd hub/echo-agent
+# echo-agent（{{PROFILE_DIR}} 让 cwd 不再重要）
+agentproc --profile hub/echo-agent/profile.yaml --prompt "hello"
 
-# claude-code（需要 ANTHROPIC_API_KEY）
+# claude-code——用 --cwd 指向你的项目，让 claude 在那跑
 agentproc --profile hub/claude-code/profile.yaml \
           --prompt "explain this codebase" \
-          --cwd /path/to/your/project
+          --cwd /path/to/your/project \
+          --env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 ```
+
+::: tip GITHUB_TOKEN 可以提高速率限制
+匿名 hub 拉取每个 IP 每小时 ~60 次。设置 token 可提到 5,000 次/小时：
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
+```
+
+如果想完全绕开网络，可以用本地仓库跑：`agentproc --profile ./hub/<name>/profile.yaml ...`。
+:::
+
+## Hub 子命令
+
+| 命令 | 用途 |
+|------|------|
+| `agentproc hub list` | 列出 hub 里所有 profile |
+| `agentproc hub show <name>` | 显示某个 profile 的 README |
+| `agentproc hub run <name> [opts]` | 拉取（必要时）并运行某个 profile |
+| `agentproc hub install <name>` | 把 profile 复制到 `./<name>/` 用于本地编辑 |
+
+`hub run` 接受和 `--profile` 一样的 runner 选项（见下），但有一个便利：不传 `--cwd` 时，默认用你的当前目录（让被包装的 CLI 在你所在的项目里跑）。
+
+任何 hub 命令都可以加 `--refresh` 强制从 GitHub 重新拉取。
 
 ## 用法
 
@@ -39,12 +76,16 @@ agentproc --profile hub/claude-code/profile.yaml \
 agentproc --profile <path.yaml> --prompt "hello" [options]
 ```
 
-### 必填
+### 必填（仅 `--profile` 模式）
 
 | 选项 | 说明 |
 |------|------|
 | `--profile`, `-p <path>` | Profile YAML 路径 |
 | `--prompt <text>` | 用户消息（或用 `--stdin`） |
+
+::: warning 关于 `-p`
+在 `--profile` 模式下，`-p` 是 `--profile` 的短形式。在 `hub run` 模式下，由于 profile 是按名字（positional 参数）而不是路径指定，`-p` 被复用为 `--prompt` 的短形式。这是唯一一个短形式在两种模式间不同的选项——不确定时用长形式。
+:::
 
 ### 会话
 

@@ -5,8 +5,8 @@ cli_install: |
   # CodeBuddy is currently distributed by Tencent; see internal docs for installation.
   # Once installed, the binary is typically available as `codebuddy` or `cbc`.
 agentproc:
-  command: python3 ./bridge.py
-  cwd: ~/your-project
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
   timeout_secs: 600
   streaming: true
   env:

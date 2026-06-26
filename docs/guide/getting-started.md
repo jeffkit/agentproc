@@ -2,6 +2,11 @@
 
 Get an AgentProc-compatible agent running in 5 minutes.
 
+::: tip Two paths — pick one
+- **Just want to use a popular AI CLI (claude, codex, codebuddy, …)?** You don't need this page. Go to the [homepage](/) and use `agentproc hub run <name>` — it's zero-config.
+- **Want to write your own agent script from scratch?** This page is for you. You'll write a 3-line script, a 2-line profile YAML, and run it through the same `agentproc` CLI.
+:::
+
 ## Step 1: Write your agent script
 
 The simplest possible agent reads `AGENT_MESSAGE` and writes a reply to stdout.
@@ -37,9 +42,21 @@ command: bash ./echo_agent.sh
 timeout_secs: 10
 ```
 
-## Step 3: Test it locally
+## Step 3: Test it locally with the agentproc CLI
 
-You can test your agent without a running bridge by setting the env vars manually:
+Run your profile through the same CLI the hub uses — this is the most faithful test of what a real bridge will see:
+
+```bash
+agentproc --profile ./myagent.yaml --prompt "hello"
+# → You said: hello
+```
+
+Protocol lines (if any) appear on stderr; the reply body on stdout. The CLI's exit code matches what a bridge would see: `0` success, `1` error, `124` timeout.
+
+<details>
+<summary>Prefer to test without the CLI?</summary>
+
+You can also drive the script directly by setting the env vars yourself. This is what the CLI does internally:
 
 ```bash
 AGENT_MESSAGE="hello" \
@@ -50,15 +67,12 @@ AGENT_STREAMING="1" \
 bash ./echo_agent.sh
 ```
 
-Expected output:
-
-```
-You said: hello
-```
+Useful when debugging the script in isolation, but for end-to-end behavior prefer the `agentproc --profile ...` form above.
+</details>
 
 ## Step 4: Connect to a bridge
 
-Point your bridge at the profile YAML. The exact steps depend on which bridge you're using — refer to the bridge's documentation.
+Point your bridge at the profile YAML. The exact steps depend on which bridge you're using — refer to the bridge's documentation. The [Node SDK's `run()` function](/sdk/node) is the canonical reference for what a bridge does.
 
 ---
 
@@ -115,3 +129,7 @@ Both the SDK form (raising `ProtocolError` / throwing `protocolError(...)`) and 
 - [Read the full protocol spec](/spec/) to understand all the features
 - [Use an SDK](/sdk/) to skip the boilerplate
 - [See examples](/examples/claude) for connecting real AI agents like claude CLI
+
+::: tip Stuck?
+See [Troubleshooting](/guide/troubleshooting) for the most common errors (rate limits, `spawn ENOENT`, model-not-found, timeouts) and their exact fixes.
+:::

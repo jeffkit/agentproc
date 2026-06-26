@@ -50,11 +50,15 @@ pip install agentproc
 
 :::
 
+::: tip macOS users: `pip`/`pipx` not found?
+Homebrew's Python ships without `pip` exposed. Either run `python3 -m ensurepip && python3 -m pip install --user pipx`, or just use the `npm` tab above — Node is required for the `agentproc` CLI anyway (it ships from the npm package).
+:::
+
 Verify it works:
 
 ```bash
 agentproc --version
-# agentproc 0.2.0 (protocol 0.1)
+# agentproc 0.3.0 (protocol 0.1)
 ```
 
 ## ② Browse the hub
@@ -68,7 +72,17 @@ agentproc hub list
 #   echo-agent    official    Minimal hello-world agent
 ```
 
-The [Profile Hub](/hub/) is a curated set of drop-in profiles for popular AI CLIs. No clone, no copy, no YAML editing — the CLI fetches and caches them on demand.
+The [Profile Hub](/hub/) is a curated set of drop-in profiles for popular AI CLIs. No clone, no copy, no YAML editing — the CLI fetches them from GitHub on first use and caches them at `~/.agentproc/cache/hub/<name>/` (24h TTL).
+
+::: tip Hit a GitHub rate limit?
+Anonymous fetches are capped at ~60/hour. Raise it to 5,000/hour with a token:
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)   # or any personal access token
+```
+
+If you'd rather skip the network entirely, run against a local checkout: `agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"`.
+:::
 
 ## ③ Run it in one line
 
@@ -82,11 +96,15 @@ agentproc hub run echo-agent -p "hello"
 Then go real. With `claude-code`, you get streaming output and multi-turn session continuity:
 
 ```bash
-cd ~/projects/my-app
+cd ~/projects/my-app          # the agent runs against whatever dir you're in
 agentproc hub run claude-code \
   -p "what is this codebase?" \
   --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 ```
+
+::: tip No need to edit any profile YAML
+`agentproc hub run` automatically uses **your current directory** as the agent's `cwd`, and locates the bundled bridge script via a `{{PROFILE_DIR}}` placeholder. Just `cd` into the project you want the agent to work on, and run.
+:::
 
 You'll see protocol lines stream on stderr in real time, and the final reply on stdout:
 
@@ -104,6 +122,10 @@ agentproc hub run claude-code \
   --env ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
   --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
+
+::: tip Short replies may not show AGENT_PARTIAL:
+Some agents emit the whole reply in one shot when the answer is short — you'll see just `AGENT_SESSION:` and the reply body, no `AGENT_PARTIAL:` lines. That's normal; streaming only fragments longer replies.
+:::
 
 ## ④ Connect to your messaging platform
 
@@ -146,5 +168,6 @@ Save as `bridge.js`, point it at a profile, and wire it to your messaging platfo
 - **[CLI reference](/cli/)** — every flag and option
 - **[Python SDK](/sdk/python) / [Node SDK](/sdk/node)** — embed AgentProc in your bridge
 - **[Examples](/examples/)** — claude_code bridge, bare scripts, more
+- **[Troubleshooting](/guide/troubleshooting)** — stuck? Common errors and their fixes
 
 </div>

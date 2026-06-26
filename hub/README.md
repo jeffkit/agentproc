@@ -79,8 +79,9 @@ cli: <command-name>             # the executable this wraps
 cli_install: |                  # how to install the CLI itself
   npm install -g ...
 agentproc:                      # the actual AgentProc P0 profile
-  command: python3 ./bridge.py  # or: node ./bridge.js
-  cwd: ~/your-project           # user replaces this
+  command: python3 {{PROFILE_DIR}}/bridge.py  # or: node {{PROFILE_DIR}}/bridge.js
+  # cwd intentionally omitted: `hub run` defaults it to the user's
+  # current directory. Bridge script is located via {{PROFILE_DIR}}.
   timeout_secs: 600
   streaming: true
   env:

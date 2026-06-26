@@ -30,6 +30,7 @@ export default defineConfig({
             items: [
               { text: '什么是 AgentProc？', link: '/zh/guide/what-is-agentproc' },
               { text: '快速开始', link: '/zh/guide/getting-started' },
+              { text: '故障排除', link: '/zh/guide/troubleshooting' },
             ],
           },
           {
@@ -90,6 +91,7 @@ export default defineConfig({
           items: [
             { text: 'What is AgentProc?', link: '/guide/what-is-agentproc' },
             { text: 'Quick Start', link: '/guide/getting-started' },
+            { text: 'Troubleshooting', link: '/guide/troubleshooting' },
           ],
         },
       ],

@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * agentproc CLI — run any AgentProc profile against a message.
+ * agentproc CLI — drive any AgentProc profile against a message.
  *
- * Usage:
+ * Quick start (hub):
+ *   agentproc hub list
+ *   agentproc hub run echo-agent -p "hello"
+ *   cd ~/projects/my-app && agentproc hub run claude-code -p "explain this"
+ *
+ * Advanced (local profile YAML, no hub fetch):
  *   agentproc --profile <path.yaml> --prompt "hello" [options]
  *
- * Options:
+ * Options (local-profile mode):
  *   --profile, -p <path>      Profile YAML path (required)
  *   --prompt <text>           User message (required, unless --stdin)
  *   --session <id>            Previous session id for multi-turn
@@ -119,9 +124,51 @@ async function runHubSubcommand(args) {
     return 0;
   }
 
-  // Parse common flags
+  // Any subcommand with --help/-h shows the hub help (covers `hub run --help`,
+  // `hub install --help`, etc. — useful for muscle-memory discovery).
+  if (rest.includes('--help') || rest.includes('-h')) {
+    showHubHelp();
+    return 0;
+  }
+
+  // Parse hub args. We can't reuse parseArgs() here because it throws on
+  // any unknown `--flag`, and hub supports `--refresh` which the runner
+  // parser doesn't know about. Instead, walk the args ourselves, separating
+  // hub-level flags (--refresh, --help) from runner-level flags (-p/--prompt,
+  // --cwd, --env, ...) and positional args (the profile name).
   const refresh = rest.includes('--refresh');
-  const positional = rest.filter(a => !a.startsWith('--'));
+  const positional = [];
+  const runnerArgs = [];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--refresh' || a === '-h' || a === '--help') continue;
+    // Runner flags that take a value (next arg): match both long and short.
+    // In the `hub run` context, `-p` means `--prompt` (the profile name is
+    // positional, not a path), so we normalize it before handing off.
+    const takesValue =
+      a === '--prompt' || a === '-p' ||
+      a === '--session' || a === '--session-name' || a === '--from' ||
+      a === '--cwd' || a === '--env' || a === '--timeout';
+    if (takesValue) {
+      runnerArgs.push(a === '-p' ? '--prompt' : a);
+      if (i + 1 < rest.length) runnerArgs.push(rest[++i]);
+      continue;
+    }
+    // Other known runner flags (boolean).
+    if (a === '--no-stream' || a === '--verbose' || a === '--quiet' ||
+        a === '--raw' || a === '--stdin') {
+      runnerArgs.push(a);
+      continue;
+    }
+    // Anything else starting with - or -- is unknown to us — surface it
+    // as an explicit error instead of silently treating it as a positional.
+    if (a.startsWith('-')) {
+      process.stderr.write(`error: unknown option: ${a}\n\n`);
+      showHubHelp();
+      return 2;
+    }
+    positional.push(a);
+  }
 
   if (sub === 'list') {
     const profiles = await hub.listProfiles({
@@ -157,10 +204,16 @@ async function runHubSubcommand(args) {
       return 2;
     }
     const target = process.cwd();
-    await hub.installProfile(positional[0], target, {
+    const dest = await hub.installProfile(positional[0], target, {
       refresh,
       onLog: m => process.stderr.write(m + '\n'),
     });
+    // After-the-fact hint: tell the user exactly what they got and how to
+    // run it. Without this, "installed to: ./echo-agent/" leaves them
+    // guessing what to type next.
+    process.stderr.write(`\n`);
+    process.stderr.write(`Next: edit ${path.relative(target, path.join(dest, 'profile.yaml'))} if you want, then run:\n`);
+    process.stderr.write(`  agentproc --profile ${path.relative(target, path.join(dest, 'profile.yaml'))} --prompt "hi" --cwd <your-project>\n`);
     return 0;
   }
 
@@ -176,11 +229,19 @@ async function runHubSubcommand(args) {
     });
     const profilePath = path.join(cacheDir, 'profile.yaml');
 
-    // Re-parse the remaining args as the runner options (--prompt, --cwd, etc.).
-    const { opts: runOpts } = parseArgs(rest);
+    // Parse the runner-level flags we separated out above.
+    const { opts: runOpts } = parseArgs(runnerArgs);
     if (!runOpts.prompt && !runOpts.stdin) {
       process.stderr.write('error: hub run requires --prompt <text> or --stdin\n');
       return 2;
+    }
+
+    // hub run uses the user's current directory as the agent's cwd when
+    // --cwd is not given. This matches the hub docs ("uses your current
+    // directory as cwd") and is the right default for AI-CLI profiles
+    // where the agent should operate on the user's project.
+    if (!runOpts.cwd) {
+      runOpts.cwd = process.cwd();
     }
 
     return await runAgent(profilePath, runOpts);
@@ -231,6 +292,7 @@ Profiles are cached at ~/.agentproc/cache/hub/<name>/ (24h TTL).
  */
 async function runAgent(profilePath, opts) {
   let profileRaw;
+  const profileDir = path.dirname(path.resolve(profilePath));
   try {
     const yamlText = fs.readFileSync(path.resolve(profilePath), 'utf8');
     profileRaw = parseYaml(yamlText);
@@ -270,6 +332,7 @@ async function runAgent(profilePath, opts) {
       fromUser: opts.from || '',
       streaming,
       cwd: opts.cwd,
+      profileDir,
       extraEnv,
       timeoutSecs: opts.timeout,
     });
@@ -278,7 +341,8 @@ async function runAgent(profilePath, opts) {
     return r.exitCode === 0 ? 0 : 1;
   }
 
-  const verbose = opts.verbose || !opts.quiet || (opts.verbose === undefined && opts.quiet === undefined) || opts.verbose;
+  // verbose: default true, --verbose keeps it true, --quiet sets it false.
+  const verbose = opts.verbose !== false;
 
   const r = await runner.run(profileRaw, {
     message: prompt,
@@ -287,6 +351,7 @@ async function runAgent(profilePath, opts) {
     fromUser: opts.from || '',
     streaming,
     cwd: opts.cwd,
+    profileDir,
     extraEnv,
     timeoutSecs: opts.timeout,
     onPartial: (t) => { if (verbose) process.stderr.write(`AGENT_PARTIAL:${JSON.stringify(t)}\n`); },
@@ -307,6 +372,27 @@ async function runAgent(profilePath, opts) {
 function showHelp() {
   process.stdout.write(`agentproc v${PKG_VERSION} (protocol ${PROTOCOL_VERSION})
 
+The fastest way in:
+  agentproc hub list                          # see what's available
+  agentproc hub run echo-agent -p "hello"     # smoke test (no API key)
+  cd ~/projects/my-app && agentproc hub run claude-code -p "explain this"
+
+The CLI fetches the profile from the GitHub hub on first use, caches it at
+~/.agentproc/cache/hub/<name>/ (24h TTL), and uses your current directory as
+the agent's cwd. Set GITHUB_TOKEN to raise the rate limit (see \`agentproc hub --help\`).
+
+Hub subcommands:
+  hub list                          List all profiles in the hub
+  hub show <name>                   Show a profile's README
+  hub run <name> [run-options]      Fetch (if needed) and run a profile
+  hub install <name>                Copy a profile to the current directory
+
+Run \`agentproc hub --help\` for the full hub reference.
+
+───────────────────────────────────────────────────────────────────────────────
+
+Advanced: run a local profile YAML directly (no hub fetch)
+
 Usage:
   agentproc --profile <path.yaml> --prompt "hello" [options]
 
@@ -320,7 +406,8 @@ Session:
   --from <user>             Sender identifier
 
 Execution:
-  --cwd <path>              Override profile.cwd
+  --cwd <path>              Override profile.cwd (relative paths resolve
+                            against the profile.yaml's directory)
   --env KEY=VALUE           Extra env var (repeatable)
   --timeout <secs>          Override profile.timeout_secs
   --no-stream               Set AGENT_STREAMING=0
@@ -343,9 +430,16 @@ Output semantics:
 The final session id is printed on stderr as: agentproc:session:<id>
 
 Examples:
-  agentproc --profile hub/echo-agent/profile.yaml --prompt "hi"
-  agentproc -p hub/claude-code/profile.yaml --prompt "hello" --verbose
-  cat prompt.txt | agentproc -p prof.yaml --stdin
+  # Local profile (relative cwd resolves next to profile.yaml):
+  agentproc --profile ./hub/echo-agent/profile.yaml --prompt "hi"
+
+  # Local claude-code profile, claude runs against your project:
+  agentproc --profile ./hub/claude-code/profile.yaml \\
+            --prompt "explain this codebase" \\
+            --cwd /path/to/your/project
+
+  # Prompt from stdin:
+  cat prompt.txt | agentproc --profile prof.yaml --stdin
 `);
 }
 
@@ -624,10 +718,35 @@ async function main() {
 
 // Run main() only when invoked directly as a script, not when required for tests.
 if (require.main === module) {
-  main().catch(e => {
-    process.stderr.write(`[agentproc] unhandled error: ${e && (e.stack || e)}\n`);
-    process.exit(1);
-  });
+  main().then(
+    (code) => {
+      // main() returns an explicit exit code from its various return paths;
+      // honor it so shell scripts can distinguish success from failure.
+      process.exit(typeof code === 'number' ? code : 0);
+    },
+    (e) => {
+      // Friendly handling for known hub errors: print the message + remediation
+      // hint, never a raw Node stack trace.
+      if (e && e.name === 'HubError') {
+        process.stderr.write(`error: ${e.message}\n`);
+        if (e.hint) process.stderr.write(`\n${e.hint}\n`);
+        process.exit(1);
+        return;
+      }
+      // For fetch() network errors wrapped by hub.js (also HubError, but be
+      // defensive in case some path throws a plain TypeError from fetch).
+      if (e && typeof e.message === 'string' && /fetch failed|ENOTFOUND|ECONNREFUSED|ECONNRESET/.test(e.message)) {
+        process.stderr.write(`error: network error talking to GitHub: ${e.message}\n`);
+        process.stderr.write(`\nThis is usually transient. Re-run the command, or run against a local checkout:\n`);
+        process.stderr.write(`  agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"\n`);
+        process.exit(1);
+        return;
+      }
+      // Everything else: still avoid dumping the stack. Show the message only.
+      process.stderr.write(`error: ${e && (e.message || e)}\n`);
+      process.exit(1);
+    }
+  );
 }
 
 module.exports = { parseArgs, parseYaml, showHelp, main };
