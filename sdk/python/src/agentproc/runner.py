@@ -1,7 +1,8 @@
 """AgentProc runner — the canonical bridge-side engine.
 
 This module is the canonical implementation of the AgentProc bridge-side
-contract (spec/protocol.md). The CLI (cli.py) is a thin wrapper around it.
+contract (spec/protocol.md, wire protocol 0.1). The CLI (cli.py) is a thin
+wrapper around it.
 
 Responsibilities:
   - Parse and validate a profile dict
@@ -98,6 +99,7 @@ class RunOptions:
     on_error: Optional[Callable[[str], None]] = None
     on_protocol_line: Optional[Callable[[str], None]] = None
     on_stderr: Optional[Callable[[str], None]] = None
+    forward_stdin: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -115,24 +117,52 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(command, str) or not command.strip():
         raise ValueError("profile.command must be a non-empty string")
 
-    argv = command.strip().split()
-    if not argv:
-        raise ValueError("profile.command produced empty argv")
-
-    args_value = src.get("args", [])
+    has_args_field = "args" in src and src["args"] is not None
+    args_value = src.get("args") or []
     if not isinstance(args_value, list):
         raise ValueError("profile.args must be a list")
+
+    # Per spec: `command` is argv[0]; `args` is argv[1..]. Two mutually
+    # exclusive forms:
+    #   (a) `args` absent + command has whitespace → split command into argv
+    #       (the legacy shorthand: `command: python3 ./bridge.py`)
+    #   (b) `args` present (even empty `[]`) → command is a single token,
+    #       never split. This is the escape hatch for paths with whitespace:
+    #         command: "/path with spaces/my agent"
+    #         args: []
+    # `args: []` (explicit empty list) is DISTINCT from "args absent": the
+    # explicit form means "do not split command"; the absent form falls back
+    # to the whitespace-splitting shorthand.
+    if has_args_field:
+        argv = [command.strip()]
+    else:
+        argv = command.strip().split()
+    if not argv or not argv[0]:
+        raise ValueError("profile.command produced empty argv")
 
     cwd_value = src.get("cwd")
     env_value = src.get("env") or {}
     if not isinstance(env_value, dict):
         raise ValueError("profile.env must be a dict")
 
+    # env_allowlist (optional): when present, ${VAR} references in the env
+    # block whose name is NOT in the list expand to empty + a stderr warning.
+    # Absent ⇒ current behaviour (expand against the full bridge environment).
+    # Opt-in: existing profiles keep working unchanged.
+    allowlist_raw = src.get("env_allowlist")
+    if allowlist_raw is None:
+        env_allowlist: Optional[set] = None
+    elif isinstance(allowlist_raw, list):
+        env_allowlist = {str(x) for x in allowlist_raw}
+    else:
+        raise ValueError("profile.env_allowlist must be a list")
+
     return {
         "argv": argv,
         "args": [str(a) for a in args_value],
         "cwd": expand_path(str(cwd_value)) if cwd_value else None,
         "env": env_value,
+        "env_allowlist": env_allowlist,
         "stdin": "message" if src.get("stdin") == "message" else "none",
         "timeout_secs": (
             int(src["timeout_secs"]) if _is_int_like(src.get("timeout_secs"))
@@ -178,12 +208,27 @@ def substitute(value: str, ctx: Dict[str, str]) -> str:
     )
 
 
-def expand_env_ref(value: str, env: Dict[str, str]) -> str:
-    return re.sub(
-        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
-        lambda m: env.get(m.group(1), ""),
-        str(value),
-    )
+def expand_env_ref(
+    value: str,
+    env: Dict[str, str],
+    allowlist: Optional[set] = None,
+    on_blocked: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Expand ${VAR} references against ``env``.
+
+    When ``allowlist`` is a set of variable names, references to names NOT in
+    the set expand to empty string and ``on_blocked`` (if given) is called
+    with each blocked name. When ``allowlist`` is None, all references expand
+    normally (the default, pre-allowlist behaviour).
+    """
+    def repl(m: "re.Match[str]") -> str:
+        name = m.group(1)
+        if allowlist is not None and name not in allowlist:
+            if on_blocked:
+                on_blocked(name)
+            return ""
+        return env.get(name, "")
+    return re.sub(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", repl, str(value))
 
 
 def _diagnose_spawn_error(
@@ -292,9 +337,13 @@ def decode_json_value(raw: str) -> str:
         return ""
     try:
         v = json.loads(text)
-        return v if isinstance(v, str) else str(v)
     except json.JSONDecodeError:
         return text
+    # Only JSON strings are meaningful payloads — a sentinel's value is text
+    # for the user. Non-string JSON (number/bool/null/array/object) means the
+    # agent misused the API; fall back to the raw text so the result is
+    # language-independent (str(True) != String(true) across runtimes).
+    return v if isinstance(v, str) else text
 
 
 def classify_line(line: str) -> Dict[str, str]:
@@ -342,8 +391,19 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         argv.append(substitute(a, subst_ctx))
 
     env = dict(os.environ)
+    allowlist = profile["env_allowlist"]
     for k, v in profile["env"].items():
-        env[k] = expand_env_ref(substitute(str(v), subst_ctx), os.environ)
+        env[k] = expand_env_ref(
+            substitute(str(v), subst_ctx),
+            os.environ,
+            allowlist=allowlist,
+            on_blocked=(
+                lambda name: options.on_stderr(
+                    f"[agentproc runner] env_allowlist blocked ${{{name}}} "
+                    f"(not in allowlist); expanded to empty"
+                ) if options.on_stderr else None
+            ),
+        )
     for k, v in options.extra_env.items():
         env[k] = str(v)
 
@@ -354,18 +414,30 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     env["AGENT_STREAMING"] = "1" if streaming else "0"
     env["AGENT_PROTOCOL_VERSION"] = PROTOCOL_VERSION
 
-    stdin_payload = options.message if profile["stdin"] == "message" else None
+    # forward_stdin overrides profile.stdin: when True, always write the
+    # message to stdin (used by the CLI's --stdin flag). When None/False,
+    # fall back to the profile's stdin setting.
+    use_stdin = profile["stdin"] == "message" or bool(options.forward_stdin)
+    stdin_payload = options.message if use_stdin else None
 
     result = RunResult()
     body_lines: List[str] = []
-    stderr_all: List[str] = []  # capped sliding window, for post-mortem
+    # Two views on stderr:
+    #   - stderr_window: bounded sliding window (8 KB) for the on_stderr UI
+    #     callback, so a noisy agent cannot exhaust memory.
+    #   - stderr_full:   unbounded capture used only for post-mortem pattern
+    #     diagnosis. Without the full text, a chatty agent can push the real
+    #     error out of the window and the friendly hint goes missing.
+    stderr_window: List[str] = []
+    stderr_full: List[str] = []
     STDERR_CAP = 8192
 
     def _append_stderr(text: str) -> None:
-        stderr_all.append(text)
-        total = sum(len(s) for s in stderr_all)
-        while total > STDERR_CAP and len(stderr_all) > 1:
-            total -= len(stderr_all.pop(0))
+        stderr_full.append(text)
+        stderr_window.append(text)
+        total = sum(len(s) for s in stderr_window)
+        while total > STDERR_CAP and len(stderr_window) > 1:
+            total -= len(stderr_window.pop(0))
 
     try:
         proc = subprocess.Popen(
@@ -463,15 +535,18 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 except subprocess.TimeoutExpired:
                     if time.monotonic() >= deadline:
                         timed_out = True
+                        # terminate() is SIGTERM on POSIX, TerminateProcess on
+                        # Windows — both are the "polite shutdown" the spec's
+                        # SIGTERM→SIGKILL contract refers to.
                         try:
-                            proc.send_signal(signal.SIGTERM)
+                            proc.terminate()
                         except (ProcessLookupError, PermissionError):
                             pass
                         try:
                             proc.wait(timeout=profile["kill_grace_secs"])
                         except subprocess.TimeoutExpired:
                             try:
-                                proc.send_signal(signal.SIGKILL)
+                                proc.kill()
                             except (ProcessLookupError, PermissionError):
                                 pass
                         try:
@@ -482,17 +557,24 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         else:
             exit_code = proc.wait()
     except KeyboardInterrupt:
-        try:
-            proc.send_signal(signal.SIGINT)
-        except (ProcessLookupError, PermissionError):
-            pass
+        # SIGINT only exists on POSIX. On Windows we fall back to terminate().
+        if hasattr(signal, "SIGINT"):
+            try:
+                proc.send_signal(signal.SIGINT)
+            except (ProcessLookupError, PermissionError):
+                pass
+        else:
+            try:
+                proc.terminate()
+            except (ProcessLookupError, PermissionError):
+                pass
         exit_code = proc.wait()
 
     stdout_thread.join(timeout=5)
-    # Drain stderr fully before reading stderr_all. The post-mortem
-    # diagnosis depends on having the full stderr text. Generous timeout
-    # since the process has already exited — at most we wait for the
-    # pipe buffer to flush.
+    # Drain stderr fully before running post-mortem diagnosis. The diagnosis
+    # reads the full capture, so we need the drain thread to have caught up.
+    # Generous timeout since the process has already exited — at most we wait
+    # for the pipe buffer to flush.
     stderr_thread.join(timeout=10)
     if stderr_thread.is_alive():
         # Very rare; indicates a pathological agent that keeps stderr open.
@@ -507,8 +589,10 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     # If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
     # common "command/file not found" patterns and surface a friendly hint.
+    # Uses the FULL stderr — a noisy agent can fill the 8 KB window with
+    # progress junk before the real error lands at the end.
     if not timed_out and not result.error and exit_code != 0:
-        stderr_text = "".join(stderr_all)
+        stderr_text = "".join(stderr_full)
         hint = _diagnose_stderr_failure(stderr_text)
         if hint:
             result.error = hint

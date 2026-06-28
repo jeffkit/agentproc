@@ -4,7 +4,7 @@
  * protocol-compliant agent invocation.
  *
  * This module is the canonical implementation of the AgentProc bridge-side
- * contract (spec/protocol.md). The CLI (cli.js) is a thin wrapper around it.
+ * contract (spec/protocol.md, wire protocol 0.1). The CLI (cli.js) is a thin wrapper around it.
  *
  * Responsibilities:
  *   - Parse and validate a profile object
@@ -75,10 +75,35 @@ function normalizeProfile(raw) {
     throw new Error('profile.command must be a non-empty string');
   }
 
-  // Split command into argv on whitespace, no shell (per spec).
-  const argv = p.command.trim().split(/\s+/);
-  if (argv.length === 0) {
+  // Per spec: `command` is argv[0]; `args` is argv[1..]. Two mutually
+  // exclusive forms:
+  //   (a) `args` absent + command has whitespace → split command into argv
+  //       (the legacy shorthand: `command: python3 ./bridge.py`)
+  //   (b) `args` present (even empty `[]`) → command is a single token,
+  //       never split. Lets paths with spaces stay whole:
+  //         command: "/path with spaces/my agent"
+  //         args: []
+  // `args: []` (explicit empty array) is DISTINCT from "args absent": the
+  // explicit form means "do not split command"; the absent form falls back
+  // to the whitespace-splitting shorthand.
+  const argsFieldPresent = raw.agentproc
+    ? (Object.prototype.hasOwnProperty.call(raw.agentproc, 'args') && raw.agentproc.args != null)
+    : (Object.prototype.hasOwnProperty.call(raw, 'args') && raw.args != null);
+  const argv = argsFieldPresent ? [p.command.trim()] : p.command.trim().split(/\s+/);
+  if (argv.length === 0 || argv[0] === '') {
     throw new Error('profile.command produced empty argv');
+  }
+
+  // env_allowlist (optional): when present, ${VAR} references in the env
+  // block whose name is NOT in the list expand to empty + a stderr warning.
+  // Absent ⇒ current behaviour (expand against the full bridge environment).
+  // Opt-in: existing profiles keep working unchanged.
+  let envAllowlist = null;
+  if (p.env_allowlist !== undefined && p.env_allowlist !== null) {
+    if (!Array.isArray(p.env_allowlist)) {
+      throw new Error('profile.env_allowlist must be a list');
+    }
+    envAllowlist = new Set(p.env_allowlist.map(String));
   }
 
   return {
@@ -86,6 +111,7 @@ function normalizeProfile(raw) {
     args: Array.isArray(p.args) ? p.args.map(String) : [],
     cwd: p.cwd ? expandPath(String(p.cwd)) : undefined,
     env: p.env && typeof p.env === 'object' ? p.env : {},
+    env_allowlist: envAllowlist,
     stdin: p.stdin === 'message' ? 'message' : 'none',
     timeout_secs: Number.isFinite(p.timeout_secs) ? p.timeout_secs : DEFAULT_TIMEOUT_SECS,
     kill_grace_secs: Number.isFinite(p.kill_grace_secs) ? p.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
@@ -229,11 +255,19 @@ function substitute(value, ctx) {
 }
 
 /**
- * Expand ${VAR} references against process.env, like a typical shell would.
+ * Expand ${VAR} references against `env`, like a typical shell would.
  * Unknown variables expand to empty string (POSIX sh behavior).
+ *
+ * When `allowlist` is a Set of names, references to names NOT in the set
+ * expand to empty and `onBlocked` (if given) is called with each blocked
+ * name. When `allowlist` is null, all references expand normally.
  */
-function expandEnvRef(value, env) {
+function expandEnvRef(value, env, allowlist = null, onBlocked = null) {
   return String(value).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
+    if (allowlist && !allowlist.has(name)) {
+      if (onBlocked) onBlocked(name);
+      return '';
+    }
     const v = env[name];
     return v !== undefined ? v : '';
   });
@@ -250,13 +284,18 @@ function expandEnvRef(value, env) {
 function decodeJsonValue(raw) {
   const text = raw.trim();
   if (text === '') return '';
+  let v;
   try {
-    const v = JSON.parse(text);
-    return typeof v === 'string' ? v : String(v);
+    v = JSON.parse(text);
   } catch {
     // Lenient: treat as plain string.
     return text;
   }
+  // Only JSON strings are meaningful payloads — a sentinel's value is text
+  // for the user. Non-string JSON (number/bool/null/array/object) means the
+  // agent misused the API; fall back to the raw text so the result is
+  // language-independent (String(true) != str(True) across runtimes).
+  return typeof v === 'string' ? v : text;
 }
 
 /**
@@ -358,8 +397,13 @@ async function run(profileRaw, options) {
   // Build env: start with process.env (so PATH etc. work), add profile.env
   // (with ${VAR} refs expanded against process.env), then add AGENT_* vars.
   const env = { ...process.env };
+  const allowlist = profile.env_allowlist;
   for (const [k, v] of Object.entries(profile.env)) {
-    env[k] = expandEnvRef(substitute(v, substCtx), process.env);
+    env[k] = expandEnvRef(substitute(v, substCtx), process.env, allowlist, (name) => {
+      if (options.onStderr) {
+        options.onStderr(`[agentproc runner] env_allowlist blocked \${${name}} (not in allowlist); expanded to empty`);
+      }
+    });
   }
   if (options.extraEnv) {
     for (const [k, v] of Object.entries(options.extraEnv)) {
@@ -432,18 +476,22 @@ async function run(profileRaw, options) {
 
   // ---- stderr: forward as debug ----
   let stderrBuf = '';
-  // Keep a sliding window of the most recent stderr for post-mortem
-  // diagnosis on failure. The *last* 8KB matters more than the first — a
-  // noisy agent can fill the buffer with progress junk before the real
-  // error appears at the end.
-  let stderrAll = '';
+  // Two views on stderr:
+  //   - stderrWindow: bounded sliding window (8 KB) — reserved for future
+  //     UI/display use so a noisy agent cannot exhaust memory.
+  //   - stderrFull:   unbounded capture used for post-mortem pattern
+  //     diagnosis. Without the full text, a chatty agent can push the real
+  //     error out of the window and the friendly hint goes missing.
+  let stderrWindow = '';
+  let stderrFull = '';
   const STDERR_CAP = 8192;
   child.stderr.on('data', chunk => {
     const text = chunk.toString();
     stderrBuf += text;
-    stderrAll += text;
-    if (stderrAll.length > STDERR_CAP) {
-      stderrAll = stderrAll.slice(stderrAll.length - STDERR_CAP);
+    stderrFull += text;
+    stderrWindow += text;
+    if (stderrWindow.length > STDERR_CAP) {
+      stderrWindow = stderrWindow.slice(stderrWindow.length - STDERR_CAP);
     }
     let nl;
     while ((nl = stderrBuf.indexOf('\n')) >= 0) {
@@ -460,6 +508,11 @@ async function run(profileRaw, options) {
   }
 
   // ---- timeout handling per spec: SIGTERM → grace → SIGKILL ----
+  // On POSIX, child.kill('SIGTERM') is a real signal the agent can trap and
+  // flush; on Windows, Node translates any signal name to TerminateProcess,
+  // so the grace period is effectively a no-op there. The two-step shape is
+  // preserved so POSIX behaviour is correct; Windows callers get a hard kill
+  // at the deadline (acceptable per the spec's Windows caveat).
   let timer = null;
   if (timeoutSecs > 0) {
     timer = setTimeout(() => {
@@ -512,10 +565,10 @@ async function run(profileRaw, options) {
 
   // If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
   // common "command/file not found" patterns and surface a friendly hint.
-  // Bridges that depend on shell-level errors (python's "can't open file",
-  // node's "Cannot find module", etc.) would otherwise leak raw text to users.
+  // Uses the FULL stderr — a noisy agent can fill the 8 KB window with
+  // progress junk before the real error lands at the end.
   if (!killed && !result.error && exitCode !== 0) {
-    const hint = diagnoseStderrFailure(stderrAll, { argv });
+    const hint = diagnoseStderrFailure(stderrFull, { argv });
     if (hint) {
       result.error = hint;
       if (options.onError) options.onError(hint);

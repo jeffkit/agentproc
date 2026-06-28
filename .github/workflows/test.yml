@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Run Node SDK tests
-        run: node --test src/index.test.js src/runner.test.js src/hub.test.js
+        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js
         working-directory: sdk/node
 
   test-python:
@@ -50,8 +50,32 @@ jobs:
         env:
           PYTHONPATH: src
 
+  # Single source of truth: spec/conformance/cases.json drives BOTH SDKs.
+  # This job runs both conformance suites in one place so a divergence
+  # (someone edits cases.json or one classify_line but not the other) shows
+  # up as a dedicated red light, not buried inside the per-SDK matrices.
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Node conformance
+        run: node --test src/conformance.test.js
+        working-directory: sdk/node
+      - name: Python conformance
+        run: pytest -q tests/test_conformance.py
+        working-directory: sdk/python
+        env:
+          PYTHONPATH: src
+
   test-hub-bridges:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

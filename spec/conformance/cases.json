@@ -1,0 +1,43 @@
+{
+  "_comment": "Conformance cases for stdout line classification. Both the Python runner.classify_line and Node runner.classifyLine MUST produce the listed {kind, value} for each input line. Add cases here when the spec's line-recognition rules change — both SDK test suites pick this file up automatically.",
+  "cases": [
+    {"line": "AGENT_SESSION:abc-123", "expect": {"kind": "session", "value": "abc-123"}},
+    {"line": "AGENT_SESSION:  padded  ", "expect": {"kind": "session", "value": "padded"}},
+    {"line": "AGENT_SESSION:f47ac10b-58cc-4372", "expect": {"kind": "session", "value": "f47ac10b-58cc-4372"}},
+    {"line": "AGENT_SESSION:", "expect": {"kind": "session", "value": ""}},
+    {"line": "AGENT_SESSION:   ", "expect": {"kind": "session", "value": ""}},
+    {"line": "AGENT_SESSION:multi word id", "expect": {"kind": "session", "value": "multi word id"}},
+
+    {"line": "AGENT_PARTIAL:\"hello\"", "expect": {"kind": "partial", "value": "hello"}},
+    {"line": "AGENT_PARTIAL:\"line1\\nline2\"", "expect": {"kind": "partial", "value": "line1\nline2"}},
+    {"line": "AGENT_PARTIAL:", "expect": {"kind": "partial", "value": ""}},
+    {"line": "AGENT_PARTIAL:not json", "expect": {"kind": "partial", "value": "not json"}},
+    {"line": "AGENT_PARTIAL:  \"padded json\"  ", "expect": {"kind": "partial", "value": "padded json"}},
+    {"line": "AGENT_PARTIAL:\"unicode 你好 🚀\"", "expect": {"kind": "partial", "value": "unicode 你好 🚀"}},
+    {"line": "AGENT_PARTIAL:\"esc\\\"quote\"", "expect": {"kind": "partial", "value": "esc\"quote"}},
+
+    {"line": "AGENT_PARTIAL:42", "expect": {"kind": "partial", "value": "42"}},
+    {"line": "AGENT_PARTIAL:3.14", "expect": {"kind": "partial", "value": "3.14"}},
+    {"line": "AGENT_PARTIAL:true", "expect": {"kind": "partial", "value": "true"}},
+    {"line": "AGENT_PARTIAL:false", "expect": {"kind": "partial", "value": "false"}},
+    {"line": "AGENT_PARTIAL:null", "expect": {"kind": "partial", "value": "null"}},
+    {"line": "AGENT_PARTIAL:[1,2,3]", "expect": {"kind": "partial", "value": "[1,2,3]"}},
+    {"line": "AGENT_PARTIAL:{\"k\":\"v\"}", "expect": {"kind": "partial", "value": "{\"k\":\"v\"}"}},
+
+    {"line": "AGENT_ERROR:\"rate limited\"", "expect": {"kind": "error", "value": "rate limited"}},
+    {"line": "AGENT_ERROR:boom", "expect": {"kind": "error", "value": "boom"}},
+    {"line": "AGENT_ERROR:", "expect": {"kind": "error", "value": ""}},
+    {"line": "AGENT_ERROR:  \"padded\"  ", "expect": {"kind": "error", "value": "padded"}},
+    {"line": "AGENT_ERROR:true", "expect": {"kind": "error", "value": "true"}},
+    {"line": "AGENT_ERROR:[1,2]", "expect": {"kind": "error", "value": "[1,2]"}},
+
+    {"line": "hello world", "expect": {"kind": "body", "value": "hello world"}},
+    {"line": " AGENT_SESSION:foo", "expect": {"kind": "body", "value": " AGENT_SESSION:foo"}},
+    {"line": "AGENT_SESSION", "expect": {"kind": "body", "value": "AGENT_SESSION"}},
+    {"line": "AGENT_PARTIALS:foo", "expect": {"kind": "body", "value": "AGENT_PARTIALS:foo"}},
+    {"line": "agent_session:lower", "expect": {"kind": "body", "value": "agent_session:lower"}},
+    {"line": "AGENT_PARTIAL", "expect": {"kind": "body", "value": "AGENT_PARTIAL"}},
+    {"line": "AGENT_ERROR", "expect": {"kind": "body", "value": "AGENT_ERROR"}}
+  ]
+}
+
