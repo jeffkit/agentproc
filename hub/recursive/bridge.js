@@ -6,15 +6,16 @@
  * Parity implementation of hub/recursive/bridge.py. See that file for the
  * full design rationale; this file mirrors it line-for-line in behaviour.
  *
- *   recursive --json [--stream] ... run <message>              // first turn
- *   recursive --json [--stream] ... replay <transcript> \
- *       --resume-from <N> <message>                            // subsequent turns
+ *   recursive --json [--stream] ... run <message>                       // turn 1
+ *   recursive --json [--stream] ... resume --from-file <session-dir> \
+ *       -p <message>                                                    // turn N+
  *
- * Multi-turn continuity is managed by the bridge (recursive's CLI exposes no
- * session id in its --json stream and `recursive resume` re-runs the original
- * goal). The bridge mints an opaque id, persists each turn's transcript via
- * `--transcript-out`, and feeds it back through `replay --resume-from N` on
- * the next turn. System messages are stripped between turns.
+ * Multi-turn continuity uses recursive's native session resume: turn 1 runs
+ * `recursive run` and captures the session directory recursive logs on stderr
+ * (`session: recording to <dir>`); turn N+ runs `recursive resume --from-file
+ * <dir> -p <msg>`, which continues that session by appending <msg> as the next
+ * user turn. No transcript-file replay, no --resume-from indexing, no
+ * system-message stripping.
  */
 
 const { spawn } = require('node:child_process');
@@ -26,6 +27,10 @@ const crypto = require('node:crypto');
 const CLI_NAME = 'recursive';
 const INSTALL_HINT =
   'Install: cargo install --locked --path .  (then `recursive init` to configure a provider)';
+
+// `session: recording to <abs-dir>` — recursive logs this to stderr when it
+// creates a session writer.
+const SESSION_RECORDING_RE = /session: recording to (\S+)/;
 
 // ---------------------------------------------------------------------------
 // Emission helpers
@@ -62,51 +67,56 @@ function stateDir() {
   return d;
 }
 
-function transcriptPath(sid) {
-  return path.join(stateDir(), `${sid}.json`);
+function sessionLinkPath(sid) {
+  return path.join(stateDir(), `${sid}.session`);
 }
 
-function countMessages(p) {
-  let data;
+function readSessionDir(sid) {
+  let d;
   try {
-    data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    d = fs.readFileSync(sessionLinkPath(sid), 'utf8').trim();
   } catch {
     return null;
   }
-  if (!data || !Array.isArray(data.messages)) return null;
-  return data.messages.length;
+  if (d && fs.existsSync(d) && fs.statSync(d).isDirectory()) return d;
+  return null;
 }
 
-function stripSystemMessages(p) {
-  let data;
+function writeSessionDir(sid, sessionDir) {
   try {
-    data = JSON.parse(fs.readFileSync(p, 'utf8'));
-  } catch {
-    return;
-  }
-  if (!data || !Array.isArray(data.messages)) return;
-  data.messages = data.messages.filter((m) => m && m.role !== 'system');
-  try {
-    fs.writeFileSync(p + '.tmp', JSON.stringify(data));
-    fs.renameSync(p + '.tmp', p);
+    fs.writeFileSync(sessionLinkPath(sid), sessionDir);
   } catch {
     /* best-effort */
   }
 }
 
-function lastAssistantText(p) {
+function extractSessionDir(stderr) {
+  const m = SESSION_RECORDING_RE.exec(stderr);
+  return m ? m[1] : null;
+}
+
+function lastAssistantText(sessionDir) {
+  if (!sessionDir) return null;
+  const p = path.join(sessionDir, 'transcript.jsonl');
+  let last = null;
   let data;
   try {
-    data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    data = fs.readFileSync(p, 'utf8');
   } catch {
     return null;
   }
-  if (!data || !Array.isArray(data.messages)) return null;
-  for (let i = data.messages.length - 1; i >= 0; i--) {
-    const m = data.messages[i];
-    if (m && m.role === 'assistant' && m.content) return m.content;
+  for (const raw of data.split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (entry && entry.role === 'assistant' && entry.content) last = entry.content;
   }
-  return null;
+  return last;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,20 +132,24 @@ function providerArgs() {
   return args;
 }
 
-function buildArgs(message, p, resumeN) {
-  const args = [CLI_NAME, '--json', '-H', '--no-session'];
-  args.push('--transcript-out', p);
+function globalArgs() {
+  const args = [CLI_NAME, '--json', '-H'];
   if (env('AGENT_STREAMING') !== '0') args.push('--stream');
   args.push('--permission-mode', env('RECURSIVE_PERMISSION_MODE') || 'auto');
   if (env('RECURSIVE_MAX_STEPS')) args.push('--max-steps', env('RECURSIVE_MAX_STEPS'));
   if (env('RECURSIVE_WORKSPACE')) args.push('--workspace', env('RECURSIVE_WORKSPACE'));
   for (const a of providerArgs()) args.push(a);
-  if (resumeN != null) {
-    args.push('replay', p, '--resume-from', String(resumeN), message);
-  } else {
-    args.push('run', message);
-  }
   return args;
+}
+
+function buildRunArgs(message) {
+  return globalArgs().concat(['run', message]);
+}
+
+function buildResumeArgs(sessionDir, message) {
+  // `resume --from-file <dir> -p <msg>` continues the session by appending
+  // <msg> as the next user turn (native session-id resume).
+  return globalArgs().concat(['resume', '--from-file', sessionDir, '-p', message]);
 }
 
 function hasAttachment() {
@@ -160,16 +174,15 @@ function main() {
 
   const streaming = env('AGENT_STREAMING') !== '0';
 
-  // Resolve session id + resume target.
+  // Resolve opaque session id + whether we resume an existing recursive session.
   const givenSid = env('AGENT_SESSION_ID');
-  let resumeN = null;
+  let resumeDir = null;
   let sid;
   if (givenSid) {
-    const p = transcriptPath(givenSid);
-    const n = countMessages(p);
-    if (n != null && n > 0) {
+    const d = readSessionDir(givenSid);
+    if (d) {
       sid = givenSid;
-      resumeN = n;
+      resumeDir = d;
     } else {
       sid = 'rc-' + crypto.randomUUID().replace(/-/g, '');
     }
@@ -177,8 +190,9 @@ function main() {
     sid = 'rc-' + crypto.randomUUID().replace(/-/g, '');
   }
 
-  const p = transcriptPath(sid);
-  const args = buildArgs(message, p, resumeN);
+  const args = resumeDir
+    ? buildResumeArgs(resumeDir, message)
+    : buildRunArgs(message);
 
   // Emit the session id FIRST so the runner captures it even if recursive
   // later fails to produce any output.
@@ -264,6 +278,13 @@ function main() {
     });
 
     child.on('close', (code) => {
+      // For a fresh run, record the recursive session directory so the next
+      // turn can resume it. (resume reuses the same dir — no update needed.)
+      if (resumeDir == null) {
+        const captured = extractSessionDir(stderrOutput);
+        if (captured) writeSessionDir(sid, captured);
+      }
+
       // Non-streaming: emit collected assistant text as the reply body.
       if (!streaming && assistantTexts.length) {
         const body = assistantTexts.join('').trim();
@@ -273,18 +294,16 @@ function main() {
         }
       }
 
-      // Fallback: recover last assistant text from the transcript file.
+      // Fallback: recover last assistant text from the session transcript.
       if (!sawPartial && !errorMessage) {
-        const recovered = lastAssistantText(p);
+        const sessDir = resumeDir || readSessionDir(sid);
+        const recovered = lastAssistantText(sessDir);
         if (recovered) {
           if (streaming) emitPartial(recovered);
           else emit(recovered);
           sawPartial = true;
         }
       }
-
-      // Rewrite transcript so the next turn's seed has no system messages.
-      stripSystemMessages(p);
 
       if (errorMessage) {
         emitError(errorMessage);

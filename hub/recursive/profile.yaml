@@ -26,7 +26,7 @@ agentproc:
     # RECURSIVE_WORKSPACE: "/path/to/project"   # default: current directory
     # RECURSIVE_MAX_STEPS: "50"                 # default: recursive config
     # RECURSIVE_PERMISSION_MODE: "auto"         # default|plan|auto (default: auto)
-    # RECURSIVE_STATE_DIR: "/tmp/agentproc-recursive"  # where turn transcripts live
+    # RECURSIVE_STATE_DIR: "/tmp/agentproc-recursive"  # where session-dir links live
   env_allowlist:
     - RECURSIVE_API_KEY
     - RECURSIVE_PROVIDER
@@ -41,25 +41,31 @@ maintainer: jeffkit
 tags: [coding, rust, ai, self-improving]
 notes: |
   Drives `recursive --json [--stream] run <message>` on the first turn and
-  `recursive --json [--stream] replay <transcript> --resume-from N <message>`
-  on subsequent turns. Parses recursive's AgentEvent NDJSON stream:
+  `recursive --json [--stream] resume --from-file <session-dir> -p <message>`
+  on subsequent turns (native session-id resume). Parses recursive's AgentEvent
+  NDJSON stream:
     - partial_token   → AGENT_PARTIAL: (streaming mode)
     - assistant_text  → AGENT_PARTIAL: (non-streaming mode; the per-step reply)
     - turn_finished   → terminal
 
-  recursive's CLI does NOT expose its internal session id in the --json event
-  stream, and `recursive resume` re-runs the ORIGINAL goal rather than accepting
-  a new user message. So the bridge manages multi-turn continuity itself:
-    - On turn 1 it mints an opaque session id and tells recursive to persist the
-      turn's transcript to <state_dir>/<id>.json via --transcript-out.
-    - On turn N it loads that transcript, feeds it back via
-      `replay <path> --resume-from <N> <message>`, and rewrites the file so the
-      next turn continues from the extended conversation.
-  System messages are stripped from the stored transcript between turns (recursive
-  re-prepends its system prompt on every run, so keeping them would duplicate it
-  once per turn).
+  recursive records each run as a session directory and logs
+  `session: recording to <dir>` on stderr. `recursive resume --from-file <dir>
+  -p <msg>` continues that session by appending <msg> as the next user turn.
+  The bridge:
+    - On turn 1 mints an opaque AgentProc session id (rc-<uuid>), runs
+      `recursive run`, captures the recursive session directory from stderr,
+      and persists it to <state_dir>/<id>.session.
+    - On turn N loads that directory and runs
+      `resume --from-file <dir> -p <new message>`.
+  No transcript-file replay, no --resume-from indexing, no system-message
+  stripping — recursive's own session writer keeps the transcript clean
+  across turns (it does not re-prepend the system prompt as a message).
 
   Permission mode defaults to `auto` (headless, all tool calls approved) because
   the bridge runs non-interactively. Set RECURSIVE_PERMISSION_MODE=default to
   require approval via hooks instead. The agent can read/write files and run
   shell commands within the workspace cwd — pick the cwd accordingly.
+
+  Requires recursive 0.7.0+ (native `resume --from-file -p` with a next-turn
+  message). Older binaries' `resume` re-runs the original goal and will not
+  work multi-turn.

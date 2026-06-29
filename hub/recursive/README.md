@@ -62,8 +62,8 @@ env:
 
 recursive emits its lifecycle as NDJSON `AgentEvent` objects when run with `--json`. The bridge invokes:
 
-- **First turn:** `recursive --json --stream -H --no-session --transcript-out <state>/<id>.json run <message>`
-- **Subsequent turns:** `recursive --json --stream -H --no-session --transcript-out <state>/<id>.json replay <state>/<id>.json --resume-from <N> <message>`
+- **First turn:** `recursive --json --stream -H run <message>` — and captures the session directory recursive logs on stderr (`session: recording to <dir>`).
+- **Subsequent turns:** `recursive --json --stream -H resume --from-file <session-dir> -p <message>` — native session-id resume.
 
 and maps the event stream to AgentProc:
 
@@ -76,16 +76,15 @@ and maps the event stream to AgentProc:
 
 ### Multi-turn continuity
 
-recursive's CLI has two quirks that the bridge works around:
+recursive records each run as a session directory (under `~/.recursive/workspaces/<hash>/sessions/<timestamp-slug>/`) and logs `session: recording to <dir>` on stderr. `recursive resume --from-file <dir> -p <msg>` continues that session by appending `<msg>` as the next user turn — the orthodox session-id resume.
 
-1. **No session id in the `--json` stream.** recursive records sessions internally (under `~/.recursive/workspaces/<hash>/sessions/`) but does not surface a session id in its `AgentEvent` NDJSON output. So the bridge **mints its own opaque id** (`rc-<uuid>`) and emits it as `AGENT_SESSION:`.
-2. **`recursive resume` re-runs the original goal.** It does not accept a new user message — it continues a previously-interrupted run of the same goal. That is useless for a conversational turn, so the bridge does NOT use `resume`.
+The bridge:
 
-Instead, the bridge drives continuity through `recursive replay <file> --resume-from N <message>`:
+1. **Mints an opaque id** (`rc-<uuid>`) and emits it as `AGENT_SESSION:` (recursive's `--json` stream does not surface a session id, so the bridge owns the AgentProc-level handle).
+2. **Turn 1:** runs `recursive run`, captures the recursive session directory from stderr, and persists it keyed by the opaque id (a `<state_dir>/<id>.session` file containing the dir path).
+3. **Turn N:** loads the stored session directory and runs `recursive resume --from-file <dir> -p <new message>`.
 
-- Each turn, recursive is told to persist the full transcript to `<state_dir>/<id>.json` via `--transcript-out`.
-- On the next turn, the bridge reads that file, counts its messages (`N`), and invokes `replay <file> --resume-from N <new message>`. recursive seeds its runtime with the prior conversation, appends the new message as the next user turn, and runs.
-- After each turn the bridge rewrites the transcript to drop `system` messages — recursive re-prepends its system prompt on every invocation, so keeping stored system messages would duplicate it once per turn.
+No transcript-file replay, no `--resume-from` indexing, and no system-message stripping — recursive's own session writer keeps the transcript clean and uniquely numbered across turns (it does not re-prepend the system prompt as a message).
 
 `<state_dir>` defaults to `${TMPDIR:-/tmp}/agentproc-recursive`; set `RECURSIVE_STATE_DIR` to a persistent location if your OS clears `/tmp` on reboot and you need long-lived sessions.
 
@@ -100,7 +99,7 @@ Instead, the bridge drives continuity through `recursive replay <file> --resume-
 | `RECURSIVE_WORKSPACE` | no | Workspace root → `recursive --workspace` (default: `cwd`). |
 | `RECURSIVE_MAX_STEPS` | no | Agent loop cap → `recursive --max-steps`. |
 | `RECURSIVE_PERMISSION_MODE` | no | `default` · `plan` · `auto` (default: `auto`). |
-| `RECURSIVE_STATE_DIR` | no | Where turn transcripts persist (default: tmpdir). |
+| `RECURSIVE_STATE_DIR` | no | Where session-dir links persist (default: tmpdir). |
 
 \* Required only if you haven't configured recursive via `recursive init` / `~/.recursive/config.toml`. When unset, the bridge passes no override and recursive falls back to its config file.
 
@@ -108,9 +107,9 @@ Instead, the bridge drives continuity through `recursive replay <file> --resume-
 
 - **Headless / auto-approve.** The bridge runs non-interactively, so `--permission-mode` defaults to `auto` (all tool calls approved without prompting). The agent CAN read/write files and run shell commands within the workspace `cwd`. Pick the `cwd` accordingly, or set `RECURSIVE_PERMISSION_MODE=default` to route approvals through external hooks.
 - **`-H` (headless).** Passed so interactive tools go through external hooks instead of waiting on a terminal that isn't there.
-- **`--no-session`.** The bridge disables recursive's own session recording to avoid polluting `~/.recursive/`. Continuity is managed entirely via `--transcript-out` + `replay`.
+- **Session recording.** The bridge uses recursive's native session recording (no `--no-session`). Sessions land under `~/.recursive/workspaces/<hash>/sessions/` (or `$RECURSIVE_HOME` if set). The bridge captures each session's directory from stderr and resumes it by path, so it does not depend on `~/.recursive` being stable across turns — only on `RECURSIVE_STATE_DIR` (where the `<id>.session` link files live).
 - **Provider compatibility.** recursive's Anthropic parser treats `thinking` content blocks as reasoning (emitted as a `reasoning` event, not as reply text). This lands in recursive 0.7.0+ — older binaries (e.g. 0.6.0) reject `thinking` blocks and will error on models that emit them (DeepSeek `deepseek-v4-flash` on its `/anthropic` endpoint is the canonical case). If you hit `unknown variant 'thinking'`, rebuild recursive from source. The bridge itself is provider-agnostic — it only forwards recursive's `--json` events.
-- **System-message dedup.** Stripped between turns by the bridge (see above). One system prompt per run regardless of turn count.
+- **`resume --from-file -p` requires recursive 0.7.0+.** Native session-id resume with a next-turn message (`resume --from-file <dir> -p <msg>`) and the synthetic "Continue from where you left off." fallback were added in recursive 0.7.0+. Older binaries' `resume` re-runs the original goal instead of accepting a new message — the bridge will not work multi-turn against them.
 
 ## Local test
 
