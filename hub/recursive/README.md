@@ -109,13 +109,26 @@ Instead, the bridge drives continuity through `recursive replay <file> --resume-
 - **Headless / auto-approve.** The bridge runs non-interactively, so `--permission-mode` defaults to `auto` (all tool calls approved without prompting). The agent CAN read/write files and run shell commands within the workspace `cwd`. Pick the `cwd` accordingly, or set `RECURSIVE_PERMISSION_MODE=default` to route approvals through external hooks.
 - **`-H` (headless).** Passed so interactive tools go through external hooks instead of waiting on a terminal that isn't there.
 - **`--no-session`.** The bridge disables recursive's own session recording to avoid polluting `~/.recursive/`. Continuity is managed entirely via `--transcript-out` + `replay`.
-- **Provider compatibility.** recursive's Anthropic parser does not accept `thinking` content blocks; if you point `RECURSIVE_PROVIDER=anthropic` at a model that emits them (e.g. some DeepSeek anthropic-format endpoints), the run errors. Use the OpenAI-compatible endpoint for such models.
+- **Provider compatibility.** recursive's Anthropic parser treats `thinking` content blocks as reasoning (emitted as a `reasoning` event, not as reply text). This lands in recursive 0.7.0+ — older binaries (e.g. 0.6.0) reject `thinking` blocks and will error on models that emit them (DeepSeek `deepseek-v4-flash` on its `/anthropic` endpoint is the canonical case). If you hit `unknown variant 'thinking'`, rebuild recursive from source. The bridge itself is provider-agnostic — it only forwards recursive's `--json` events.
 - **System-message dedup.** Stripped between turns by the bridge (see above). One system prompt per run regardless of turn count.
 
 ## Local test
 
 ```bash
 cd ~/projects/my-app
+
+# Using recursive's own config (recursive init already done) — no --env needed:
+agentproc hub run recursive -p "reply with exactly: recursive ok"
+
+# Or override per-run. DeepSeek Anthropic endpoint (recursive's default style,
+# requires recursive 0.7.0+ for thinking-block support):
+agentproc hub run recursive -p "reply with exactly: recursive ok" \
+  --env RECURSIVE_API_KEY="$DEEPSEEK_API_KEY" \
+  --env RECURSIVE_PROVIDER=anthropic \
+  --env RECURSIVE_API_BASE=https://api.deepseek.com/anthropic \
+  --env RECURSIVE_MODEL=deepseek-v4-flash
+
+# Or the OpenAI-compatible endpoint:
 agentproc hub run recursive -p "reply with exactly: recursive ok" \
   --env RECURSIVE_API_KEY="$DEEPSEEK_API_KEY" \
   --env RECURSIVE_PROVIDER=openai \
