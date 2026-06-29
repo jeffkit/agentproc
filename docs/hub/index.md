@@ -47,6 +47,7 @@ Add `--refresh` to force re-fetch from GitHub.
 | [codex](https://github.com/jeffkit/agentproc/tree/main/hub/codex) | `codex` (OpenAI) | official | Python · Node |
 | [codebuddy](https://github.com/jeffkit/agentproc/tree/main/hub/codebuddy) | `codebuddy` (Tencent) | official | Python · Node |
 | [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
+| [recursive](https://github.com/jeffkit/agentproc/tree/main/hub/recursive) | `recursive` (self-improving Rust agent) | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | (no CLI) | official | Python · Node · Bash |
 
 `tested`:
@@ -65,6 +66,7 @@ agentproc hub list
 #   codex           official    Connect the codex CLI as an AgentProc agent...
 #   codebuddy       official    Connect the codebuddy CLI as an AgentProc agent...
 #   agy             community   Connect the agy CLI as an AgentProc agent...
+#   recursive       community   Connect the recursive CLI as an AgentProc agent...
 #   echo-agent      official    Minimal AgentProc hello-world agent...
 
 # Read its docs
@@ -92,6 +94,9 @@ agentproc hub run codex \
 
 # codebuddy (uses its own login)
 agentproc hub run codebuddy -p "refactor this function"
+
+# recursive (self-improving Rust agent; configure via `recursive init` first)
+agentproc hub run recursive -p "find the bug in src/auth.rs"
 ```
 
 ### Multi-turn

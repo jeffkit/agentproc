@@ -1,0 +1,65 @@
+name: recursive
+description: Connect the recursive CLI (self-improving Rust coding agent) as an AgentProc agent with streaming and multi-turn session continuity
+cli: recursive
+cli_install: |
+  # recursive ships as a Rust binary. Install from source:
+  cargo install --locked --path .
+  # Or, from the recursive repo: `cargo build --release` and copy
+  # `target/release/recursive` onto your PATH.
+  # Then configure a provider: `recursive init` (or edit ~/.recursive/config.toml).
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`, which
+  # becomes recursive's workspace root (the directory it can read/write).
+  # Override with --cwd to point recursive at a different project.
+  timeout_secs: 1200
+  streaming: true
+  env:
+    # All optional. If unset, the bridge lets recursive use its own
+    # ~/.recursive/config.toml (set via `recursive init`). Set these to
+    # override provider/model/key per-run without editing config.
+    RECURSIVE_API_KEY: "${RECURSIVE_API_KEY}"
+    RECURSIVE_PROVIDER: "${RECURSIVE_PROVIDER}"
+    RECURSIVE_API_BASE: "${RECURSIVE_API_BASE}"
+    RECURSIVE_MODEL: "${RECURSIVE_MODEL}"
+    # Optional behaviour knobs (unset → recursive defaults):
+    # RECURSIVE_WORKSPACE: "/path/to/project"   # default: current directory
+    # RECURSIVE_MAX_STEPS: "50"                 # default: recursive config
+    # RECURSIVE_PERMISSION_MODE: "auto"         # default|plan|auto (default: auto)
+    # RECURSIVE_STATE_DIR: "/tmp/agentproc-recursive"  # where turn transcripts live
+  env_allowlist:
+    - RECURSIVE_API_KEY
+    - RECURSIVE_PROVIDER
+    - RECURSIVE_API_BASE
+    - RECURSIVE_MODEL
+    - RECURSIVE_WORKSPACE
+    - RECURSIVE_MAX_STEPS
+    - RECURSIVE_PERMISSION_MODE
+    - RECURSIVE_STATE_DIR
+tested: community
+maintainer: jeffkit
+tags: [coding, rust, ai, self-improving]
+notes: |
+  Drives `recursive --json [--stream] run <message>` on the first turn and
+  `recursive --json [--stream] replay <transcript> --resume-from N <message>`
+  on subsequent turns. Parses recursive's AgentEvent NDJSON stream:
+    - partial_token   → AGENT_PARTIAL: (streaming mode)
+    - assistant_text  → AGENT_PARTIAL: (non-streaming mode; the per-step reply)
+    - turn_finished   → terminal
+
+  recursive's CLI does NOT expose its internal session id in the --json event
+  stream, and `recursive resume` re-runs the ORIGINAL goal rather than accepting
+  a new user message. So the bridge manages multi-turn continuity itself:
+    - On turn 1 it mints an opaque session id and tells recursive to persist the
+      turn's transcript to <state_dir>/<id>.json via --transcript-out.
+    - On turn N it loads that transcript, feeds it back via
+      `replay <path> --resume-from <N> <message>`, and rewrites the file so the
+      next turn continues from the extended conversation.
+  System messages are stripped from the stored transcript between turns (recursive
+  re-prepends its system prompt on every run, so keeping them would duplicate it
+  once per turn).
+
+  Permission mode defaults to `auto` (headless, all tool calls approved) because
+  the bridge runs non-interactively. Set RECURSIVE_PERMISSION_MODE=default to
+  require approval via hooks instead. The agent can read/write files and run
+  shell commands within the workspace cwd — pick the cwd accordingly.

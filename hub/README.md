@@ -12,6 +12,7 @@ Ready-to-use [AgentProc](https://agentproc.dev) profiles for popular AI agent CL
 | [gemini-cli](./gemini-cli/) | `gemini` (Google) | official | Python · Node |
 | [cursor](./cursor/) | `agent` (Cursor Agent) | official | Python · Node |
 | [qwen-code](./qwen-code/) | `qwen` (Alibaba) | community | Python · Node |
+| [recursive](./recursive/) | `recursive` (self-improving Rust agent) | community | Python · Node |
 | [agy](./agy/) | `agy` | community | Python · Node |
 | [echo-agent](./echo-agent/) | (no CLI — hello world) | official | Python · Node · Bash |
 
@@ -56,7 +57,7 @@ Pick whichever bridge language you prefer — both produce identical AgentProc o
 
 ### Shared bridge utilities
 
-NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text profiles (`agy`, `echo-agent`) keep bespoke bridges.
+NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text profiles (`agy`, `echo-agent`) and `recursive` (which needs cross-turn transcript state the shared helper doesn't model) keep bespoke bridges.
 
 ## How to use a profile
 

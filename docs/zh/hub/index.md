@@ -47,6 +47,7 @@ export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
 | [codex](https://github.com/jeffkit/agentproc/tree/main/hub/codex) | `codex`（OpenAI） | official | Python · Node |
 | [codebuddy](https://github.com/jeffkit/agentproc/tree/main/hub/codebuddy) | `codebuddy`（腾讯） | official | Python · Node |
 | [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
+| [recursive](https://github.com/jeffkit/agentproc/tree/main/hub/recursive) | `recursive`（自改进 Rust agent） | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | （无 CLI） | official | Python · Node · Bash |
 
 `tested` 含义：
@@ -87,6 +88,9 @@ agentproc hub run codex \
 
 # codebuddy（用它自己的登录）
 agentproc hub run codebuddy -p "refactor this function"
+
+# recursive（自改进 Rust agent；先用 `recursive init` 配置）
+agentproc hub run recursive -p "find the bug in src/auth.rs"
 ```
 
 ### 多轮对话
