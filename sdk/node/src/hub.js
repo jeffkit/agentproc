@@ -253,7 +253,9 @@ async function listProfileNames() {
   for (const e of tree) {
     if (!e.path.startsWith('hub/')) continue;
     const seg = e.path.slice('hub/'.length).split('/')[0];
-    if (seg && !seen.has(seg)) seen.add(seg);
+    // Directories prefixed with `_` (e.g. `_shared`) hold bridge utilities,
+    // not profiles — exclude them from listings and "did you mean" suggestions.
+    if (seg && !seg.startsWith('_') && !seen.has(seg)) seen.add(seg);
   }
   return [...seen].sort();
 }
@@ -402,6 +404,9 @@ async function listProfiles(opts = {}) {
   for (const entry of entries) {
     if (entry.type !== 'dir') continue;
     const name = entry.name;
+    // Skip utility directories like `_shared/` — they hold shared bridge
+    // helpers, not a runnable profile (no profile.yaml).
+    if (name.startsWith('_')) continue;
     try {
       const yamlText = await httpGetText(GITHUB_RAW(`hub/${name}/profile.yaml`));
       const { parseYaml } = require('./cli.js');

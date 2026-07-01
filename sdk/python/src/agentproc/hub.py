@@ -284,7 +284,9 @@ def _list_profile_names() -> List[str]:
         if not p.startswith("hub/"):
             continue
         seg = p[len("hub/"):].split("/")[0]
-        if seg and seg not in seen:
+        # Directories prefixed with `_` (e.g. `_shared`) hold bridge
+        # utilities, not profiles — exclude from listings and suggestions.
+        if seg and not seg.startswith("_") and seg not in seen:
             seen.add(seg)
             names.append(seg)
     return sorted(names)
@@ -432,6 +434,10 @@ def list_profiles(
         if entry["type"] != "dir":
             continue
         name = entry["name"]
+        # Skip utility directories like `_shared/` — they hold shared bridge
+        # helpers, not a runnable profile (no profile.yaml).
+        if name.startswith("_"):
+            continue
         # Read profile.yaml from raw URL to get metadata.
         try:
             yaml_url = GITHUB_RAW.format(

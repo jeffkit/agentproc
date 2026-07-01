@@ -32,6 +32,10 @@ from agentproc.hub import (
 
 FAKE_TREE = [
     {"path": "hub", "type": "tree"},
+    {"path": "hub/_shared", "type": "tree"},
+    {"path": "hub/_shared/stream_utils.py", "type": "blob"},
+    {"path": "hub/_shared/stream_utils.js", "type": "blob"},
+    {"path": "hub/_shared/README.md", "type": "blob"},
     {"path": "hub/echo-agent", "type": "tree"},
     {"path": "hub/echo-agent/profile.yaml", "type": "blob"},
     {"path": "hub/echo-agent/bridge.py", "type": "blob"},
@@ -236,6 +240,15 @@ class TestListProfiles:
         for p in profiles:
             assert p["name"].startswith("")  # just a sanity check
             assert "/" not in p["name"]
+
+    def test_list_skips_underscore_utility_dirs(self, isolated_cache):
+        """`_shared/` holds bridge helpers, not a profile — must be excluded."""
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            profiles = hub_mod.list_profiles()
+        names = [p["name"] for p in profiles]
+        assert not any(n.startswith("_") for n in names), names
+        assert "_shared" not in names
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,10 @@ const hub = require('./hub.js');
 
 const FAKE_TREE = [
   { path: 'hub', type: 'tree' },
+  { path: 'hub/_shared', type: 'tree' },
+  { path: 'hub/_shared/stream_utils.py', type: 'blob' },
+  { path: 'hub/_shared/stream_utils.js', type: 'blob' },
+  { path: 'hub/_shared/README.md', type: 'blob' },
   { path: 'hub/echo-agent', type: 'tree' },
   { path: 'hub/echo-agent/profile.yaml', type: 'blob' },
   { path: 'hub/echo-agent/bridge.py', type: 'blob' },
@@ -241,6 +245,20 @@ describe('hub', { concurrency: false }, () => {
         assert.strictEqual(ec.tested, 'official');
         assert.strictEqual(ec.description, 'Minimal hello-world agent');
         assert.strictEqual(ec.cli, 'none');
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('skips underscore-prefixed utility dirs like _shared', async () => {
+      // _shared/ has no profile.yaml; it must not appear in the listing and
+      // must not trigger a "could not read metadata" warning/fetch.
+      const counter = installFakeFetch();
+      try {
+        const profiles = await hub.listProfiles({ refresh: true });
+        const names = profiles.map(p => p.name);
+        assert.ok(!names.some(n => n.startsWith('_')),
+          `utility dir leaked into listing: ${names}`);
       } finally {
         counter.restore();
       }

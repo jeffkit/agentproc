@@ -78,6 +78,7 @@ A round of UX and resilience fixes after running the CLI as a non-coder would. T
 - `GITHUB_TOKEN` / `GH_TOKEN` env vars add `Authorization: Bearer <token>`, raising the rate limit from ~60/hr to ~5,000/hr.
 - 403/429 hint lists the rate-limit fix; 404 hint suggests `agentproc hub list`.
 - Typo'd profile names get a "Did you mean X?" suggestion via prefix match + edit distance (length-scaled threshold).
+- `agentproc hub list` skips `_`-prefixed utility directories such as `_shared/`. Previously `_shared` showed up as `(failed to read metadata)` because the hub tried to fetch a non-existent `profile.yaml` for it.
 
 ### Hub profile schema
 
