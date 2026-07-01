@@ -109,7 +109,11 @@ function installFakeFetch(tree = FAKE_TREE, contents = FAKE_FILE_CONTENTS) {
         return { ok: true, text: async () => content };
       }
     }
-    throw new Error(`unexpected text URL: ${url}`);
+    // Unmatched raw URL → 404. This is now legitimate: `hub run` probes a
+    // fixed candidate file set via raw URLs, and optional files (e.g.
+    // bridge.sh on a non-echo profile) or a wrong profile name legitimately
+    // 404 without burning GitHub's rate-limited Trees API.
+    return { ok: false, status: 404, text: async () => '' };
   };
   counter.restore = () => { global.fetch = orig; };
   return counter;
@@ -183,6 +187,35 @@ describe('hub', { concurrency: false }, () => {
       }
     });
 
+    test('happy path does not call the rate-limited Trees API', async () => {
+      // `hub run` fetches profile files via raw.githubusercontent.com (CDN,
+      // not rate-limited). A known profile must not trigger any api.github.com
+      // call — that's the whole point of the rate-limit fix.
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('echo-agent');
+        assert.strictEqual(counter.json, 0);
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('skips optional files that 404 (e.g. bridge.sh on claude-code)', async () => {
+      const counter = installFakeFetch();
+      try {
+        const dir = await hub.fetchProfile('claude-code');
+        const names = fs.readdirSync(dir);
+        assert.ok(names.includes('profile.yaml'));
+        assert.ok(names.includes('bridge.py'));
+        assert.ok(names.includes('bridge.js'));
+        assert.ok(names.includes('README.md'));
+        // claude-code has no bridge.sh — the 404 is swallowed, not stored.
+        assert.ok(!names.includes('bridge.sh'));
+      } finally {
+        counter.restore();
+      }
+    });
+
     test('unknown profile raises', async () => {
       const counter = installFakeFetch([{ path: 'hub', type: 'tree' }]);
       try {
@@ -209,9 +242,11 @@ describe('hub', { concurrency: false }, () => {
       const counter = installFakeFetch();
       try {
         await hub.fetchProfile('echo-agent');
-        const first = counter.json;
+        const firstText = counter.text;
         await hub.fetchProfile('echo-agent', { refresh: true });
-        assert.ok(counter.json > first);
+        // hub run fetches files via raw URLs (CDN), not the rate-limited
+        // Trees API — so a refresh re-fetches the file set, not the tree.
+        assert.ok(counter.text > firstText);
       } finally {
         counter.restore();
       }
@@ -259,6 +294,24 @@ describe('hub', { concurrency: false }, () => {
         const names = profiles.map(p => p.name);
         assert.ok(!names.some(n => n.startsWith('_')),
           `utility dir leaked into listing: ${names}`);
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('disk-caches the tree so repeat calls skip the Trees API', async () => {
+      // The first listProfiles hits the Trees API (counter.json 0→1) and
+      // writes ~/.agentproc/cache/hub/tree.json. A second call in the same
+      // process reuses the cached tree and must not make another API call.
+      const counter = installFakeFetch();
+      try {
+        hub.clearTreeCache();  // reset in-memory + disk from prior tests
+        await hub.listProfiles();
+        assert.strictEqual(counter.json, 1);
+        const treeCache = path.join(hub.cacheRoot(), 'tree.json');
+        assert.ok(fs.existsSync(treeCache), 'tree.json not written to disk');
+        await hub.listProfiles();
+        assert.strictEqual(counter.json, 1, 'second call hit the Trees API again');
       } finally {
         counter.restore();
       }

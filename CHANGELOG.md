@@ -44,6 +44,26 @@ The previous bridges had a latent duplicate-emission bug: when a CLI streams par
 
 Still protocol `0.1`. The new profiles and the shared module are bridge-side concerns; agents see the same env vars and emit the same stdout protocol.
 
+## 0.4.1 — 2026-07-01
+
+Hub rate-limit relief. No protocol changes — `AGENT_*` env vars, stdout sentinels, and profile schema are unchanged.
+
+### The problem
+
+Every `agentproc hub` command called the GitHub **Trees API** (`api.github.com/.../git/trees`), which rate-limits anonymous callers to **~60/hour per IP** (shared across everyone behind the same NAT). A handful of `hub list` / `hub run` invocations would blow the budget and the next user got `HTTP 403`. Telling ordinary users to `export GITHUB_TOKEN` is not a real fix.
+
+### The fix (Node + Python parity)
+
+- **`agentproc hub run <name>` no longer calls the Trees API in the happy path.** Profile files are fetched directly via `raw.githubusercontent.com` (Fastly CDN, not rate-limited) using a fixed candidate set (`profile.yaml`, `bridge.py`, `bridge.js`, `bridge.sh`, `README.md` — per the hub convention in `hub/README.md`). Optional files that 404 (e.g. `bridge.sh` on a non-echo profile) are simply skipped. Only an unknown profile name (profile.yaml 404) falls back to the tree to produce a "did you mean" suggestion.
+- **The repo tree is now cached on disk** at `~/.agentproc/cache/hub/tree.json` with the same 24h TTL as profiles (previously in-memory only, which never survives a fresh CLI process). So `agentproc hub list` — and the unknown-name fallback — make at most ~1 Trees API call per day, no matter how many times they're run.
+- Net effect: a normal user's daily `hub` usage makes **zero** `api.github.com` calls in the common case (files come from the CDN; the tree is disk-cached). The 60/hr limit is no longer reachable in practice, and `GITHUB_TOKEN` is only needed for heavy/automated use.
+
+### Notes
+
+- New `clearTreeCache()` (Node) / `_clear_tree_cache()` (Python) clears both layers; `hub run --refresh` uses it so a refresh sees newly-added profiles.
+- `listRemoteProfileFiles` / `_list_remote_profile_files` and the single-file download helpers were removed (the raw-URL candidate fetch replaces them).
+- Tests updated: fake HTTP returns 404 (not an assertion) for unmatched raw URLs; new tests assert `hub run`'s happy path makes 0 Trees API calls, optional files 404 cleanly, and the tree is disk-cached across calls.
+
 ## 0.4.0 — 2026-06-26
 
 A round of UX and resilience fixes after running the CLI as a non-coder would. The 5-minute path now actually works on the first try. No protocol changes — `AGENT_*` env vars, stdout sentinels, and profile schema are all backward-compatible.

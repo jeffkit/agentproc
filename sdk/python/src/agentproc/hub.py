@@ -158,6 +158,22 @@ def _http_get_text(url: str, timeout: int = 30) -> str:
         ) from e
 
 
+def _http_get_text_optional(url: str, timeout: int = 30) -> Optional[str]:
+    """Like _http_get_text, but returns None on 404 instead of raising.
+
+    Used for probing optional profile files (e.g. bridge.sh only exists for
+    echo-agent) and for detecting "profile does not exist" without burning
+    a rate-limited Trees API call. Delegates to _http_get_text so callers
+    that patch _http_get_text in tests automatically cover this path.
+    """
+    try:
+        return _http_get_text(url, timeout=timeout)
+    except HubError as e:
+        if e.status == 404:
+            return None
+        raise
+
+
 def _http_error_to_hub(status: int, body: str, url: str, *, is_json: bool) -> HubError:
     """Translate a GitHub HTTP error into a HubError with a remediation hint."""
     authed = bool(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
@@ -196,91 +212,123 @@ def _http_error_to_hub(status: int, body: str, url: str, *, is_json: bool) -> Hu
     )
 
 
-def _list_remote_files(subpath: str) -> List[Dict[str, str]]:
-    """List files in a hub subpath via the git tree API (1 API call for all).
+# ---------------------------------------------------------------------------
+# Repo tree — cached in-memory and on disk (24h TTL)
+# ---------------------------------------------------------------------------
+#
+# The GitHub Trees API is the one call that rate-limits anonymous users to
+# ~60/hr. Every CLI invocation is a fresh process, so an in-memory cache
+# alone doesn't help across calls. The disk cache (~/.agentproc/cache/hub/
+# tree.json) is what gives rate-limit relief: a normal user makes at most
+# ~1 Trees API call per day, regardless of how many `hub list` / `hub run`
+# invocations they run.
 
-    Returns list of {name, path, type, download_url}. We avoid the Contents
-    API because its rate limit is 60/hr unauthenticated; the tree API gives
-    us the entire hub/ tree in one call.
+_tree_cache: Optional[List[Dict[str, str]]] = None
+
+
+def _tree_cache_path() -> Path:
+    return _cache_root() / "tree.json"
+
+
+def _clear_tree_cache() -> None:
+    """Drop the in-memory tree cache and delete the disk cache file."""
+    global _tree_cache
+    _tree_cache = None
+    p = _tree_cache_path()
+    if p.exists():
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def _get_tree() -> List[Dict[str, str]]:
+    """Return the full repo tree as a list of {path, type('blob'|'tree')}.
+
+    Serves from in-memory cache → disk cache (24h TTL) → GitHub API, writing
+    each layer as it misses. The API is the only rate-limited step.
+    """
+    global _tree_cache
+    if _tree_cache is not None:
+        return _tree_cache
+
+    tp = _tree_cache_path()
+    if tp.exists():
+        try:
+            meta = json.loads(tp.read_text(encoding="utf-8"))
+            age = max(0.0, time.time() - float(meta.get("fetched_at", 0)))
+            if age < HUB_CACHE_TTL_SECS and isinstance(meta.get("tree"), list):
+                _tree_cache = [
+                    {"path": str(e.get("path", "")), "type": str(e.get("type", ""))}
+                    for e in meta["tree"] if isinstance(e, dict)
+                ]
+                return _tree_cache
+        except (ValueError, OSError):
+            pass  # corrupt cache file — refetch
+
+    url = GITHUB_TREES.format(repo=HUB_REPO, ref=HUB_REF)
+    data = _http_get_json(url)
+    if not isinstance(data, dict) or not isinstance(data.get("tree"), list):
+        raise RuntimeError(f"unexpected tree API response: {type(data).__name__}")
+    _tree_cache = [
+        {"path": str(e.get("path", "")), "type": str(e.get("type", ""))}
+        for e in data["tree"] if isinstance(e, dict)
+    ]
+
+    try:
+        _cache_root().mkdir(parents=True, exist_ok=True)
+        tp.write_text(
+            json.dumps(
+                {"fetched_at": time.time(), "ref": HUB_REF, "tree": _tree_cache},
+            ),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # disk cache is best-effort
+
+    return _tree_cache
+
+
+def _list_remote_files(subpath: str) -> List[Dict[str, str]]:
+    """List top-level entries in a hub subpath (e.g. 'hub' → all profile dirs).
+
+    Uses _get_tree(), which is cached in-memory and on disk (24h TTL) so
+    repeated calls don't re-hit the rate-limited Trees API.
     """
     if not subpath.endswith("/"):
         subpath = subpath + "/"
-    url = GITHUB_TREES.format(repo=HUB_REPO, ref=HUB_REF)
-    data = _http_get_json(url)
-    if not isinstance(data, dict) or "tree" not in data:
-        raise RuntimeError(f"unexpected tree API response: {type(data).__name__}")
+    tree = _get_tree()
     out: List[Dict[str, str]] = []
-    for entry in data["tree"]:
-        if not isinstance(entry, dict):
-            continue
-        p = str(entry.get("path", ""))
+    seen = set()
+    for entry in tree:
+        p = entry["path"]
         if not p.startswith(subpath):
             continue
-        # type is "blob" (file) or "tree" (directory)
-        etype = "file" if entry.get("type") == "blob" else (
-            "dir" if entry.get("type") == "tree" else ""
-        )
-        # Name is the part after subpath.
         name = p[len(subpath):].split("/")[0]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        is_dir = any(t["path"] == subpath + name and t["type"] == "tree" for t in tree)
         out.append({
             "name": name,
             "path": p,
-            "type": etype,
-            # We don't use download_url from the API; we use raw URLs.
+            "type": "dir" if is_dir else "file",
             "download_url": "",
         })
-    # Deduplicate: for directory listing we only want the top-level entries.
-    seen = set()
-    unique: List[Dict[str, str]] = []
-    for e in out:
-        if e["name"] in seen:
-            continue
-        seen.add(e["name"])
-        unique.append(e)
-    return unique
-
-
-def _list_remote_profile_files(name: str) -> List[Dict[str, str]]:
-    """List the actual files inside hub/<name>/ (not just top-level entries).
-
-    Returns only file entries (type=file), with their full remote paths.
-    """
-    prefix = f"hub/{name}/"
-    url = GITHUB_TREES.format(repo=HUB_REPO, ref=HUB_REF)
-    data = _http_get_json(url)
-    if not isinstance(data, dict) or "tree" not in data:
-        raise RuntimeError(f"unexpected tree API response: {type(data).__name__}")
-    out: List[Dict[str, str]] = []
-    for entry in data["tree"]:
-        if not isinstance(entry, dict):
-            continue
-        p = str(entry.get("path", ""))
-        if not p.startswith(prefix):
-            continue
-        if entry.get("type") != "blob":
-            continue
-        # Filename is the last segment.
-        fname = p[len(prefix):].split("/")[-1]
-        out.append({"name": fname, "path": p})
     return out
 
 
 def _list_profile_names() -> List[str]:
     """List top-level profile names (directories directly under hub/).
 
-    Cheap: uses the same tree fetch as everything else, so this is one
-    network call at most (cached in-memory by urllib).
+    Cheap: uses the disk-cached tree, so this is at most ~1 Trees API call
+    per day regardless of how many times it's called.
     """
-    url = GITHUB_TREES.format(repo=HUB_REPO, ref=HUB_REF)
-    data = _http_get_json(url)
-    if not isinstance(data, dict) or "tree" not in data:
-        return []
+    tree = _get_tree()
     names: List[str] = []
     seen = set()
-    for entry in data["tree"]:
-        if not isinstance(entry, dict):
-            continue
-        p = str(entry.get("path", ""))
+    for entry in tree:
+        p = entry["path"]
         if not p.startswith("hub/"):
             continue
         seg = p[len("hub/"):].split("/")[0]
@@ -344,12 +392,19 @@ def _edit_distance(a: str, b: str) -> int:
     return prev[n]
 
 
-def _download_file(remote_path: str, local_path: Path) -> None:
-    """Download a single file from raw.githubusercontent.com."""
-    url = GITHUB_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=remote_path)
-    text = _http_get_text(url)
-    local_path.parent.mkdir(parents=True, exist_ok=True)
-    local_path.write_text(text, encoding="utf-8")
+# Every hub profile is this fixed set of files (see hub/README.md):
+#   profile.yaml (required) + bridge.py + bridge.js + README.md,
+# with echo-agent additionally shipping bridge.sh. We fetch them directly
+# via raw.githubusercontent.com (CDN, not rate-limited) so `hub run` never
+# calls the GitHub Trees API in the happy path. If a future profile adds a
+# new file type, extend this list.
+_PROFILE_FILE_CANDIDATES = (
+    "profile.yaml",
+    "bridge.py",
+    "bridge.js",
+    "bridge.sh",
+    "README.md",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +418,17 @@ def fetch_profile(
 ) -> Path:
     """Fetch a profile directory to local cache. Returns the cache path.
 
+    Fetches files directly via raw.githubusercontent.com (CDN, not
+    rate-limited) — no GitHub Trees API call in the happy path. Only an
+    unknown profile name (profile.yaml 404) falls back to the disk-cached
+    tree to produce a "did you mean" suggestion.
+
     If a fresh cache exists (younger than HUB_CACHE_TTL_SECS) and refresh
     is False, returns immediately without network access.
     """
+    if refresh:
+        _clear_tree_cache()
+
     age = _cache_age_secs(name)
     cached = cache_dir(name)
     profile_yaml = cached / "profile.yaml"
@@ -381,11 +444,15 @@ def fetch_profile(
         else:
             on_log(f"fetching profile '{name}' from {HUB_REPO}:{HUB_REF}...")
 
-    entries = _list_remote_profile_files(name)
-    if not entries:
-        # getTree succeeded (otherwise _list_remote_profile_files would have
-        # raised HubError already). So the name is genuinely wrong — surface
-        # the list of available names so the user can correct the typo.
+    # Probe profile.yaml via raw URL. raw.githubusercontent.com is CDN-backed
+    # and not subject to the 60/hr anonymous API limit, so this does not burn
+    # rate-limit budget.
+    probe_url = GITHUB_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/profile.yaml")
+    probe = _http_get_text_optional(probe_url)
+    if probe is None:
+        # profile.yaml 404 → the name is wrong. Fall back to the (disk-cached)
+        # tree to produce a "did you mean" suggestion. This is the only path
+        # that may call the Trees API for `hub run`, and it's cached for 24h.
         known: List[str] = []
         try:
             known = _list_profile_names()
@@ -405,16 +472,26 @@ def fetch_profile(
             hint="\n".join(lines),
         )
 
-    # Clear cache, then re-download every file in the profile directory.
+    # Clear cache, then download the candidate file set via raw URLs.
     if cached.exists():
         shutil.rmtree(cached)
     cached.mkdir(parents=True, exist_ok=True)
 
-    for entry in entries:
-        local = cached / entry["name"]
-        _download_file(entry["path"], local)
+    # profile.yaml already fetched via the probe.
+    (cached / "profile.yaml").write_text(probe, encoding="utf-8")
+    if on_log:
+        on_log("  - profile.yaml")
+
+    for fname in _PROFILE_FILE_CANDIDATES:
+        if fname == "profile.yaml":
+            continue
+        url = GITHUB_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/{fname}")
+        text = _http_get_text_optional(url)
+        if text is None:
+            continue  # optional file not present for this profile
+        (cached / fname).write_text(text, encoding="utf-8")
         if on_log:
-            on_log(f"  - {entry['name']}")
+            on_log(f"  - {fname}")
 
     _write_cache_meta(name)
     return cached

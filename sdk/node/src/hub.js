@@ -178,13 +178,66 @@ async function httpGetText(url) {
 }
 
 /**
+ * Like httpGetText, but returns null on 404 instead of throwing. Used for
+ * probing optional profile files (e.g. bridge.sh only exists for echo-agent)
+ * and for detecting "profile does not exist" without burning an API call.
+ */
+async function httpGetTextOptional(url) {
+  const r = await fetch(url, { headers: authHeaders({ json: false }) });
+  if (r.status === 404) return null;
+  if (!r.ok) {
+    throw new HubError(`fetch failed (HTTP ${r.status}) for ${url}`, {
+      status: r.status,
+      hint: 'Profile files should exist in the hub repo. Try `agentproc hub list` to verify.',
+    });
+  }
+  return r.text();
+}
+
+/**
  * Fetch the entire repo tree (1 API call, returns all paths under hub/).
- * Cached in memory for the lifetime of the process.
+ * Cached two ways: in-memory for the lifetime of the process, and on disk
+ * at ~/.agentproc/cache/hub/tree.json with the same 24h TTL as profiles.
+ *
+ * The disk cache is the important one for rate-limit relief: the GitHub
+ * Trees API is the single call that rate-limits anonymous users to ~60/hr,
+ * and every CLI invocation is a fresh process (so the in-memory cache never
+ * survives). With the disk cache, a normal user makes at most ~1 Trees API
+ * call per day regardless of how many `hub list` / `hub run` they run.
  * @returns {Promise<Array<{path: string, type: 'blob'|'tree'}>>}
  */
 let _treeCache = null;
+
+function treeCachePath() {
+  return path.join(cacheRoot(), 'tree.json');
+}
+
+function clearTreeCache() {
+  _treeCache = null;
+  const p = treeCachePath();
+  if (fs.existsSync(p)) {
+    try { fs.unlinkSync(p); } catch { /* best effort */ }
+  }
+}
+
 async function getTree() {
   if (_treeCache) return _treeCache;
+
+  const tp = treeCachePath();
+  if (fs.existsSync(tp)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(tp, 'utf8'));
+      const age = Math.max(0, Date.now() / 1000 - (meta.fetched_at || 0));
+      if (age < HUB_CACHE_TTL_SECS && Array.isArray(meta.tree)) {
+        _treeCache = meta.tree.map((e) => ({
+          path: String((e && e.path) || ''),
+          type: String((e && e.type) || ''),
+        }));
+        return _treeCache;
+      }
+    } catch { /* corrupt cache file — refetch */ }
+  }
+
   const data = await httpGetJson(GITHUB_TREES);
   if (!data || !Array.isArray(data.tree)) {
     throw new Error('unexpected tree API response');
@@ -195,6 +248,16 @@ async function getTree() {
       path: String(e.path || ''),
       type: String(e.type || ''),  // 'blob' or 'tree'
     }));
+
+  fs.mkdirSync(cacheRoot(), { recursive: true });
+  try {
+    fs.writeFileSync(tp, JSON.stringify({
+      fetched_at: Date.now() / 1000,
+      ref: HUB_REF,
+      tree: _treeCache,
+    }), 'utf8');
+  } catch { /* disk cache is best-effort */ }
+
   return _treeCache;
 }
 
@@ -226,25 +289,9 @@ async function listRemoteFiles(subpath) {
 }
 
 /**
- * List actual files inside a hub/<name>/ directory.
- * @param {string} name
- * @returns {Promise<Array<{name: string, path: string}>>}
- */
-async function listRemoteProfileFiles(name) {
-  const prefix = `hub/${name}/`;
-  const tree = await getTree();
-  return tree
-    .filter((e) => e.type === 'blob' && e.path.startsWith(prefix))
-    .map((e) => ({
-      name: e.path.slice(prefix.length).split('/').pop(),
-      path: e.path,
-    }));
-}
-
-/**
  * List top-level profile names (the directories directly under hub/).
- * Cheap: uses the same in-memory tree cache as getTree(), so calling this
- * after listRemoteProfileFiles does not cost an extra API request.
+ * Cheap: uses the same disk-cached tree as getTree(), so calling this
+ * after listRemoteFiles does not cost an extra API request.
  * @returns {Promise<string[]>}
  */
 async function listProfileNames() {
@@ -318,18 +365,27 @@ function editDistance(a, b) {
   return prev[n];
 }
 
-async function downloadFile(remotePath, localPath) {
-  const text = await httpGetText(GITHUB_RAW(remotePath));
-  fs.mkdirSync(path.dirname(localPath), { recursive: true });
-  fs.writeFileSync(localPath, text, 'utf8');
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+// Every hub profile is this fixed set of files (see hub/README.md):
+//   profile.yaml (required) + bridge.py + bridge.js + README.md,
+// with echo-agent additionally shipping bridge.sh. We fetch them directly
+// via raw.githubusercontent.com (CDN, not rate-limited) so `hub run` never
+// calls the GitHub Trees API in the happy path. If a future profile adds a
+// new file type, extend this list.
+const PROFILE_FILE_CANDIDATES = [
+  'profile.yaml', 'bridge.py', 'bridge.js', 'bridge.sh', 'README.md',
+];
+
 /**
  * Fetch a profile directory to local cache. Returns the cache path.
+ *
+ * Fetches files directly via raw.githubusercontent.com (CDN, not
+ * rate-limited) — no GitHub Trees API call in the happy path. Only an
+ * unknown profile name (profile.yaml 404) falls back to the disk-cached
+ * tree to produce a "did you mean" suggestion.
  *
  * @param {string} name
  * @param {{refresh?: boolean, onLog?: function(string): void}} [opts]
@@ -338,9 +394,8 @@ async function downloadFile(remotePath, localPath) {
 async function fetchProfile(name, opts = {}) {
   const { refresh = false, onLog = null } = opts;
 
-  // On refresh, also clear the in-memory tree cache so we see new files
-  // (e.g. profiles added since the process started).
-  if (refresh) _treeCache = null;
+  // On refresh, clear the tree cache so we see newly-added profiles.
+  if (refresh) clearTreeCache();
 
   const age = cacheAgeSecs(name);
   const dir = cacheDir(name);
@@ -359,11 +414,14 @@ async function fetchProfile(name, opts = {}) {
     }
   }
 
-  const entries = await listRemoteProfileFiles(name);
-  if (entries.length === 0) {
-    // getTree succeeded (otherwise listRemoteProfileFiles would have thrown
-    // a HubError already). So the name is genuinely wrong — surface the list
-    // of available names so the user can correct the typo.
+  // Probe profile.yaml via raw URL. raw.githubusercontent.com is CDN-backed
+  // and not subject to the 60/hr anonymous API limit, so this does not burn
+  // rate-limit budget.
+  const probe = await httpGetTextOptional(GITHUB_RAW(`hub/${name}/profile.yaml`));
+  if (probe === null) {
+    // profile.yaml 404 → the name is wrong. Fall back to the (disk-cached)
+    // tree to produce a "did you mean" suggestion. This is the only path
+    // that may call the Trees API for `hub run`, and it's cached for 24h.
     const known = await listProfileNames();
     const suggestion = suggestCloseName(name, known);
     const hint = suggestion
@@ -375,16 +433,22 @@ async function fetchProfile(name, opts = {}) {
     });
   }
 
-  // Clear cache, then re-download every file in the profile directory.
+  // Clear cache, then download the candidate file set via raw URLs.
   if (fs.existsSync(dir)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
   fs.mkdirSync(dir, { recursive: true });
 
-  for (const entry of entries) {
-    const local = path.join(dir, entry.name);
-    await downloadFile(entry.path, local);
-    if (onLog) onLog(`  - ${entry.name}`);
+  // profile.yaml already fetched via the probe.
+  fs.writeFileSync(path.join(dir, 'profile.yaml'), probe, 'utf8');
+  if (onLog) onLog(`  - profile.yaml`);
+
+  for (const fname of PROFILE_FILE_CANDIDATES) {
+    if (fname === 'profile.yaml') continue;
+    const text = await httpGetTextOptional(GITHUB_RAW(`hub/${name}/${fname}`));
+    if (text === null) continue;  // optional file not present for this profile
+    fs.writeFileSync(path.join(dir, fname), text, 'utf8');
+    if (onLog) onLog(`  - ${fname}`);
   }
 
   writeCacheMeta(name);
@@ -476,6 +540,7 @@ module.exports = {
   cacheRoot,
   cacheDir,
   cacheAgeSecs,
+  clearTreeCache,
   fetchProfile,
   listProfiles,
   showReadme,

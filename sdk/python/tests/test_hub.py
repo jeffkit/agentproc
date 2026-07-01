@@ -19,6 +19,7 @@ import pytest
 from agentproc import hub as hub_mod
 from agentproc.hub import (
     HUB_CACHE_TTL_SECS,
+    HubError,
     cache_dir,
     _cache_root,
     _cache_age_secs,
@@ -92,23 +93,33 @@ def _make_fake_http_get_json(tree=None):
 
 
 def _make_fake_http_get_text(contents=None):
-    """Return a callable that emulates _http_get_text for raw file fetches."""
+    """Return a callable that emulates _http_get_text for raw file fetches.
+
+    Unmatched URLs raise a HubError(404) so that _http_get_text_optional
+    (which wraps _http_get_text and swallows 404) returns None — modelling
+    an optional profile file that doesn't exist (e.g. bridge.sh on a
+    non-echo profile) or a wrong profile name.
+    """
     contents = contents or FAKE_FILE_CONTENTS
     def fake(url, timeout=30):
         # Extract path from raw URL: .../agentproc/main/hub/echo-agent/profile.yaml
         for path, content in contents.items():
             if url.endswith(path):
                 return content
-        raise AssertionError(f"unexpected text URL: {url}")
+        raise HubError(f"fetch failed (HTTP 404) for {url}", status=404)
     return fake
 
 
 @pytest.fixture
 def isolated_cache(monkeypatch, tmp_path):
-    """Redirect cache to a tmp dir."""
+    """Redirect cache to a tmp dir and reset the module-level tree cache."""
     cache_root = tmp_path / "cache" / "hub"
     monkeypatch.setattr(hub_mod, "_cache_root", lambda: cache_root)
     monkeypatch.setattr(hub_mod, "cache_dir", lambda name: cache_root / name)
+    # _tree_cache is module-global and would otherwise leak across tests
+    # (each test uses a different fake tree). Reset it so every test starts
+    # cold and _get_tree re-reads from the (fresh) fake _http_get_json.
+    hub_mod._clear_tree_cache()
     return tmp_path
 
 
@@ -159,9 +170,38 @@ class TestFetchProfile:
         assert "README.md" in names
         assert ".cache-meta.json" in names
 
+    def test_fetch_happy_path_does_not_call_trees_api(self, isolated_cache):
+        # `hub run` fetches profile files via raw.githubusercontent.com (CDN,
+        # not rate-limited). A known profile must not trigger any
+        # api.github.com call — that's the whole point of the rate-limit fix.
+        json_calls = {"n": 0}
+
+        def assert_no_json(url, timeout=30):
+            json_calls["n"] += 1
+            raise AssertionError(f"unexpected Trees API call: {url}")
+
+        with patch("agentproc.hub._http_get_json", side_effect=assert_no_json), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.fetch_profile("echo-agent")
+        assert json_calls["n"] == 0
+
+    def test_fetch_skips_optional_files_that_404(self, isolated_cache):
+        # claude-code has no bridge.sh in the fixtures → the 404 is swallowed
+        # and bridge.sh is not stored, while the four standard files are.
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            p = hub_mod.fetch_profile("claude-code")
+        names = [x.name for x in p.iterdir()]
+        assert "profile.yaml" in names
+        assert "bridge.py" in names
+        assert "bridge.js" in names
+        assert "README.md" in names
+        assert "bridge.sh" not in names
+
     def test_fetch_unknown_profile_raises(self, isolated_cache):
         empty_tree = [{"path": "hub", "type": "tree"}]
-        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json(empty_tree)):
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json(empty_tree)), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
             with pytest.raises(RuntimeError, match="not found in hub"):
                 hub_mod.fetch_profile("nope")
 
@@ -186,18 +226,20 @@ class TestFetchProfile:
             assert call_count["text"] == first_text  # no new file downloads
 
     def test_refresh_forces_refetch(self, isolated_cache):
-        call_count = {"json": 0}
+        call_count = {"text": 0}
 
-        def counting_json(url, timeout=30):
-            call_count["json"] += 1
-            return _make_fake_http_get_json()(url, timeout)
+        def counting_text(url, timeout=30):
+            call_count["text"] += 1
+            return _make_fake_http_get_text()(url, timeout)
 
-        with patch("agentproc.hub._http_get_json", side_effect=counting_json), \
-             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=counting_text):
             hub_mod.fetch_profile("echo-agent")
-            first = call_count["json"]
+            first_text = call_count["text"]
             hub_mod.fetch_profile("echo-agent", refresh=True)
-            assert call_count["json"] > first
+            # hub run fetches files via raw URLs (CDN), not the rate-limited
+            # Trees API — so a refresh re-fetches the file set, not the tree.
+            assert call_count["text"] > first_text
 
     def test_fetch_overwrites_old_files(self, isolated_cache):
         # First fetch.
@@ -249,6 +291,24 @@ class TestListProfiles:
         names = [p["name"] for p in profiles]
         assert not any(n.startswith("_") for n in names), names
         assert "_shared" not in names
+
+    def test_tree_disk_cached_across_calls(self, isolated_cache):
+        # First list_profiles hits the Trees API (json 0→1) and writes
+        # ~/.agentproc/cache/hub/tree.json. A second call reuses the cached
+        # tree and must not make another API call.
+        json_calls = {"n": 0}
+
+        def counting_json(url, timeout=30):
+            json_calls["n"] += 1
+            return _make_fake_http_get_json()(url, timeout)
+
+        with patch("agentproc.hub._http_get_json", side_effect=counting_json), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.list_profiles()
+            assert json_calls["n"] == 1
+            assert (hub_mod._cache_root() / "tree.json").exists()
+            hub_mod.list_profiles()
+            assert json_calls["n"] == 1, "second call hit the Trees API again"
 
 
 # ---------------------------------------------------------------------------
