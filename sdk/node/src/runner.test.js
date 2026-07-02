@@ -585,6 +585,59 @@ describe('run() — end-to-end', () => {
     }
   });
 
+  test('env_allowlist stops undeclared secrets from leaking via inheritance', async () => {
+    // A secret present in the bridge env but NOT referenced by the profile's
+    // env block must NOT reach the agent. Pre-0.5.2 the child inherited
+    // process.env wholesale, so this leaked. With env_allowlist set, the
+    // child env is infra + profile.env + AGENT_* only.
+    process.env.BRIDGE_AWS_SECRET = 'aws-top-secret';
+    process.env.BRIDGE_DB_PASSWORD = 'db-top-secret';
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "AWS=${BRIDGE_AWS_SECRET:-unset}"\n' +
+      'echo "DB=${BRIDGE_DB_PASSWORD:-unset}"\n' +
+      'echo "PATH_SET=${PATH:+yes}"\n',
+    );
+    try {
+      const r = await run(
+        {
+          command: agent,
+          // Profile declares AWS only; DB is left undeclared.
+          env: { BRIDGE_AWS_SECRET: '${BRIDGE_AWS_SECRET}' },
+          env_allowlist: ['BRIDGE_AWS_SECRET'],
+        },
+        { message: 'hi' },
+      );
+      // Declared + allowlisted → reaches the agent.
+      assert.ok(r.reply.includes('AWS=aws-top-secret'), `reply: ${r.reply}`);
+      // Undeclared secret must NOT leak via inheritance.
+      assert.ok(!r.reply.includes('db-top-secret'), `db leaked: ${r.reply}`);
+      assert.ok(r.reply.includes('DB=unset'), `db leaked: ${r.reply}`);
+      // Infra (PATH) still present so the agent can run.
+      assert.ok(r.reply.includes('PATH_SET=yes'), `PATH missing: ${r.reply}`);
+    } finally {
+      delete process.env.BRIDGE_AWS_SECRET;
+      delete process.env.BRIDGE_DB_PASSWORD;
+    }
+  });
+
+  test('env_allowlist absent → child still inherits full process.env', async () => {
+    // Back-compat: no allowlist → full inheritance, so an undeclared var leaks.
+    // This pins the documented back-compat boundary so the tightening above
+    // is clearly opt-in.
+    process.env.AGENTPROC_BACKCOMPAT_LEAK = 'leaked-by-design';
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "LEAK=${AGENTPROC_BACKCOMPAT_LEAK:-unset}"\n',
+    );
+    try {
+      const r = await run({ command: agent }, { message: 'hi' });
+      assert.ok(r.reply.includes('LEAK=leaked-by-design'), `reply: ${r.reply}`);
+    } finally {
+      delete process.env.AGENTPROC_BACKCOMPAT_LEAK;
+    }
+  });
+
   test('attachment passthrough reaches agent env', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +

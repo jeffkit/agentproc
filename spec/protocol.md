@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.1` (the string injected as `AGENT_PROTOCOL_VERSION`)
-**Document revision:** `0.6`
+**Document revision:** `0.7`
 **Status:** Draft
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `AGENT_PROTOCOL_VERSION`.
@@ -97,7 +97,7 @@ Bridges expand `${VAR}` using POSIX-shell semantics: unknown variables expand to
 
 ### `env_allowlist` — shrinking the trust boundary
 
-By default, every `${VAR}` in the `env` block expands against the bridge's full environment. `env_allowlist` lets a profile shrink that boundary to exactly the variables it needs:
+By default, every `${VAR}` in the `env` block expands against the bridge's full environment, **and the agent process inherits the bridge's full environment**. `env_allowlist` lets a profile shrink that boundary to exactly the variables it needs — both for `${VAR}` expansion *and* for what the child process sees at all:
 
 ```yaml
 env:
@@ -105,11 +105,14 @@ env:
 env_allowlist: [ANTHROPIC_API_KEY]
 ```
 
-- **Optional and opt-in.** When `env_allowlist` is absent (the default), all `${VAR}` references expand normally — the existing trust-the-profile behaviour. Existing profiles keep working unchanged.
-- **When present**, a `${VAR}` whose name is **not** in the list expands to the empty string, and the bridge logs a warning to stderr (e.g. `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`). The process still starts — a typo in either the value or the list surfaces as an empty variable and a warning, not a hard failure.
-- **Scope.** `env_allowlist` governs only `${VAR}` expansion inside the profile `env` block. It does not affect `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, the bridge-injected `AGENT_*` vars, or `env` values that contain no `${VAR}` at all.
+- **Optional and opt-in.** When `env_allowlist` is absent (the default), all `${VAR}` references expand normally and the child inherits the bridge's full environment — the existing trust-the-profile behaviour. Existing profiles keep working unchanged.
+- **When present, two things change:**
+  1. A `${VAR}` whose name is **not** in the list expands to the empty string, and the bridge logs a warning to stderr (e.g. `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`). The process still starts — a typo in either the value or the list surfaces as an empty variable and a warning, not a hard failure.
+  2. **The child process no longer inherits the bridge's environment wholesale.** Its environment is built from: a minimal **infra** set (see below) + the profile `env` block (allowlist-filtered) + the injected `AGENT_*` vars + any CLI `--env` extras. A secret the bridge happens to hold but the profile never declared cannot reach the agent. Without this second rule, `env_allowlist` would be a cosmetic filter on `${VAR}` expansion while every other env var still leaked through inheritance — so the rule is load-bearing for the "trust boundary" claim.
+- **Infra set.** When `env_allowlist` is present, the bridge copies these names from its own environment into the child (when set): `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `TERM`, `TMPDIR`, `TZ`, `PWD`, and on Windows `SystemRoot`, `TEMP`, `TMP`, `USERPROFILE`, `USERNAME`, `PATHEXT`, `COMSPEC`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`. These are operational variables an agent needs to find its interpreter, temp directory, and locale — none of them are credential-bearing. A profile that needs an additional non-secret variable the bridge has (e.g. a custom `WORKSPACE_DIR`) must declare it in the `env` block and list it in `env_allowlist`.
+- **Scope.** `env_allowlist` governs both `${VAR}` expansion inside the profile `env` block **and** the child's base environment inheritance (when present). It does not affect `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, the bridge-injected `AGENT_*` vars, or `env` values that contain no `${VAR}` at all.
 - **No globbing.** Names must match exactly. `["ANTHROPIC_*"]` does not match `ANTHROPIC_API_KEY` — list each name in full. This keeps the allowlist an explicit declaration rather than a pattern that can quietly broaden.
-- **Recommendation.** Hub profiles SHOULD set `env_allowlist` so that `agentproc hub run <name>` exposes only the credentials the profile actually needs, not the user's entire shell environment. A profile fetched from a third-party repo that omits `env_allowlist` is not malicious by that fact alone, but the user has no way to tell what it reads — setting the list is how a profile author proves they only touch what they declare.
+- **Recommendation.** Hub profiles SHOULD set `env_allowlist` so that `agentproc hub run <name>` exposes only the credentials the profile actually needs, not the user's entire shell environment. A profile fetched from a third-party repo that omits `env_allowlist` is not malicious by that fact alone, but the user has no way to tell what it reads — setting the list is how a profile author proves they only touch what they declare. With the inheritance rule above, "what they declare" is now actually what the agent sees.
 
 ### `cwd` semantics
 
@@ -494,6 +497,7 @@ The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on suc
 
 Document revisions are tracked here. The wire protocol has remained `0.1` since the initial draft; entries below record editorial changes and clarifications to this document, not wire-format changes.
 
+- **doc 0.7** — `env_allowlist` is now a real trust boundary, not a cosmetic `${VAR}` filter. When `env_allowlist` is present, the agent process no longer inherits the bridge's full environment; its env is built from a minimal infra set (`PATH`/`HOME`/`TERM`/…, enumerated in the spec) + the profile `env` block + `AGENT_*` + CLI `--env` extras. Previously the child inherited the bridge env wholesale, so any secret the bridge held leaked to the agent regardless of the allowlist — contradicting the "shrinking the trust boundary" claim. The `${VAR}`-blocking and warning behaviour is unchanged. Absent `env_allowlist` keeps the back-compat full-inheritance behaviour. SDK version bumped to 0.5.2 (both Python and Node); wire protocol stays `0.1`.
 - **doc 0.5** — Defined empty-`AGENT_MESSAGE` semantics (legal when attachments are present). Disambiguated `command`/`args`: `args: []` (explicit empty) now means "do not split", distinct from `args` absent. Added `${VAR}` security warning for profile `env` blocks. Added optional `env_allowlist` profile field: when present, `${VAR}` references not in the list expand to empty + a stderr warning, shrinking the trust boundary from the full environment to the declared variables. Codified `AGENT_ERROR:` interaction with already-delivered partials (not retracted), and that the bridge MAY stop reading stdout after the error. Restated the session-id format constraint (no whitespace/control/colon) and defined bridge behaviour on violation (ignore the line, preserve previous id, warn). Codified exit-code precedence (timeout > `AGENT_ERROR:` > exit code). Documented SDK `send_error` terminality. Removed the unused `session_line_prefix` profile field — bridges hardcode `AGENT_SESSION:` and the field was never read.
 - **doc 0.4** — Split wire-protocol version (`0.1`) from document revision in the header; added a Versioning section codifying that `AGENT_PROTOCOL_VERSION` is an opaque, non-comparable string. Promoted `AGENT_ATTACHMENTS` from Draft to P0 with a consistency requirement when bridges set it alongside the single-attachment vars. Clarified session-line ordering: when a CLI emits `AGENT_SESSION:` together with `AGENT_ERROR:` (the common `result{is_error}` shape), bridges MUST preserve the session id for the next turn even though the current turn is reported as a failure. Added `AGENT_ERROR:` → bridge MUST treat the turn as failed regardless of exit code. Defined `command` as argv[0] and `args` as the remaining argv, with a quoting rule so paths containing whitespace remain expressible without a shell. Noted Windows caveat for the timeout SIGTERM/SIGKILL contract.
 - **0.1.0** — Initial public draft. Defined env-var input, sentinel-prefixed stdout, `AGENT_SESSION:` / `AGENT_PARTIAL:` / `AGENT_ERROR:`, session-line "last wins" rule, `AGENT_PROTOCOL_VERSION`, `AGENT_ATTACHMENTS` (draft), timeout/SIGTERM contract, exit-code conventions, stdin EOF contract, command-execution no-shell rule.

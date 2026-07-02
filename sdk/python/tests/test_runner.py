@@ -531,6 +531,45 @@ class TestRunEndToEnd:
         # Bridge logged a warning about the blocked reference.
         assert any("SECRET_KEY" in w and "allowlist" in w for w in warnings)
 
+    def test_env_allowlist_stops_undeclared_secrets_leaking(self, agent_script, monkeypatch):
+        """A secret in the bridge env that the profile never declares must not
+        reach the agent. Pre-0.5.2 the child inherited os.environ wholesale, so
+        this leaked. With env_allowlist set, the child env is infra +
+        profile.env + AGENT_* only."""
+        monkeypatch.setenv("BRIDGE_AWS_SECRET", "aws-top-secret")
+        monkeypatch.setenv("BRIDGE_DB_PASSWORD", "db-top-secret")
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "AWS=${BRIDGE_AWS_SECRET:-unset}"\n'
+            'echo "DB=${BRIDGE_DB_PASSWORD:-unset}"\n'
+            'echo "PATH_SET=${PATH:+yes}"\n'
+        )
+        r = run(
+            {
+                "command": str(agent),
+                # Profile declares AWS only; DB is left undeclared.
+                "env": {"BRIDGE_AWS_SECRET": "${BRIDGE_AWS_SECRET}"},
+                "env_allowlist": ["BRIDGE_AWS_SECRET"],
+            },
+            RunOptions(message="hi"),
+        )
+        assert "AWS=aws-top-secret" in r.reply  # declared + allowlisted → reaches agent
+        assert "db-top-secret" not in r.reply   # undeclared secret must not leak
+        assert "DB=unset" in r.reply
+        assert "PATH_SET=yes" in r.reply        # infra (PATH) still present
+
+    def test_env_allowlist_absent_child_inherits_full_env(self, agent_script, monkeypatch):
+        """Back-compat: no allowlist → full os.environ inheritance, so an
+        undeclared var leaks by design. Pins the documented back-compat
+        boundary so the tightening above is clearly opt-in."""
+        monkeypatch.setenv("AGENTPROC_BACKCOMPAT_LEAK", "leaked-by-design")
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "LEAK=${AGENTPROC_BACKCOMPAT_LEAK:-unset}"\n'
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert "LEAK=leaked-by-design" in r.reply
+
     def test_attachment_passthrough_reaches_agent(self, agent_script):
         """RunOptions.image_url / file_url are injected as AGENT_IMAGE_URL /
         AGENT_FILE_URL on the spawned agent's environment."""

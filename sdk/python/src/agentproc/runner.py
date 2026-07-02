@@ -42,6 +42,8 @@ __all__ = [
     "EXIT_TIMEOUT",
     "EXIT_SIGINT",
     "EXIT_SIGTERM",
+    "ENV_INFRA_VARS",
+    "build_base_env",
     "RunResult",
     "RunOptions",
     "run",
@@ -69,6 +71,47 @@ EXIT_ERROR = 1
 EXIT_TIMEOUT = 124
 EXIT_SIGINT = 130
 EXIT_SIGTERM = 143
+
+
+# ---------------------------------------------------------------------------
+# Environment inheritance policy
+# ---------------------------------------------------------------------------
+
+# When a profile declares ``env_allowlist``, the child process does NOT inherit
+# the bridge's environment wholesale — doing so would let any secret the bridge
+# happens to hold reach the agent even though the profile never declared it,
+# making ``env_allowlist`` a cosmetic filter rather than a trust boundary.
+# Instead the child env is built from: (1) this minimal INFRA set (copied from
+# ``os.environ`` when present) so the agent can still find its interpreter /
+# temp dir / locale, (2) the profile ``env`` block (allowlist-filtered),
+# (3) the injected ``AGENT_*`` vars, (4) ``extra_env`` from the CLI ``--env``
+# flag. Secrets not declared by the profile never reach the agent. When
+# ``env_allowlist`` is absent, the bridge inherits ``os.environ`` wholesale
+# (back-compat) — the trust-the-profile behaviour.
+ENV_INFRA_VARS = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "LC_MESSAGES", "TERM", "TMPDIR", "TZ", "PWD",
+    # Windows infra
+    "SystemRoot", "TEMP", "TMP", "USERPROFILE", "USERNAME", "PATHEXT",
+    "COMSPEC", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE", "OS",
+)
+
+
+def build_base_env(allowlist: Optional[set]) -> Dict[str, str]:
+    """Build the child process base env per the inheritance policy.
+
+    ``None`` allowlist → full ``os.environ`` inheritance (back-compat).
+    A set → only the infra vars, ready for profile.env / AGENT_* / extra_env
+    to be layered on.
+    """
+    if allowlist is None:
+        return dict(os.environ)
+    base: Dict[str, str] = {}
+    for name in ENV_INFRA_VARS:
+        if name in os.environ:
+            base[name] = os.environ[name]
+    return base
 
 
 @dataclass
@@ -408,8 +451,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     for a in profile["args"]:
         argv.append(substitute(a, subst_ctx))
 
-    env = dict(os.environ)
     allowlist = profile["env_allowlist"]
+    env = build_base_env(allowlist)
     for k, v in profile["env"].items():
         env[k] = expand_env_ref(
             substitute(str(v), subst_ctx),

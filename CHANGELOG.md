@@ -3,10 +3,21 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.1`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.6`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.5.1`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.7`. Does not change the wire contract.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.5.2`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### SDK 0.5.2 — security: `env_allowlist` is now a real trust boundary
+
+When a profile declares `env_allowlist`, the agent process **no longer inherits the bridge's full environment**. Its environment is now built from: a minimal infra set (`PATH`/`HOME`/`USER`/`SHELL`/`LANG`/`TERM`/`TMPDIR`/`PWD`/…, plus Windows `SystemRoot`/`TEMP`/`USERPROFILE`/…) + the profile `env` block (allowlist-filtered) + the injected `AGENT_*` vars + CLI `--env` extras.
+
+- **Why.** Pre-0.5.2 the child inherited `process.env` / `os.environ` wholesale, so any secret the bridge happened to hold (cloud tokens, `AWS_SECRET_ACCESS_KEY`, …) reached the agent regardless of `env_allowlist`. The spec marketed `env_allowlist` as "shrinking the trust boundary", but the boundary still leaked through inheritance — the allowlist was a cosmetic filter on `${VAR}` expansion, not a boundary. A profile author setting `env_allowlist: [ANTHROPIC_API_KEY]` could not actually prove the agent only saw `ANTHROPIC_API_KEY`.
+- **What changes.** With `env_allowlist` present, undeclared bridge env vars no longer reach the agent. `${VAR}` blocking and the stderr warning are unchanged. `env_allowlist` absent keeps the back-compat full-inheritance behaviour, so existing profiles that don't set the field are unaffected.
+- **Infra set.** Curated, non-credential operational vars the agent needs to find its interpreter / temp dir / locale. A profile needing an additional non-secret var must declare it in `env` and list it in `env_allowlist`.
+- **Hub profile impact.** Every hub bridge reads its config knobs (`CLAUDE_MODEL`, `AGY_TIMEOUT`, `CODEBUDDY_DISALLOW_TOOLS`, `QWEN_SANDBOX`, …) from `os.environ` with safe defaults, and the API keys they need (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, …) are already declared in each profile's `env` block and listed in its `env_allowlist`, so hub profiles keep working. The one behavioural change: a knob the bridge reads directly from `os.environ` but the profile never declares (e.g. `AGY_TIMEOUT` set in the user's shell) no longer reaches the bridge — it falls back to its default. To override such a knob, declare it in the profile's `env` block (`AGY_TIMEOUT: "${AGY_TIMEOUT}"`) and add it to `env_allowlist`. This is the documented "uncomment to use" model, now actually enforced.
+- **Spec.** `spec/protocol.md` doc revision bumped to `0.7` (EN + ZH mirror) describing the inheritance rule and enumerating the infra set. Wire protocol stays `0.1`.
+- **Tests.** New `env_allowlist stops undeclared secrets from leaking via inheritance` + `env_allowlist absent → child still inherits full process.env` on both runners, pinning both the new boundary and the back-compat path.
 
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
