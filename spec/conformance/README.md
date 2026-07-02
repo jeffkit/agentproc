@@ -21,6 +21,13 @@ Cross-implementation conformance fixtures for the AgentProc protocol.
   handlers (return-string, bare `send_partial`) — pinning that both SDKs accept
   sync and async handlers. Guards the user-facing SDK contract — not just the
   runner internals — against cross-language drift.
+- `diagnostics.json` — shared `(pattern, hint)` table for the runner's
+  post-mortem stderr diagnosis (the friendly "agent script not found" hints
+  surfaced when the agent exits non-zero with no `AGENT_ERROR:`). Both runners
+  embed an identical copy of the rules (the file is not shipped with the
+  npm/pypi package, so the runner cannot read it at runtime); the conformance
+  tests assert the embedded copies match this file rule-for-rule and that each
+  rule's `sample` produces the expected `hint`.
 
 ## How it's used
 
@@ -35,6 +42,9 @@ Both reference SDKs run the same fixtures through their runners:
 - `sdk.json` → SDK entry points (subprocess):
   - Python: `sdk/python/tests/test_sdk.py` → spawns `tests/_sdk_harness.py` under `create_profile`
   - Node:   `sdk/node/src/sdk.test.js`     → spawns `src/sdk_harness.js` under `createProfile`
+- `diagnostics.json` → stderr diagnosis table:
+  - Python: `sdk/python/tests/test_diagnostics.py` → `agentproc.runner.diagnose_stderr_failure` + `STDERR_DIAGNOSTICS`
+  - Node:   `sdk/node/src/diagnostics.test.js`     → `runner.diagnoseStderrFailure` + `STDERR_DIAGNOSTICS`
 
 If the two disagree on any case or scenario, at least one of them fails. This
 is the guardrail that keeps the Python and Node implementations honest

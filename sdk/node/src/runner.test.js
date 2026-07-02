@@ -691,6 +691,26 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.sessionId, '');
     assert.strictEqual(r.reply.trim(), 'done');
   });
+
+  test('stderr diagnosis survives a >1 MB noisy stderr (head cap keeps early signal)', async () => {
+    // The friendly hint pattern lands at the START of stderr; the rest is
+    // >2 MB of noise. The head-capped stderrFull (1 MB) must still contain
+    // the startup error so diagnosis fires — and the buffer must not grow
+    // unbounded with the noise.
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "python3: can\'t open file \'/tmp/missing.py\': [Errno 2] No such file or directory" >&2\n' +
+      'head -c 2097152 /dev/zero | tr "\\0" "x" >&2\n' +
+      'exit 1\n',
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.exitCode, 1);
+    assert.strictEqual(
+      r.error,
+      "agent script not found: /tmp/missing.py. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).",
+      `diagnosis lost in noise; r.error=${JSON.stringify(r.error)}`,
+    );
+  });
 });
 
 test('PROTOCOL_VERSION is "0.1"', () => {

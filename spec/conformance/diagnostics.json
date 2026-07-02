@@ -1,0 +1,34 @@
+{
+  "description": "Shared (pattern, hint) table for the runner's post-mortem stderr diagnosis. When the agent exits non-zero with no AGENT_ERROR: line, each runner peeks at the agent's stderr and returns the first matching rule's hint. Both reference SDKs embed an identical copy of these rules (the runner cannot read this file at runtime — it is not shipped with the npm/pypi package); the conformance tests assert the embedded copies match this file and that each `sample` produces the expected `hint` on both SDKs. Rules are evaluated in order; the first match wins. A `{n}` token in `hint` is replaced by capture group `n`; `{{PROFILE_DIR}}` is a literal placeholder, not a format token. `flags` is optional; `i` means case-insensitive.",
+  "rules": [
+    {
+      "id": "python-open-file",
+      "pattern": "(?:can'?t|cannot) open file '([^']+)': \\[Errno 2\\] No such file or directory",
+      "sample": "python3: can't open file '/tmp/missing.py': [Errno 2] No such file or directory",
+      "hint": "agent script not found: {1}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).",
+      "expect": "agent script not found: /tmp/missing.py. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo)."
+    },
+    {
+      "id": "node-cannot-find-module",
+      "pattern": "Cannot find module '([^']+)'",
+      "sample": "node: Error: Cannot find module '/tmp/missing.js'",
+      "hint": "agent script not found: {1}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).",
+      "expect": "agent script not found: /tmp/missing.js. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo)."
+    },
+    {
+      "id": "bash-line-no-such-file",
+      "pattern": "(?:^|\\n)[^:]+: line \\d+: ([^:]+): No such file or directory",
+      "sample": "bash: line 1: ./missing.sh: No such file or directory",
+      "hint": "agent script not found: {1}. Check the profile's command path.",
+      "expect": "agent script not found: ./missing.sh. Check the profile's command path."
+    },
+    {
+      "id": "generic-enoent",
+      "pattern": "errno 2|enoent|no such file or directory",
+      "flags": "i",
+      "sample": "Error: ENOENT: something went missing",
+      "hint": "agent reported a missing file. Check the profile's command and cwd.",
+      "expect": "agent reported a missing file. Check the profile's command and cwd."
+    }
+  ]
+}

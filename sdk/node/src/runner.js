@@ -161,46 +161,55 @@ function expandPath(p) {
   return p;
 }
 
+// Shared (pattern, hint) table for post-mortem stderr diagnosis. This is the
+// runtime-embedded copy of spec/conformance/diagnostics.json — the single
+// source of truth. The conformance test asserts the two stay in sync. Rules
+// are evaluated in order; first match wins. A `{n}` token in the hint is
+// replaced by capture group n; `{{PROFILE_DIR}}` is a literal, not a format
+// token (the `\{(\d+)\}` replacer only touches numeric tokens).
+const STDERR_DIAGNOSTICS = [
+  {
+    id: 'python-open-file',
+    pattern: "(?:can'?t|cannot) open file '([^']+)': \\[Errno 2\\] No such file or directory",
+    hint: 'agent script not found: {1}. Check the profile\'s command path (likely a {{PROFILE_DIR}} issue or a typo).',
+  },
+  {
+    id: 'node-cannot-find-module',
+    pattern: "Cannot find module '([^']+)'",
+    hint: 'agent script not found: {1}. Check the profile\'s command path (likely a {{PROFILE_DIR}} issue or a typo).',
+  },
+  {
+    id: 'bash-line-no-such-file',
+    pattern: '(?:^|\\n)[^:]+: line \\d+: ([^:]+): No such file or directory',
+    hint: 'agent script not found: {1}. Check the profile\'s command path.',
+  },
+  {
+    id: 'generic-enoent',
+    pattern: 'errno 2|enoent|no such file or directory',
+    flags: 'i',
+    hint: 'agent reported a missing file. Check the profile\'s command and cwd.',
+  },
+];
+
 /**
  * Best-effort pattern check against the agent's accumulated stderr to spot
  * common "bridge file not found" / "module not found" failures that the
  * wrapped interpreter writes to its own stderr before exiting non-zero.
  * Returns a human-friendly hint, or '' if nothing recognizable.
  *
- * This is intentionally narrow — we only flag high-confidence patterns to
- * avoid mis-diagnosing genuine agent errors.
+ * Data-driven by STDERR_DIAGNOSTICS (the embedded mirror of
+ * spec/conformance/diagnostics.json). Intentionally narrow — we only flag
+ * high-confidence patterns to avoid mis-diagnosing genuine agent errors.
  */
 function diagnoseStderrFailure(stderrText) {
   if (!stderrText) return '';
-  const lower = stderrText.toLowerCase();
-
-  // python3: "can't open file '/path/x.py': [Errno 2] No such file or directory"
-  // Also covers "cannot open file" (localized variants).
-  const pyMatch = stderrText.match(/(?:can'?t|cannot) open file '([^']+)': \[Errno 2\] No such file or directory/);
-  if (pyMatch) {
-    const file = pyMatch[1];
-    return `agent script not found: ${file}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).`;
+  for (const rule of STDERR_DIAGNOSTICS) {
+    const re = rule.flags ? new RegExp(rule.pattern, rule.flags) : new RegExp(rule.pattern);
+    const m = stderrText.match(re);
+    if (m) {
+      return rule.hint.replace(/\{(\d+)\}/g, (_, n) => m[Number(n)] || '');
+    }
   }
-
-  // node: "Error: Cannot find module '/path/x.js'"
-  const nodeMatch = stderrText.match(/Cannot find module '([^']+)'/);
-  if (nodeMatch) {
-    const mod = nodeMatch[1];
-    return `agent script not found: ${mod}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).`;
-  }
-
-  // bash: "bash: line N: ./x.sh: No such file or directory"
-  const bashMatch = stderrText.match(/(?:^|\n)[^:]+: line \d+: ([^:]+): No such file or directory/);
-  if (bashMatch) {
-    const file = bashMatch[1];
-    return `agent script not found: ${file}. Check the profile's command path.`;
-  }
-
-  // Generic Errno 2 sentinel, in case the interpreter phrasing differs.
-  if (/errno 2|enoent|no such file or directory/.test(lower)) {
-    return `agent reported a missing file. Check the profile's command and cwd.`;
-  }
-
   return '';
 }
 
@@ -542,19 +551,29 @@ async function run(profileRaw, options) {
   // Two views on stderr:
   //   - stderrWindow: bounded sliding window (8 KB) — reserved for future
   //     UI/display use so a noisy agent cannot exhaust memory.
-  //   - stderrFull:   unbounded capture used for post-mortem pattern
-  //     diagnosis. Without the full text, a chatty agent can push the real
-  //     error out of the window and the friendly hint goes missing.
+  //   - stderrFull:   bounded head capture (1 MB) used for post-mortem pattern
+  //     diagnosis. The diagnostic patterns target interpreter-startup errors
+  //     (file/module not found) which appear in the first bytes of stderr, so
+  //     a head cap preserves the high-value signal without unbounded growth.
+  //     Beyond the cap the tail is dropped with a one-shot marker.
   let stderrWindow = '';
   let stderrFull = '';
+  let stderrFullTruncated = false;
   const STDERR_CAP = 8192;
+  const STDERR_FULL_CAP = 1 << 20; // 1 MB
   child.stderr.on('data', chunk => {
     const text = chunk.toString();
     stderrBuf += text;
-    stderrFull += text;
     stderrWindow += text;
     if (stderrWindow.length > STDERR_CAP) {
       stderrWindow = stderrWindow.slice(stderrWindow.length - STDERR_CAP);
+    }
+    if (stderrFull.length < STDERR_FULL_CAP) {
+      const room = STDERR_FULL_CAP - stderrFull.length;
+      stderrFull += text.slice(0, room);
+    } else if (!stderrFullTruncated) {
+      stderrFull += '\n[agentproc runner] stderr capped at 1 MB; trailing output dropped\n';
+      stderrFullTruncated = true;
     }
     let nl;
     while ((nl = stderrBuf.indexOf('\n')) >= 0) {
@@ -679,4 +698,6 @@ module.exports = {
   EXIT_SIGTERM,
   ENV_INFRA_VARS,
   buildBaseEnv,
+  STDERR_DIAGNOSTICS,
+  diagnoseStderrFailure,
 };

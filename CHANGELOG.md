@@ -55,6 +55,16 @@ The Python SDK entry point no longer requires an `async` handler. `create_profil
 - **Back compat.** Existing async handlers (`async def handler` + `await ctx.send_partial(...)`) behave identically — the write still happens at the await expression's call step, and the awaited value is `None`.
 - **Wire protocol stays `0.1`.** SDK entry-point behaviour only; the stdout line format is unchanged.
 
+### SDK 0.5.2 — runner stderr buffer bounded + diagnosis table shared
+
+The runner's `stderr_full` / `stderrFull` capture — used for post-mortem "agent script not found" hints — was unbounded, so a noisy or hostile agent could grow it without limit. It is now a **1 MB head cap**: the first 1 MB of stderr is retained (the diagnostic patterns target interpreter-startup errors — `can't open file`, `Cannot find module`, `bash: line N: ...: No such file or directory`, generic `ENOENT` — which land in the initial bytes), and beyond the cap the tail is dropped with a one-shot `[agentproc runner] stderr capped at 1 MB; trailing output dropped` marker. The 8 KB sliding `stderr_window` / `stderrWindow` for UI display is unchanged.
+
+The four hand-rolled diagnostic regexes (duplicated in `runner.js` and `runner.py`, each requiring wording parity by hand) are now driven by a single source of truth at `spec/conformance/diagnostics.json` — an ordered `(id, pattern, flags, hint, sample, expect)` table. Each runner embeds an identical copy (the file is not shipped with the npm/pypi package, so the runner cannot read it at runtime); new conformance tests (`sdk/node/src/diagnostics.test.js`, `sdk/python/tests/test_diagnostics.py`) assert the embedded copies match the fixture rule-for-rule and that each `sample` produces the expected `hint` on both SDKs. A `{n}` token in a hint is replaced by capture group `n`; `{{PROFILE_DIR}}` stays literal.
+
+- **Why.** An unbounded stderr buffer is a memory-exhaustion vector, and two hand-maintained copies of the diagnostic regexes silently drifted risk (a hint improved in one SDK would miss the other). The shared table + conformance test make parity provable; the head cap bounds memory while keeping the high-value startup-error signal.
+- **Tests.** New `stderr diagnosis survives a >1 MB noisy stderr (head cap keeps early signal)` on both runners spawns an agent that writes the `can't open file` line to stderr followed by >2 MB of noise and asserts the friendly hint still fires — pinning both the cap and that early signal survives it.
+- **Wire protocol stays `0.1`.** Runner-internal diagnostics only; no change to stdout line format or exit codes.
+
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
 The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.

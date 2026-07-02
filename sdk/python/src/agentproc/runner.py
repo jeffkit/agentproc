@@ -54,6 +54,8 @@ __all__ = [
     "substitute",
     "expand_env_ref",
     "expand_path",
+    "STDERR_DIAGNOSTICS",
+    "diagnose_stderr_failure",
 ]
 
 PROTOCOL_VERSION = "0.1"
@@ -334,42 +336,57 @@ def _diagnose_spawn_error(
     return ""
 
 
-def _diagnose_stderr_failure(stderr_text: str) -> str:
+# Shared (pattern, hint) table for post-mortem stderr diagnosis. This is the
+# runtime-embedded copy of spec/conformance/diagnostics.json — the single
+# source of truth. The conformance test asserts the two stay in sync. Rules
+# are evaluated in order; first match wins. A ``{n}`` token in the hint is
+# replaced by capture group n; ``{{PROFILE_DIR}}`` is a literal, not a format
+# token (only numeric ``{n}`` tokens are substituted).
+STDERR_DIAGNOSTICS: List[Dict[str, str]] = [
+    {
+        "id": "python-open-file",
+        "pattern": r"(?:can'?t|cannot) open file '([^']+)': \[Errno 2\] No such file or directory",
+        "hint": "agent script not found: {1}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).",
+    },
+    {
+        "id": "node-cannot-find-module",
+        "pattern": r"Cannot find module '([^']+)'",
+        "hint": "agent script not found: {1}. Check the profile's command path (likely a {{PROFILE_DIR}} issue or a typo).",
+    },
+    {
+        "id": "bash-line-no-such-file",
+        "pattern": r"(?:^|\n)[^:]+: line \d+: ([^:]+): No such file or directory",
+        "hint": "agent script not found: {1}. Check the profile's command path.",
+    },
+    {
+        "id": "generic-enoent",
+        "pattern": r"errno 2|enoent|no such file or directory",
+        "flags": re.IGNORECASE,
+        "hint": "agent reported a missing file. Check the profile's command and cwd.",
+    },
+]
+
+
+def _format_hint(hint: str, m: "re.Match[str]") -> str:
+    return re.sub(r"\{(\d+)\}", lambda mm: (m.group(int(mm.group(1))) or ""), hint)
+
+
+def diagnose_stderr_failure(stderr_text: str) -> str:
     """Best-effort pattern check against the agent's accumulated stderr.
 
     Catches "bridge file not found" failures that the wrapped interpreter
     writes to its own stderr before exiting non-zero. Returns a friendly
-    hint, or '' if nothing recognizable.
+    hint, or ``""`` if nothing recognizable. Data-driven by
+    ``STDERR_DIAGNOSTICS`` (the embedded mirror of
+    ``spec/conformance/diagnostics.json``).
     """
     if not stderr_text:
         return ""
-    lower = stderr_text.lower()
-
-    # python3: "can't open file '/path/x.py': [Errno 2] No such file or directory"
-    m = re.search(r"(?:can'?t|cannot) open file '([^']+)': \[Errno 2\] No such file or directory", stderr_text)
-    if m:
-        return (
-            f"agent script not found: {m.group(1)}. Check the profile's command "
-            "path (likely a {{PROFILE_DIR}} issue or a typo)."
-        )
-
-    # node: "Error: Cannot find module '/path/x.js'"
-    m = re.search(r"Cannot find module '([^']+)'", stderr_text)
-    if m:
-        return (
-            f"agent script not found: {m.group(1)}. Check the profile's command "
-            "path (likely a {{PROFILE_DIR}} issue or a typo)."
-        )
-
-    # bash: "bash: line N: ./x.sh: No such file or directory"
-    m = re.search(r"(?:^|\n)[^:]+: line \d+: ([^:]+): No such file or directory", stderr_text)
-    if m:
-        return f"agent script not found: {m.group(1)}. Check the profile's command path."
-
-    # Generic errno 2 / ENOENT sentinel.
-    if re.search(r"errno 2|enoent|no such file or directory", lower):
-        return "agent reported a missing file. Check the profile's command and cwd."
-
+    for rule in STDERR_DIAGNOSTICS:
+        flags = rule.get("flags", 0)
+        m = re.search(rule["pattern"], stderr_text, flags)
+        if m:
+            return _format_hint(rule["hint"], m)
     return ""
 
 
@@ -493,15 +510,29 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     # Two views on stderr:
     #   - stderr_window: bounded sliding window (8 KB) for the on_stderr UI
     #     callback, so a noisy agent cannot exhaust memory.
-    #   - stderr_full:   unbounded capture used only for post-mortem pattern
-    #     diagnosis. Without the full text, a chatty agent can push the real
-    #     error out of the window and the friendly hint goes missing.
+    #   - stderr_full:   bounded head capture (1 MB) used only for post-mortem
+    #     pattern diagnosis. The diagnostic patterns target interpreter-startup
+    #     errors (file/module not found) which appear in the first bytes, so a
+    #     head cap preserves the high-value signal without unbounded growth.
+    #     Beyond the cap the tail is dropped with a one-shot marker.
     stderr_window: List[str] = []
     stderr_full: List[str] = []
     STDERR_CAP = 8192
+    STDERR_FULL_CAP = 1 << 20  # 1 MB
+    stderr_full_len = 0
+    stderr_full_truncated = False
 
     def _append_stderr(text: str) -> None:
-        stderr_full.append(text)
+        nonlocal stderr_full_len, stderr_full_truncated
+        if stderr_full_len < STDERR_FULL_CAP:
+            room = STDERR_FULL_CAP - stderr_full_len
+            piece = text[:room]
+            stderr_full.append(piece)
+            stderr_full_len += len(piece)
+        elif not stderr_full_truncated:
+            marker = "\n[agentproc runner] stderr capped at 1 MB; trailing output dropped\n"
+            stderr_full.append(marker)
+            stderr_full_truncated = True
         stderr_window.append(text)
         total = sum(len(s) for s in stderr_window)
         while total > STDERR_CAP and len(stderr_window) > 1:
@@ -667,11 +698,11 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     # If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
     # common "command/file not found" patterns and surface a friendly hint.
-    # Uses the FULL stderr — a noisy agent can fill the 8 KB window with
-    # progress junk before the real error lands at the end.
+    # Uses the head-capped stderr_full (1 MB) — the interpreter-startup errors
+    # these patterns target land in the first bytes, well within the cap.
     if not timed_out and not result.error and exit_code != 0:
         stderr_text = "".join(stderr_full)
-        hint = _diagnose_stderr_failure(stderr_text)
+        hint = diagnose_stderr_failure(stderr_text)
         if hint:
             result.error = hint
             if options.on_error:

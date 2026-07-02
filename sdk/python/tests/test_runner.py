@@ -632,3 +632,21 @@ class TestRunEndToEnd:
         )
         assert r.session_id == ""
         assert r.reply.strip() == "done"
+
+    def test_stderr_diagnosis_survives_noisy_stderr(self, agent_script):
+        """The friendly hint pattern lands at the START of stderr; the rest is
+        >2 MB of noise. The head-capped ``stderr_full`` (1 MB) must still
+        contain the startup error so diagnosis fires — and the buffer must not
+        grow unbounded with the noise."""
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            "echo \"python3: can't open file '/tmp/missing.py': [Errno 2] No such file or directory\" >&2\n"
+            'head -c 2097152 /dev/zero | tr "\\0" "x" >&2\n'
+            "exit 1\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.exit_code == 1
+        assert r.error == (
+            "agent script not found: /tmp/missing.py. Check the profile's "
+            "command path (likely a {{PROFILE_DIR}} issue or a typo)."
+        )

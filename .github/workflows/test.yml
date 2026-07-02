@@ -34,7 +34,7 @@ jobs:
         run: npm ci
         working-directory: sdk/node
       - name: Run Node SDK tests
-        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js src/sdk.test.js
+        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js src/sdk.test.js src/diagnostics.test.js
         working-directory: sdk/node
 
   test-python:
@@ -77,10 +77,10 @@ jobs:
       - name: Install pytest
         run: pip install pytest pyyaml
       - name: Node conformance
-        run: node --test src/conformance.test.js src/scenarios.test.js src/sdk.test.js
+        run: node --test src/conformance.test.js src/scenarios.test.js src/sdk.test.js src/diagnostics.test.js
         working-directory: sdk/node
       - name: Python conformance
-        run: pytest -q tests/test_conformance.py tests/test_scenarios.py tests/test_sdk.py
+        run: pytest -q tests/test_conformance.py tests/test_scenarios.py tests/test_sdk.py tests/test_diagnostics.py
         working-directory: sdk/python
         env:
           PYTHONPATH: src
