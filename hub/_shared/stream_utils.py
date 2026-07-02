@@ -115,7 +115,6 @@ def run_bridge(
         return 1
 
     found_session_id: Optional[str] = None
-    last_partial: Optional[str] = None
     last_final_text: Optional[str] = None
     error_message: Optional[str] = None
     saw_any_partial: bool = False
@@ -139,7 +138,6 @@ def run_bridge(
         if result.error:
             error_message = result.error
         if result.partial_text:
-            last_partial = result.partial_text
             if streaming:
                 emit_partial(result.partial_text)
                 saw_any_partial = True

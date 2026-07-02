@@ -82,7 +82,6 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
   child.stderr.on('data', d => { stderrBuf += d.toString(); });
 
   let foundSessionId = null;
-  let lastPartial = null;
   let lastFinalText = null;
   let sawAnyPartial = false;
   let errorMessage = null;
@@ -99,7 +98,6 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
     if (result.partialText) {
-      lastPartial = result.partialText;
       if (streaming) {
         emitPartial(result.partialText);
         sawAnyPartial = true;
