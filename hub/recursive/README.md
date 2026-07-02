@@ -151,6 +151,26 @@ agentproc hub run recursive -p "what word did I ask you to remember?" --session 
 # → banana
 ```
 
+## Cross-language parity
+
+`bridge.py` and `bridge.js` are bespoke (they share no code with the
+`_shared/stream_utils` helper the other NDJSON profiles use, because recursive
+needs cross-turn transcript state that helper doesn't model). A cross-language
+parity fixture at `tests/parity.json` drives both bridges' pure helpers
+(argument building from `RECURSIVE_*` / `AGENT_STREAMING` env, the
+`session: recording to <dir>` stderr parse, and the last-assistant-turn
+transcript read) through identical cases, so the two stay observably aligned.
+Run locally:
+
+```bash
+pytest -q hub/recursive/tests/test_bridge_parity.py
+node --test hub/recursive/tests/test_bridge_parity.js
+```
+
+The NDJSON event classification inside `main()` is not yet covered by this
+fixture (it is nested in `main` and not refactored to an importable helper) —
+that is future parity work.
+
 ## License
 
 MIT. The `recursive` CLI is licensed separately under its own terms.

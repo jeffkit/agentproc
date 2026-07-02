@@ -239,6 +239,14 @@ jobs:
             exit 1
           fi
 
+      - name: Cross-language parity test — recursive bridge (Python)
+        run: |
+          pip install pytest -q
+          pytest -q hub/recursive/tests/test_bridge_parity.py
+      - name: Cross-language parity test — recursive bridge (Node)
+        run: |
+          node --test hub/recursive/tests/test_bridge_parity.js
+
       - name: Validate profile.yaml files
         run: |
           set -e

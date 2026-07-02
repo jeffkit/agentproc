@@ -1,0 +1,76 @@
+{
+  "description": "Cross-language parity fixture for hub/recursive/bridge.{py,js}. Both bridges are bespoke (they share no code with the _shared stream_utils), so this fixture guards the observable parity claim in hub/README.md ('both produce identical AgentProc output'). It exercises the pure, side-effect-free helpers that determine the bridge's observable behaviour: provider_args/providerArgs and _global_args/globalArgs (which RECURSIVE_* + AGENT_STREAMING env vars map to which CLI flags, in what order), extract_session_dir/extractSessionDir (parsing the 'session: recording to <dir>' stderr line), and _last_assistant_text/lastAssistantText (reading the last assistant turn from transcript.jsonl). The full NDJSON event classification (handleLine inside main) is not covered here — it is nested in main() and not yet refactored to an importable helper; that remains future parity work. Both bridge.py (importable via the __main__ guard) and bridge.js (importable via the require.main guard) are driven by the same cases, so a divergence shows up as one test failing against this shared expectation. For arg_cases, the test clears all RECURSIVE_* and AGENT_STREAMING vars, sets exactly the ones in `env`, then calls the builder.",
+  "arg_cases": [
+    {
+      "name": "defaults-streaming-on",
+      "env": {},
+      "expect_global_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "auto"],
+      "expect_provider_args": []
+    },
+    {
+      "name": "streaming-off",
+      "env": { "AGENT_STREAMING": "0" },
+      "expect_global_args": ["recursive", "--json", "-H", "--permission-mode", "auto"],
+      "expect_provider_args": []
+    },
+    {
+      "name": "permission-mode-only",
+      "env": { "RECURSIVE_PERMISSION_MODE": "plan" },
+      "expect_global_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "plan"],
+      "expect_provider_args": []
+    },
+    {
+      "name": "all-global-knobs",
+      "env": {
+        "RECURSIVE_PERMISSION_MODE": "plan",
+        "RECURSIVE_MAX_STEPS": "5",
+        "RECURSIVE_WORKSPACE": "/tmp/ws"
+      },
+      "expect_global_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "plan", "--max-steps", "5", "--workspace", "/tmp/ws"],
+      "expect_provider_args": []
+    },
+    {
+      "name": "provider-knobs",
+      "env": {
+        "RECURSIVE_API_KEY": "key-123",
+        "RECURSIVE_PROVIDER": "anthropic",
+        "RECURSIVE_API_BASE": "https://api.example.com",
+        "RECURSIVE_MODEL": "claude-3"
+      },
+      "expect_global_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "auto", "--api-key", "key-123", "--provider", "anthropic", "--api-base", "https://api.example.com", "--model", "claude-3"],
+      "expect_provider_args": ["--api-key", "key-123", "--provider", "anthropic", "--api-base", "https://api.example.com", "--model", "claude-3"]
+    },
+    {
+      "name": "env-values-are-stripped",
+      "env": { "RECURSIVE_API_KEY": "  key-with-spaces  ", "RECURSIVE_MODEL": "  m  " },
+      "expect_global_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "auto", "--api-key", "key-with-spaces", "--model", "m"],
+      "expect_provider_args": ["--api-key", "key-with-spaces", "--model", "m"]
+    }
+  ],
+  "extract_session_dir_cases": [
+    { "stderr": "noise before\nsession: recording to /tmp/rec-abc\nmore noise", "expect": "/tmp/rec-abc" },
+    { "stderr": "session: recording to /var/sessions/xyz-123", "expect": "/var/sessions/xyz-123" },
+    { "stderr": "no recording line here at all", "expect": null },
+    { "stderr": "", "expect": null }
+  ],
+  "last_assistant_text_cases": [
+    {
+      "transcript_lines": [
+        { "role": "user", "content": "hi" },
+        { "role": "assistant", "content": "hello" },
+        { "role": "assistant", "content": "final answer" }
+      ],
+      "expect": "final answer"
+    },
+    {
+      "transcript_lines": [
+        { "role": "user", "content": "only user turn" }
+      ],
+      "expect": null
+    },
+    {
+      "transcript_lines": [],
+      "expect": null
+    }
+  ]
+}

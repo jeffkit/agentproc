@@ -323,6 +323,21 @@ function main() {
   });
 }
 
-main().then((code) => {
-  process.exitCode = code;
-});
+// Exported for the cross-language parity test (hub/recursive/tests). The
+// main() call is guarded so requiring this file as a module does not run the
+// bridge — only `node bridge.js` does.
+module.exports = {
+  CLI_NAME,
+  env,
+  providerArgs,
+  globalArgs,
+  extractSessionDir,
+  lastAssistantText,
+  SESSION_RECORDING_RE,
+};
+
+if (require.main === module) {
+  main().then((code) => {
+    process.exitCode = code;
+  });
+}

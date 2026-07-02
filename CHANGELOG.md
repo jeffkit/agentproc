@@ -65,6 +65,15 @@ The four hand-rolled diagnostic regexes (duplicated in `runner.js` and `runner.p
 - **Tests.** New `stderr diagnosis survives a >1 MB noisy stderr (head cap keeps early signal)` on both runners spawns an agent that writes the `can't open file` line to stderr followed by >2 MB of noise and asserts the friendly hint still fires — pinning both the cap and that early signal survives it.
 - **Wire protocol stays `0.1`.** Runner-internal diagnostics only; no change to stdout line format or exit codes.
 
+### SDK 0.5.2 — hub: cross-language parity test for the `recursive` bridge
+
+`hub/recursive/bridge.py` and `bridge.js` are bespoke — they share no code with the `_shared/stream_utils` helper the other NDJSON profiles use, because recursive needs cross-turn transcript state that helper doesn't model — so their observable-parity claim (`hub/README.md`: "both produce identical AgentProc output") had no automated guardrail. A new cross-language parity fixture at `hub/recursive/tests/parity.json` drives both bridges' pure helpers through identical cases: argument building from `RECURSIVE_*` / `AGENT_STREAMING` env (`provider_args`/`providerArgs`, `_global_args`/`globalArgs`), the `session: recording to <dir>` stderr parse (`extract_session_dir`/`extractSessionDir`), and the last-assistant-turn transcript read (`_last_assistant_text`/`lastAssistantText`). `bridge.js` gained a `require.main === module` guard (mirroring `bridge.py`'s `__main__` guard) so it is importable by the Node test without running the bridge.
+
+- **Note on the handoff claim.** The prior review noted "`recursive/bridge.js` doesn't read any `RECURSIVE_*` env". That is no longer the case — both bridges read the full `RECURSIVE_*` set at parity; the arg-building parity cases now pin it.
+- **Scope.** The full NDJSON event classification (`handleLine` inside `main()`) is not covered — it is nested in `main()` and not refactored to an importable helper. That remains future parity work.
+- **CI.** The `test-hub-bridges` job runs both parity tests.
+- **Wire protocol stays `0.1`.** Test-only; no bridge behaviour change.
+
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
 The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.
