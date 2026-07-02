@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.1` · **Document revision:** `0.4` · **Status:** Draft
+**Wire protocol:** `0.1` · **Document revision:** `0.5` · **Status:** Draft
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -9,9 +9,9 @@ The full specification is maintained in the repository at [`spec/protocol.md`](h
 ## Profile YAML
 
 ```yaml
-command: python3 {{PROFILE_DIR}}/my_agent.py   # executable, split on whitespace (no shell)
+command: python3 {{PROFILE_DIR}}/my_agent.py   # executable; args absent → split on whitespace (no shell)
                                               # {{PROFILE_DIR}} = profile's own directory
-args: []                      # supports {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}}
+# args: ["--flag", "{{MESSAGE}}"]             # optional; present (even []) → command is one token, never split
 stdin: none                   # none | message (message = write + EOF)
 
 # cwd is optional. If omitted, defaults to the bridge's process cwd.
@@ -28,19 +28,21 @@ include_stderr_in_reply: false
 send_error_reply: true        # tell the user when the agent errors
 
 streaming: true               # forward AGENT_PARTIAL: lines in real time
-session_line_prefix: "AGENT_SESSION:"
 ```
 
 Placeholders are substituted **without** invoking a shell. The argv is built from two fields:
 
-- **`command`** — argv[0]. A single token. If it contains whitespace it is kept whole and **not** split.
-- **`args`** — argv[1..]. Each list element is one argv token.
+- **`command`** — argv[0].
+- **`args`** — an optional YAML list of argv[1..] tokens.
 
-When `args` is empty, the legacy shorthand applies: `command` is split on whitespace into argv (e.g. `command: python3 ./bridge.py`). When `args` is non-empty, `command` is treated as a single token — this lets paths with whitespace stay whole without a shell:
+The **presence** of `args` is the signal for whether `command` is split:
+
+- `args` **absent** + `command` contains whitespace → split `command` on whitespace into argv (the legacy shorthand: `command: python3 ./bridge.py`).
+- `args` **present** (even an empty array `[]`) → `command` is a single argv token, **never split**. This is the escape hatch for a path that contains spaces:
 
 ```yaml
 command: "/path with spaces/my agent"
-args: ["--flag", "{{MESSAGE}}"]
+args: []
 ```
 
 The resulting argv is passed to `execve` directly, which prevents shell-injection via `{{MESSAGE}}`.

@@ -72,9 +72,6 @@ send_error_reply: true        # agent 出错时是否通知用户
 
 # 流式回复
 streaming: true               # 实时转发 AGENT_PARTIAL: 行
-
-# 会话续接
-session_line_prefix: "AGENT_SESSION:"  # 标记 session 行的前缀
 ```
 
 ### 占位符
@@ -495,6 +492,6 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出码为 0」的惯
 
 本文档修订在此追踪。线协议自首个草案起保持 `0.1` 不变；下方条目记录本文档的编辑性变更与澄清，并非线协议变更。
 
-- **doc 0.5** —— 定义空 `AGENT_MESSAGE` 的语义（有附件时合法）。澄清 `command`/`args`：显式空数组 `args: []` 表示「不要切分」，与 `args` 缺失区分。新增 profile `env` 块的 `${VAR}` 安全警告。新增可选的 `env_allowlist` profile 字段：当其存在时，不在列表里的 `${VAR}` 引用展开为空 + 一条 stderr 警告，把信任边界从完整环境缩小到声明的那几个变量。明确 `AGENT_ERROR:` 与已交付 partial 的交互（不撤回），并明确 bridge 在输出 error 后 MAY 直接停止读取 stdout。重申 session-id 格式约束（不含空白/控制字符/冒号），并定义违规时 bridge 的行为（忽略该行、保留上一个 id、记录警告）。明确退出码优先级（超时 > `AGENT_ERROR:` > 退出码）。记录 SDK `send_error` 的终止性。
+- **doc 0.5** —— 定义空 `AGENT_MESSAGE` 的语义（有附件时合法）。澄清 `command`/`args`：显式空数组 `args: []` 表示「不要切分」，与 `args` 缺失区分。新增 profile `env` 块的 `${VAR}` 安全警告。新增可选的 `env_allowlist` profile 字段：当其存在时，不在列表里的 `${VAR}` 引用展开为空 + 一条 stderr 警告，把信任边界从完整环境缩小到声明的那几个变量。明确 `AGENT_ERROR:` 与已交付 partial 的交互（不撤回），并明确 bridge 在输出 error 后 MAY 直接停止读取 stdout。重申 session-id 格式约束（不含空白/控制字符/冒号），并定义违规时 bridge 的行为（忽略该行、保留上一个 id、记录警告）。明确退出码优先级（超时 > `AGENT_ERROR:` > 退出码）。记录 SDK `send_error` 的终止性。移除未使用的 `session_line_prefix` profile 字段——bridge 硬编码 `AGENT_SESSION:`，该字段从未被读取。
 - **doc 0.4** —— 头部将线协议版本（`0.1`）与文档修订号分开；新增「版本治理」章节，明确 `AGENT_PROTOCOL_VERSION` 是不透明且不可比较的字符串。将 `AGENT_ATTACHMENTS` 从草案提升至 P0，并加上 bridge 同时设置两层变量时的一致性要求。澄清 session 行顺序：当 CLI 同时输出 `AGENT_SESSION:` 与 `AGENT_ERROR:`（`result{is_error}` 的常见形态）时，bridge **MUST** 为下一轮保留 session ID，即便当前这一轮作为失败上报。`AGENT_ERROR:` → bridge **MUST** 视为失败，不论退出码（原为 SHOULD）。把 `command` 定义为 argv[0]、`args` 为其余 argv，并加上引号规则，让含空格路径仍能在不走 shell 的前提下表达。补上 SIGTERM/SIGKILL 超时合约的 Windows 注意事项。
 - **0.1.0** — 首个公开草案。定义了环境变量输入、哨兵前缀 stdout、`AGENT_SESSION:` / `AGENT_PARTIAL:` / `AGENT_ERROR:`、session 行「最后一行生效」规则、`AGENT_PROTOCOL_VERSION`、`AGENT_ATTACHMENTS`（草案）、超时/SIGTERM 合约、退出码约定、stdin EOF 合约、命令执行不走 shell 规则。

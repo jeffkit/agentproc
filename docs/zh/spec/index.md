@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.1` · **文档修订：** `0.4` · **状态：** 草案
+**线协议：** `0.1` · **文档修订：** `0.5` · **状态：** 草案
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -9,8 +9,8 @@
 ## Profile YAML
 
 ```yaml
-command: ./my_agent.py        # 要执行的命令（按空格切 argv，不走 shell）
-args: []                      # 支持 {{MESSAGE}}、{{SESSION_ID}}、{{SESSION_NAME}} 占位符
+command: python3 {{PROFILE_DIR}}/my_agent.py   # 要执行的命令；args 缺省时按空格切 argv（不走 shell）
+# args: ["--flag", "{{MESSAGE}}"]             # 可选；存在（即使 []）→ command 作为单个 token，不切分
 stdin: none                   # none | message（message = 写入后立即关闭 stdin）
 
 cwd: /path/to/workspace
@@ -25,7 +25,6 @@ include_stderr_in_reply: false
 send_error_reply: true        # agent 失败时是否通知用户
 
 streaming: true               # 实时转发 AGENT_PARTIAL: 行
-session_line_prefix: "AGENT_SESSION:"
 ```
 
 ---
