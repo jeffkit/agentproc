@@ -28,8 +28,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: sdk/node
       - name: Run Node SDK tests
-        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js
+        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js src/sdk.test.js
         working-directory: sdk/node
 
   test-python:
@@ -43,7 +48,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install pytest
-        run: pip install pytest
+        run: pip install pytest pyyaml
       - name: Run Python SDK tests
         run: pytest -q tests/
         working-directory: sdk/python
@@ -61,16 +66,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+      - name: Install Node dependencies
+        run: npm ci
+        working-directory: sdk/node
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install pytest
-        run: pip install pytest
+        run: pip install pytest pyyaml
       - name: Node conformance
-        run: node --test src/conformance.test.js src/scenarios.test.js
+        run: node --test src/conformance.test.js src/scenarios.test.js src/sdk.test.js
         working-directory: sdk/node
       - name: Python conformance
-        run: pytest -q tests/test_conformance.py tests/test_scenarios.py
+        run: pytest -q tests/test_conformance.py tests/test_scenarios.py tests/test_sdk.py
         working-directory: sdk/python
         env:
           PYTHONPATH: src

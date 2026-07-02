@@ -27,6 +27,15 @@ The hand-rolled YAML subset parser in `sdk/python/src/agentproc/cli.py` (~138 li
 - **Public API unchanged.** `parse_yaml` keeps the same signature and is still importable from `agentproc.cli` (re-exported) for the `hub` module and external callers. `parse_yaml_simple` alias retained.
 - **Tests.** New `sdk/python/tests/test_yaml.py` pins the previously-broken behaviours: inline comments stripped, empty `env:` value is `null` (not `""`), block scalars, flow sequences, nested maps, JSON input.
 
+### SDK 0.5.2 — SDK entry-point conformance suite
+
+New `spec/conformance/sdk.json` fixture + harnesses extend cross-implementation conformance coverage to the SDK entry points (`create_profile` / `createProfile`), not just the runner internals.
+
+- **Why.** The existing conformance suite tested `classify_line` and `run()` — the bridge side. The user-facing SDK entry (return types, `send_partial` / `send_error` semantics, `ProtocolError` mapping, exit codes) had **no** cross-language guardrail, so the two SDKs could drift on exactly the surface users touch.
+- **What it covers.** Five scenarios, run as subprocesses on both SDKs with identical `AGENT_*` env: async handler returning a string; returning an `AgentResult` (response + session_id); returning `None` after `send_partial`; raising `ProtocolError`; calling `send_error` then returning a body (pins that `send_error` is non-terminal in both SDKs). Each asserts exact stdout lines + exit code.
+- **Known divergence pinned, not fixed.** Python requires an `async` handler (`asyncio.run`); Node accepts sync or async. The shared fixture uses async handlers so both pass; the sync/async divergence is documented in the fixture and left as future parity work rather than silently ignored.
+- **Files.** `spec/conformance/sdk.json`, `sdk/node/src/sdk_harness.js` + `sdk/node/src/sdk.test.js` (added to `npm test`), `sdk/python/tests/_sdk_harness.py` + `sdk/python/tests/test_sdk.py`.
+
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
 The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.

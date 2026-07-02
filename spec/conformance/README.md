@@ -13,6 +13,13 @@ Cross-implementation conformance fixtures for the AgentProc protocol.
   interaction semantics that single-line cases can't: last-wins, error
   mid-stream, session-with-error, invalid-session handling, streaming vs
   one-shot.
+- `sdk.json` — SDK entry-point (`createProfile` / `create_profile`) scenarios.
+  Each scenario drives the SDK entry as a subprocess with a given `AGENT_*` env
+  and a handler of a named `kind`, then asserts the exact stdout lines and exit
+  code. Covers return-string, return-`AgentResult`, return-`None` after
+  `send_partial`, raised `ProtocolError`, and `send_error`-then-return. Guards
+  the user-facing SDK contract — not just the runner internals — against
+  cross-language drift.
 
 ## How it's used
 
@@ -24,6 +31,9 @@ Both reference SDKs run the same fixtures through their runners:
 - `scenarios.json` → end-to-end `run()`:
   - Python: `sdk/python/tests/test_scenarios.py` → `agentproc.runner.run`
   - Node:   `sdk/node/src/scenarios.test.js`     → `runner.run`
+- `sdk.json` → SDK entry points (subprocess):
+  - Python: `sdk/python/tests/test_sdk.py` → spawns `tests/_sdk_harness.py` under `create_profile`
+  - Node:   `sdk/node/src/sdk.test.js`     → spawns `src/sdk_harness.js` under `createProfile`
 
 If the two disagree on any case or scenario, at least one of them fails. This
 is the guardrail that keeps the Python and Node implementations honest

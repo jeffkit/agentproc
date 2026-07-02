@@ -69,7 +69,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+        working-directory: sdk/node
+      - run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js src/sdk.test.js
         working-directory: sdk/node
 
   test-python:
@@ -80,7 +85,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install pytest
+      - run: pip install pytest pyyaml
       - run: pytest -q tests/
         working-directory: sdk/python
         env:
