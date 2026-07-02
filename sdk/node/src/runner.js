@@ -366,8 +366,11 @@ async function run(profileRaw, options) {
   const profile = normalizeProfile(profileRaw);
   const sessionId = options.sessionId || '';
   const sessionName = options.sessionName || 'default';
-  const streaming = options.streaming !== undefined ? !!options.streaming : profile.streaming;
-  const timeoutSecs = options.timeoutSecs !== undefined ? options.timeoutSecs : profile.timeout_secs;
+  // `!= null` (not `!== undefined`) so CLI can pass `null` to mean "defer to
+  // profile" without silently forcing streaming off — matches Python's
+  // `is not None`. See cli.js `streaming` option.
+  const streaming = options.streaming != null ? !!options.streaming : profile.streaming;
+  const timeoutSecs = options.timeoutSecs != null ? options.timeoutSecs : profile.timeout_secs;
   let cwd = options.cwd || profile.cwd;
   // Resolve relative cwd against the profile's directory (if known) so that
   // profiles written as `cwd: .` work no matter where the user invokes from.

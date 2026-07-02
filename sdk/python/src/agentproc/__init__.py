@@ -76,7 +76,10 @@ def _read_version() -> str:
 
 __version__ = _read_version()
 
-PROTOCOL_VERSION = "0.1"
+# Single source of truth: the wire-protocol version lives in runner.py
+# (the canonical bridge-side engine). Re-exported here so
+# `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
+from .runner import PROTOCOL_VERSION  # noqa: E402
 
 
 class ProtocolError(Exception):

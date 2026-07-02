@@ -9,7 +9,8 @@ agentproc:
   timeout_secs: 300
   streaming: false              # agy's --print mode returns full text only
   env:
-    AGY_MODEL: "${AGY_MODEL:-}"
+    AGY_MODEL: "${AGY_MODEL}"
+  env_allowlist: [AGY_MODEL]
 tested: community
 maintainer: jeffkit
 tags: [coding, ai]

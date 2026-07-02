@@ -37,7 +37,10 @@ def emit(line: str) -> None:
 
 
 def main() -> int:
-    message = os.environ["AGENT_MESSAGE"]
+    message = os.environ.get("AGENT_MESSAGE", "")
+    if not message:
+        emit(f"AGENT_ERROR:{json.dumps('AGENT_MESSAGE env var is required')}")
+        return 1
     args = build_args(message)
     try:
         proc = subprocess.run(

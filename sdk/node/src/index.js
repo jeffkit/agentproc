@@ -28,7 +28,10 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-const PROTOCOL_VERSION = '0.1';
+// Single source of truth: the wire-protocol version lives in runner.js
+// (the canonical bridge-side engine). The SDK entry point re-exports it so
+// `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
+const { PROTOCOL_VERSION } = require('./runner.js');
 
 // ---------------------------------------------------------------------------
 // History helpers (optional — for handlers calling LLM APIs directly)
