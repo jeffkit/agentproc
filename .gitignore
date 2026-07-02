@@ -9,6 +9,7 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+uv.lock
 
 # Node
 node_modules/
