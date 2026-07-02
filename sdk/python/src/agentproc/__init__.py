@@ -29,6 +29,7 @@ Example::
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -88,6 +89,17 @@ class ProtocolError(Exception):
     """
 
 
+class _NoopAwaitable:
+    """An awaitable that does nothing. Returned by the sync ``send_partial`` /
+    ``send_error`` so ``await ctx.send_partial(...)`` keeps working in async
+    handlers while a bare ``ctx.send_partial(...)`` (sync handler) also writes
+    — the write happens at call time, the await is a no-op."""
+
+    def __await__(self):
+        return
+        yield  # pragma: no cover — makes this a generator-based awaitable
+
+
 @dataclass
 class AgentContext:
     """Input context passed to the agent handler."""
@@ -116,33 +128,42 @@ class AgentContext:
     file_url: str
     """File attachment URL (AGENT_FILE_URL). Empty if no file."""
 
-    async def send_partial(self, text: str) -> None:
+    def send_partial(self, text: str):
         """Send a streaming chunk to the user immediately.
 
-        Writes an ``AGENT_PARTIAL:<json>`` line to stdout and flushes.
-        The bridge forwards it to the user without waiting for the process to exit.
+        Writes an ``AGENT_PARTIAL:<json>`` line to stdout and flushes at call
+        time. The bridge forwards it to the user without waiting for the
+        process to exit. Has no effect when ``streaming`` is False (the bridge
+        will ignore the line).
 
-        Has no effect when ``streaming`` is False (bridge will ignore the line).
+        Returns a no-op awaitable so ``await ctx.send_partial(...)`` keeps
+        working in async handlers; a sync handler may call it bare. Either way
+        the write happens at call time.
         """
         if not text:
-            return
+            return _NoopAwaitable()
         line = f"AGENT_PARTIAL:{json.dumps(text, ensure_ascii=False)}\n"
         sys.stdout.write(line)
         sys.stdout.flush()
+        return _NoopAwaitable()
 
-    async def send_error(self, text: str) -> None:
+    def send_error(self, text: str):
         """Send an error message to the user.
 
-        Writes an ``AGENT_ERROR:<json>`` line to stdout and flushes.
-        Honored regardless of ``streaming`` mode. After calling this, the
-        handler should typically raise ProtocolError or return — any reply
-        body produced alongside will be discarded by the bridge.
+        Writes an ``AGENT_ERROR:<json>`` line to stdout and flushes at call
+        time. Honored regardless of ``streaming`` mode. After calling this, the
+        handler should typically raise ProtocolError or return — any reply body
+        produced alongside will be discarded by the bridge.
+
+        Returns a no-op awaitable so ``await ctx.send_error(...)`` keeps working
+        in async handlers; a sync handler may call it bare.
         """
         if not text:
-            return
+            return _NoopAwaitable()
         line = f"AGENT_ERROR:{json.dumps(text, ensure_ascii=False)}\n"
         sys.stdout.write(line)
         sys.stdout.flush()
+        return _NoopAwaitable()
 
 
 @dataclass
@@ -257,7 +278,7 @@ def _context_from_env() -> AgentContext:
 # Core entrypoint
 # ---------------------------------------------------------------------------
 
-Handler = Callable[[AgentContext], Awaitable[Union[str, AgentResult]]]
+Handler = Callable[[AgentContext], Union[Awaitable[Union[str, AgentResult, None]], Union[str, AgentResult, None]]]
 
 
 def create_profile(handler: Handler) -> None:
@@ -268,14 +289,21 @@ def create_profile(handler: Handler) -> None:
     and then exits the process.
 
     Args:
-        handler: An async function taking an :class:`AgentContext` and returning
-            either a plain string (treated as ``AgentResult(response=...)``)
-            or an :class:`AgentResult`.
+        handler: A function taking an :class:`AgentContext` and returning either
+            a plain string (treated as ``AgentResult(response=...)``), an
+            :class:`AgentResult`, or ``None`` (when everything was signalled
+            via ``send_partial`` / ``send_error``). The handler may be ``async``
+            or a plain sync function — a sync handler is run directly, an async
+            one (or any handler returning a coroutine) is awaited via
+            :func:`asyncio.run`. This mirrors the Node SDK, which accepts both.
     """
     ctx = _context_from_env()
 
     try:
-        result = asyncio.run(handler(ctx))
+        ret = handler(ctx)
+        # An async handler (or a sync one returning a coroutine) is awaited to
+        # completion; a sync handler's plain return value is used as-is.
+        result = asyncio.run(ret) if inspect.iscoroutine(ret) else ret
     except ProtocolError as e:
         # Handler already-signaled error surfaced via exception.
         sys.stdout.write(

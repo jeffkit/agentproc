@@ -44,6 +44,17 @@ The defense-in-depth guard added in 0.5.1 rejected any id *containing* `..` (Nod
 - **Tests.** New `accepts legitimate ids that contain '..'` / `test_accepts_dot_dot_inside_id` pin `a..b` as accepted on both SDKs; the existing traversal cases (`a/b`, `a\b`, `..`, `../../tmp/x`) still throw.
 - **Wire protocol stays `0.1`.** Entry-point helper behaviour only; no change to the `AGENT_SESSION:` line format or the bridge-side charset.
 
+### SDK 0.5.2 — Python `create_profile` accepts sync handlers (parity with Node)
+
+The Python SDK entry point no longer requires an `async` handler. `create_profile` now calls the handler and inspects the return: if it is a coroutine (an `async def` handler, or a sync one returning a coroutine) it is awaited via `asyncio.run`; otherwise the plain return value is used directly. This mirrors the Node SDK, which accepts sync or async via `Promise.resolve().then(() => handler(ctx))`. The known sync/async divergence pinned in the `sdk.json` fixture is now resolved.
+
+`AgentContext.send_partial` / `send_error` are no longer `async def` — they now write the `AGENT_PARTIAL:` / `AGENT_ERROR:` line at **call time** and return a no-op awaitable. This keeps `await ctx.send_partial(...)` working in async handlers (the await is a no-op) while letting a sync handler call `ctx.send_partial(...)` bare and still emit the chunk — previously a bare call returned a never-awaited coroutine and silently dropped the line.
+
+- **Why.** The two SDKs are meant to agree on observable behaviour at the user-facing surface. Node accepting sync but Python rejecting it was a parity gap exactly where users touch the SDK. The `async def` `send_partial`/`send_error` also made sync handlers a trap (bare call → dropped chunk + "coroutine was never awaited" warning), so supporting sync handlers required making those writes eager.
+- **Conformance.** `spec/conformance/sdk.json` adds `sync-returns-string` and `sync-uses-send-partial-bare` scenarios, run against both SDKs, pinning that a sync handler returning a string and a sync handler calling `send_partial` bare both produce the expected stdout + exit code on both implementations. The fixture description no longer claims Python requires async.
+- **Back compat.** Existing async handlers (`async def handler` + `await ctx.send_partial(...)`) behave identically — the write still happens at the await expression's call step, and the awaited value is `None`.
+- **Wire protocol stays `0.1`.** SDK entry-point behaviour only; the stdout line format is unchanged.
+
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
 The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.

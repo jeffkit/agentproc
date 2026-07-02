@@ -17,9 +17,10 @@ Cross-implementation conformance fixtures for the AgentProc protocol.
   Each scenario drives the SDK entry as a subprocess with a given `AGENT_*` env
   and a handler of a named `kind`, then asserts the exact stdout lines and exit
   code. Covers return-string, return-`AgentResult`, return-`None` after
-  `send_partial`, raised `ProtocolError`, and `send_error`-then-return. Guards
-  the user-facing SDK contract — not just the runner internals — against
-  cross-language drift.
+  `send_partial`, raised `ProtocolError`, `send_error`-then-return, and sync
+  handlers (return-string, bare `send_partial`) — pinning that both SDKs accept
+  sync and async handlers. Guards the user-facing SDK contract — not just the
+  runner internals — against cross-language drift.
 
 ## How it's used
 

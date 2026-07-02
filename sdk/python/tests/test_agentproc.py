@@ -138,19 +138,22 @@ def test_protocol_version_is_0_1():
 # 2. create_profile end-to-end tests
 # ---------------------------------------------------------------- ...
 
-def _run_agent(env: dict, handler_src: str) -> tuple[str, str, int]:
+def _run_agent(env: dict, handler_src: str, is_async: bool = True) -> tuple[str, str, int]:
     """Run a handler under create_profile in a subprocess.
 
-    handler_src is the body of an async function(ctx) -> ...; it is dedented
-    and re-indented to exactly 4 spaces to fit inside the handler.
+    handler_src is the body of a function(ctx) -> ...; it is dedented
+    and re-indented to exactly 4 spaces to fit inside the handler. By default
+    the handler is wrapped as ``async def``; pass ``is_async=False`` for a
+    sync handler (the body must then not ``await``).
     """
     body = textwrap.indent(textwrap.dedent(handler_src).strip(), "    ")
+    decl = "async def handler(ctx):" if is_async else "def handler(ctx):"
     program = (
         "import sys\n"
         f"sys.path.insert(0, {str(SDK_SRC)!r})\n"
         "import agentproc\n"
         "\n"
-        "async def handler(ctx):\n"
+        f"{decl}\n"
         f"{body}\n"
         "\n"
         "agentproc.create_profile(handler)\n"
@@ -290,6 +293,33 @@ class TestCreateProfileE2E:
         assert 'AGENT_PARTIAL:"only partial"\n' in out
         # No traceback leaked.
         assert "Traceback" not in err
+
+    def test_sync_handler_returning_string(self):
+        # A plain (non-async) handler returning a string must work, matching
+        # the Node SDK which accepts sync or async.
+        out, err, code = _run_agent(
+            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "1"},
+            "return 'sync reply'",
+            is_async=False,
+        )
+        assert code == 0, f"stderr={err}"
+        assert "sync reply\n" in out
+        assert "Traceback" not in err
+
+    def test_sync_handler_send_partial_bare(self):
+        # A sync handler calling send_partial WITHOUT await must still emit the
+        # chunk — send_partial writes at call time and returns a no-op
+        # awaitable, so a bare call works.
+        out, err, code = _run_agent(
+            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "1"},
+            "ctx.send_partial('bare chunk')\nreturn 'final'",
+            is_async=False,
+        )
+        assert code == 0, f"stderr={err}"
+        assert 'AGENT_PARTIAL:"bare chunk"\n' in out
+        assert "final\n" in out
+        # No "coroutine was never awaited" warning leaked.
+        assert "never awaited" not in err
 
 
 class TestProtocolErrorUsage:

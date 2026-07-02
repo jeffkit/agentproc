@@ -31,6 +31,14 @@ const handlers = {
     await ctx.sendError('warn');
     return 'after';
   },
+
+  sync_string: (ctx) => 'hello from sync',
+
+  sync_partial_bare: (ctx) => {
+    // Bare call (no await) — the write happens at call time.
+    ctx.sendPartial('sync chunk');
+    return 'done';
+  },
 };
 
 const kind = process.argv[2];

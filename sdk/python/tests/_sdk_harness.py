@@ -38,12 +38,24 @@ async def async_send_error_then_return(ctx):
     return "after"
 
 
+def sync_string(ctx):
+    return "hello from sync"
+
+
+def sync_partial_bare(ctx):
+    # Bare call (no await) — the write happens at call time.
+    ctx.send_partial("sync chunk")
+    return "done"
+
+
 HANDLERS = {
     "async_string": async_string,
     "async_result": async_result,
     "async_none_partial": async_none_partial,
     "async_protocol_error": async_protocol_error,
     "async_send_error_then_return": async_send_error_then_return,
+    "sync_string": sync_string,
+    "sync_partial_bare": sync_partial_bare,
 }
 
 
