@@ -51,6 +51,15 @@ describe('sessionFilePath', () => {
     assert.throws(() => SDK.sessionFilePath('..'), /safe filename component/);
     assert.throws(() => SDK.sessionFilePath('../../tmp/x'), /safe filename component/);
   });
+
+  test('accepts legitimate ids that contain `..` (no false positive)', () => {
+    // `a..b` is a valid session id (charset allows `.`) and is not a traversal
+    // — the filename is `a..b.jsonl`. Pre-fix the `includes('..')` guard
+    // rejected it; the unified check only rejects the exact `.`/`..`.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-test-'));
+    const p = SDK.sessionFilePath('a..b', tmp);
+    assert.strictEqual(p, path.join(tmp, 'a..b.jsonl'));
+  });
 });
 
 describe('loadHistory / appendHistory', () => {

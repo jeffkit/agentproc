@@ -36,6 +36,14 @@ New `spec/conformance/sdk.json` fixture + harnesses extend cross-implementation 
 - **Known divergence pinned, not fixed.** Python requires an `async` handler (`asyncio.run`); Node accepts sync or async. The shared fixture uses async handlers so both pass; the sync/async divergence is documented in the fixture and left as future parity work rather than silently ignored.
 - **Files.** `spec/conformance/sdk.json`, `sdk/node/src/sdk_harness.js` + `sdk/node/src/sdk.test.js` (added to `npm test`), `sdk/python/tests/_sdk_harness.py` + `sdk/python/tests/test_sdk.py`.
 
+### SDK 0.5.2 — fix: `session_file_path` / `sessionFilePath` false positive on `..`-containing ids
+
+The defense-in-depth guard added in 0.5.1 rejected any id *containing* `..` (Node `sessionId.includes('..')`, Python `".." in session_id`), which falsely rejected legitimate ids like `a..b` — a valid spec-compliant session id (the charset allows `.`) whose filename `a..b.jsonl` does not traverse. The guard is now unified with the runner's single source of truth: an id is rejected iff it fails `is_valid_session_id` (charset: non-empty, no whitespace / control / colon / path separators) **or** is exactly `.` / `..` (which pass the charset but do traverse). Both SDKs now import the validator from their runner instead of re-hand-rolling separator/`..` checks.
+
+- **Why.** The 0.5.1 guard conflated "contains `..`" with "is a traversal". Only the exact components `.` and `..` traverse; `a..b` is a normal filename. The runner-side `SESSION_ID_RE` already excludes every path separator, so the entry-point check only needed to add the two literal components the regex can't catch.
+- **Tests.** New `accepts legitimate ids that contain '..'` / `test_accepts_dot_dot_inside_id` pin `a..b` as accepted on both SDKs; the existing traversal cases (`a/b`, `a\b`, `..`, `../../tmp/x`) still throw.
+- **Wire protocol stays `0.1`.** Entry-point helper behaviour only; no change to the `AGENT_SESSION:` line format or the bridge-side charset.
+
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
 The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.

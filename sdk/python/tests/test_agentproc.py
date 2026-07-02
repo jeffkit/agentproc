@@ -73,6 +73,13 @@ class TestSessionFilePath:
             with pytest.raises(ValueError, match="safe filename component"):
                 session_file_path(bad)
 
+    def test_accepts_dot_dot_inside_id(self, tmp_path):
+        # `a..b` is a valid session id (charset allows `.`) and not a traversal
+        # — the filename is `a..b.jsonl`. Pre-fix the `".." in session_id` guard
+        # rejected it; the unified check only rejects the exact `.`/`..`.
+        p = session_file_path("a..b", str(tmp_path))
+        assert p == tmp_path / "a..b.jsonl"
+
 
 class TestLoadAppendHistory:
     def test_load_empty_session_id(self):

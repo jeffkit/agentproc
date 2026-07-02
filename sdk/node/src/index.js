@@ -31,7 +31,7 @@ const fs = require('fs');
 // Single source of truth: the wire-protocol version lives in runner.js
 // (the canonical bridge-side engine). The SDK entry point re-exports it so
 // `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
-const { PROTOCOL_VERSION } = require('./runner.js');
+const { PROTOCOL_VERSION, isValidSessionId } = require('./runner.js');
 
 // ---------------------------------------------------------------------------
 // History helpers (optional — for handlers calling LLM APIs directly)
@@ -52,11 +52,14 @@ function sessionFilePath(sessionId, sessionDir) {
   if (!sessionId) {
     throw new Error('sessionId must be non-empty');
   }
-  // Defense in depth: the bridge rejects session ids containing `/` (see
-  // SESSION_ID_RE in runner.js), but a handler can call loadHistory with any
-  // string. Reject path separators and `..` so a malicious or buggy id can't
-  // escape the sessions directory via `<id>.jsonl`.
-  if (/[\\/]/.test(sessionId) || sessionId === '.' || sessionId === '..' || sessionId.includes('..')) {
+  // Defense in depth: the bridge validates AGENT_SESSION: values against
+  // SESSION_ID_RE (see isValidSessionId in runner.js), but a handler can call
+  // loadHistory with any string. Reject anything that isn't a spec-compliant
+  // session id (no path separators / whitespace / control / colon), plus the
+  // literal `.` and `..` which pass the charset (the regex allows `.`) but
+  // would path-traverse out of the sessions directory via `<id>.jsonl`.
+  // Legitimate ids like `a..b` are accepted — only exactly `.`/`..` traverse.
+  if (!isValidSessionId(sessionId) || sessionId === '.' || sessionId === '..') {
     throw new Error(`sessionId is not a safe filename component: ${JSON.stringify(sessionId)}`);
   }
   return path.join(sessionDir || defaultSessionDir(), `${sessionId}.jsonl`);

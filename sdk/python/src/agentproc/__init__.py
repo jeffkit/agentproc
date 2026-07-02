@@ -78,7 +78,7 @@ __version__ = _read_version()
 # Single source of truth: the wire-protocol version lives in runner.py
 # (the canonical bridge-side engine). Re-exported here so
 # `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
-from .runner import PROTOCOL_VERSION  # noqa: E402
+from .runner import PROTOCOL_VERSION, is_valid_session_id  # noqa: E402
 
 
 class ProtocolError(Exception):
@@ -173,15 +173,17 @@ def session_file_path(session_id: str, base_dir: Optional[str] = None) -> Path:
     Returns the path even if the file does not yet exist. Raises ``ValueError``
     when ``session_id`` is empty — callers should guard with ``if session_id``.
 
-    Also rejects ids containing path separators or ``..``: the bridge already
-    rejects session ids with ``/`` (see ``is_valid_session_id`` in runner.py),
-    but a handler can call this with any string, and we store each session as
-    ``<id>.jsonl`` — a ``/``-bearing id would path-traverse out of the
-    sessions directory.
+    Rejects any id that is not a spec-compliant session id (see
+    ``is_valid_session_id`` in runner.py — non-empty, no whitespace / control
+    chars / colons / path separators), plus the literal ``.`` and ``..`` even
+    though those pass the charset (the regex allows ``.``). A handler can call
+    this with any string, and we store each session as ``<id>.jsonl`` — a
+    separator-bearing or ``..`` id would path-traverse out of the sessions
+    directory. Valid ids like ``a..b`` are accepted (no traversal).
     """
     if not session_id:
         raise ValueError("session_id must be non-empty")
-    if "/" in session_id or "\\" in session_id or ".." in session_id:
+    if not is_valid_session_id(session_id) or session_id in (".", ".."):
         raise ValueError(f"session_id is not a safe filename component: {session_id!r}")
     root = Path(base_dir) if base_dir else Path.home() / ".agentproc" / "sessions"
     root.mkdir(parents=True, exist_ok=True)
