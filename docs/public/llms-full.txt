@@ -2,7 +2,7 @@
 
 > Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: https://agentproc.dev
 
-> Protocol version: 0.1 · Package version: 0.1.1 · Generated from commit in repo.
+> Protocol version: 0.1 · Package version: 0.4.2 · Generated from commit in repo.
 
 
 ## Table of contents
@@ -335,6 +335,8 @@ Agents that prefer a clean failure MAY choose to buffer their output and emit no
 All stdout lines that are **not** protocol lines form the final reply body, sent to the user after the process exits.
 
 If all content was already delivered via `AGENT_PARTIAL:` lines, the reply body may be empty — the bridge will skip the final send in that case.
+
+A turn that produces no reply body and exits `0` is a **successful** turn (e.g. an agent that forwards everything via `AGENT_PARTIAL:` and then exits). An empty reply body is only a failure when paired with a non-zero exit code or an `AGENT_ERROR:` line.
 
 ### Complete examples
 

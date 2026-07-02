@@ -309,6 +309,8 @@ All stdout lines that are **not** protocol lines form the final reply body, sent
 
 If all content was already delivered via `AGENT_PARTIAL:` lines, the reply body may be empty — the bridge will skip the final send in that case.
 
+A turn that produces no reply body and exits `0` is a **successful** turn (e.g. an agent that forwards everything via `AGENT_PARTIAL:` and then exits). An empty reply body is only a failure when paired with a non-zero exit code or an `AGENT_ERROR:` line.
+
 ### Complete examples
 
 **Streaming with session discovered at the end (the common CLI-wrapping case):**

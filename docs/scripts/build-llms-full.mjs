@@ -18,6 +18,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
 const DOCS_PUBLIC = resolve(__dirname, '..', 'public');
 
+// Read the package version from the Node SDK so the generated file's version
+// stamp stays in sync with what npm publishes, instead of a hardcoded literal
+// that drifts on every release.
+function readPackageVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'sdk/node/package.json'), 'utf8'));
+    return pkg.version || '0.0.0+unknown';
+  } catch (e) {
+    process.stderr.write(`warning: could not read sdk/node/package.json: ${e.message}\n`);
+    return '0.0.0+unknown';
+  }
+}
+
 // Files to include, in display order. Paths are relative to repo root.
 // Each entry is [sourcePath, displayTitle].
 const SECTIONS = [
@@ -45,7 +58,7 @@ function build() {
   const parts = [];
   parts.push(`# AgentProc — Full Documentation (for LLMs)\n`);
   parts.push(`> Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: ${SITE}\n`);
-  parts.push(`> Protocol version: 0.1 · Package version: 0.1.1 · Generated from commit in repo.\n`);
+  parts.push(`> Protocol version: 0.1 · Package version: ${readPackageVersion()} · Generated from commit in repo.\n`);
 
   parts.push(`\n## Table of contents\n`);
   SECTIONS.forEach(([_, title]) => parts.push(`- ${title}`));
