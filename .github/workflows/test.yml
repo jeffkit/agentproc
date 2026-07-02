@@ -29,7 +29,7 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
       - name: Run Node SDK tests
-        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js
+        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js
         working-directory: sdk/node
 
   test-python:
@@ -67,17 +67,97 @@ jobs:
       - name: Install pytest
         run: pip install pytest
       - name: Node conformance
-        run: node --test src/conformance.test.js
+        run: node --test src/conformance.test.js src/scenarios.test.js
         working-directory: sdk/node
       - name: Python conformance
-        run: pytest -q tests/test_conformance.py
+        run: pytest -q tests/test_conformance.py tests/test_scenarios.py
         working-directory: sdk/python
         env:
           PYTHONPATH: src
 
+  # Enforce the "single source of truth" invariants that are easy to break
+  # by hand: package versions on npm/PyPI must match, PROTOCOL_VERSION must
+  # be defined exactly once per SDK (in runner.* ) and not copy-pasted into
+  # the SDK entry points.
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify versions and protocol constants are in sync
+        run: |
+          python3 - <<'PY'
+          import json, re, sys
+          node_pkg = json.load(open("sdk/node/package.json"))["version"]
+          py_pkg = re.search(r'^version\s*=\s*"([^"]+)"',
+                             open("sdk/python/pyproject.toml").read(),
+                             re.M).group(1)
+          LITERAL = re.compile(r"PROTOCOL_VERSION\s*=\s*['\"]([^'\"]+)['\"]")
+
+          def lit(path):
+              m = LITERAL.search(open(path).read())
+              return m.group(1) if m else None
+
+          # runner.* hold the single literal definition each.
+          node_pv = lit("sdk/node/src/runner.js")
+          py_pv = lit("sdk/python/src/agentproc/runner.py")
+          # Entry points must NOT re-declare the literal (they must import it).
+          index_lit = LITERAL.search(open("sdk/node/src/index.js").read())
+          init_lit = LITERAL.search(open("sdk/python/src/agentproc/__init__.py").read())
+
+          errors = []
+          if node_pkg != py_pkg:
+              errors.append(f"package version mismatch: node {node_pkg} != python {py_pkg}")
+          if node_pv != py_pv:
+              errors.append(f"PROTOCOL_VERSION mismatch: runner.js {node_pv!r} != runner.py {py_pv!r}")
+          if index_lit:
+              errors.append("index.js must import PROTOCOL_VERSION from runner.js, not re-declare it")
+          if init_lit:
+              errors.append("__init__.py must import PROTOCOL_VERSION from runner.py, not re-declare it")
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}")
+              sys.exit(1)
+          print(f"versions in sync: pkg={node_pkg} protocol={node_pv}")
+          PY
+
+  # Verify the hub-bundling scripts faithfully reproduce canonical hub/ and
+  # that the bundled copy is non-empty. Catches drift between hub/ and what
+  # npm/PyPI users actually receive.
+  hub-bundle-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Regenerate bundled hub copies
+        run: |
+          node sdk/node/scripts/prepare-hub.js
+          python sdk/python/scripts/prepare_hub.py
+      - name: Bundled copies must match canonical hub/
+        run: |
+          set -e
+          fail=0
+          diff -r --exclude=__pycache__ --exclude='*.pyc' hub/ sdk/node/hub/ || fail=1
+          diff -r --exclude=__pycache__ --exclude='*.pyc' hub/ sdk/python/src/agentproc/hub_data/ || fail=1
+          if [ "$fail" = "1" ]; then
+            echo "::error::bundled hub copy drifts from canonical hub/ — run the prepare scripts"
+            exit 1
+          fi
+      - name: Bundled copy must be non-empty
+        run: |
+          count=$(find sdk/python/src/agentproc/hub_data -name profile.yaml | wc -l | tr -d ' ')
+          if [ "$count" -lt 1 ]; then
+            echo "::error::bundled hub_data has no profiles — prepare script failed silently"
+            exit 1
+          fi
+          echo "bundled profiles: $count"
+
   test-hub-bridges:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
