@@ -155,6 +155,26 @@ jobs:
             exit 1
           fi
           echo "bundled profiles: $count"
+      - name: Bundles must ship in the publish artifacts
+        run: |
+          set -e
+          # Node: `npm pack` honors "files": ["src","hub"] + runs prepublishOnly.
+          # Confirm the tarball would actually carry hub/ profiles.
+          node_out=$(cd sdk/node && npm pack --dry-run 2>&1)
+          echo "$node_out" | grep -E 'hub/.*profile\.yaml' >/dev/null || {
+            echo "::error::npm tarball does not include hub/ profiles — check package.json \"files\""
+            exit 1
+          }
+          echo "ok: npm tarball includes hub/"
+          # Python: build the sdist and confirm hub_data/ is inside.
+          pip install -q build
+          (cd sdk/python && python -m build --sdist >/dev/null)
+          sdist=$(ls sdk/python/dist/*.tar.gz | head -1)
+          tar -tzf "$sdist" | grep -E 'hub_data/.*profile\.yaml' >/dev/null || {
+            echo "::error::PyPI sdist does not include hub_data/ — check pyproject package-data + run prepare_hub.py before build"
+            exit 1
+          }
+          echo "ok: PyPI sdist includes hub_data/"
 
   test-hub-bridges:
     runs-on: ubuntu-latest
