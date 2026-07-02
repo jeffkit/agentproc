@@ -28,7 +28,8 @@ Public API:
     show_readme(name, refresh=False, on_log=None) -> str
     install_profile(name, target_dir, refresh=False, on_log=None) -> Path
 
-All network access is via urllib (stdlib). Zero dependencies.
+All network access is via urllib (stdlib). Profile YAML parsing goes through
+``agentproc.yaml.parse_yaml`` (PyYAML), shared with the CLI.
 """
 
 from __future__ import annotations
@@ -41,6 +42,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+from .yaml import parse_yaml
 
 HUB_REPO = "jeffkit/agentproc"
 HUB_REF = "main"
@@ -554,8 +557,6 @@ def list_profiles(
 
     Returns list of dicts: {name, description, cli, tested}.
     """
-    from .cli import parse_yaml  # local import to avoid cycle
-
     if not refresh and _bundled_hub_dir.exists():
         profiles: List[Dict[str, str]] = []
         for entry in _bundled_hub_dir.iterdir():

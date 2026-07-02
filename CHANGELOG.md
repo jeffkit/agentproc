@@ -19,6 +19,14 @@ When a profile declares `env_allowlist`, the agent process **no longer inherits 
 - **Spec.** `spec/protocol.md` doc revision bumped to `0.7` (EN + ZH mirror) describing the inheritance rule and enumerating the infra set. Wire protocol stays `0.1`.
 - **Tests.** New `env_allowlist stops undeclared secrets from leaking via inheritance` + `env_allowlist absent → child still inherits full process.env` on both runners, pinning both the new boundary and the back-compat path.
 
+### SDK 0.5.2 — Python YAML parser replaced by PyYAML
+
+The hand-rolled YAML subset parser in `sdk/python/src/agentproc/cli.py` (~138 lines) is replaced by a thin `PyYAML` wrapper at `sdk/python/src/agentproc/yaml.py`. PyYAML becomes a runtime dependency (`PyYAML>=5.1`). The Node SDK already used `js-yaml`; the two SDKs are now at parity on YAML parsing.
+
+- **Why.** The hand-rolled parser did not strip inline `#` comments, so `streaming: false # one-shot mode` parsed as the string `"false # one-shot mode"` and the runner's `is not False` check left streaming **on** — the exact bug that retired the Node SDK's hand-rolled parser in 0.5.1, now fixed on the Python side too. It also mis-handled tab indentation, hard-coded 2-space block scalars, and didn't understand quoted commas in flow sequences. This was a direct violation of `AGENTS.md`'s "Don't hand-roll a YAML parser" rule.
+- **Public API unchanged.** `parse_yaml` keeps the same signature and is still importable from `agentproc.cli` (re-exported) for the `hub` module and external callers. `parse_yaml_simple` alias retained.
+- **Tests.** New `sdk/python/tests/test_yaml.py` pins the previously-broken behaviours: inline comments stripped, empty `env:` value is `null` (not `""`), block scalars, flow sequences, nested maps, JSON input.
+
 ### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
 
 The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.

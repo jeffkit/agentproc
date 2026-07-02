@@ -139,7 +139,7 @@ Conventional Commits: `feat:`, `fix:`, `docs:`, `test:`, `ci:`, `refactor:`, `ch
 - **Don't change `docs/.vitepress/config.ts` `base` from `/`.** The site is served at `agentproc.dev` root.
 - **Don't add a scoped package name** (`@agentproc/...`). The npm package name is `agentproc` (flat), matching the PyPI name.
 - **Don't rewrite the spec's Design Rationale or Comparison sections casually.** Those reflect deliberate decisions documented after research.
-- **Don't hand-roll a YAML parser.** The Node SDK depends on `js-yaml`; profile YAML parsing goes through it. (The Python SDK uses the standard library where it can and ships a bundled hub copy.) A "zero-dependency" profile parser was retired after it silently broke `streaming: false  # comment` by not stripping inline comments — don't bring it back.
+- **Don't hand-roll a YAML parser.** Both SDKs parse profile YAML through a real library: Node depends on `js-yaml`, Python depends on `PyYAML` (see `sdk/python/src/agentproc/yaml.py`). A "zero-dependency" profile parser was retired twice — once in Node (0.5.1), once in Python (0.5.2) — after each silently broke `streaming: false  # comment` by not stripping inline comments. Don't bring it back a third time.
 
 ## LLM-friendly entry points
 

@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from .runner import (
     PROTOCOL_VERSION,
@@ -22,6 +22,7 @@ from .runner import (
     RunOptions,
     run,
 )
+from .yaml import parse_yaml
 
 
 def _read_pkg_version() -> str:
@@ -52,148 +53,6 @@ def _read_pkg_version() -> str:
 
 
 PKG_VERSION = _read_pkg_version()
-
-
-# ---------------------------------------------------------------------------
-# Minimal YAML parser (zero-dep; covers hub profile subset)
-# ---------------------------------------------------------------------------
-
-def parse_yaml(text: str) -> Dict[str, Any]:
-    """Parse a YAML subset into a Python dict.
-
-    Supports: nested maps, block scalars (|), inline flow sequences ([a, b]),
-    block sequences (- item), quoted strings, booleans, null, ints, floats.
-    """
-    text_stripped = text.strip()
-    if text_stripped.startswith("{") or text_stripped.startswith("["):
-        try:
-            return json.loads(text)
-        except Exception:
-            pass
-
-    lines = text.splitlines()
-    root: Dict[str, Any] = {}
-    stack: List[Tuple[int, Any]] = [(-1, root)]
-
-    def current(min_indent: int) -> Tuple[int, Any]:
-        while len(stack) > 1 and stack[-1][0] >= min_indent:
-            stack.pop()
-        return stack[-1]
-
-    i = 0
-    while i < len(lines):
-        raw = lines[i]
-        if raw.strip() == "" or raw.strip().startswith("#"):
-            i += 1
-            continue
-        indent = _leading_spaces(raw)
-        content = raw[indent:].rstrip("\r")
-        _, container = current(indent)
-
-        if content == "-" or content.startswith("- "):
-            if isinstance(container, list):
-                rest = "" if content == "-" else content[2:]
-                if rest.strip():
-                    container.append(_strip_scalar(rest))
-            i += 1
-            continue
-
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$", content)
-        if not m:
-            i += 1
-            continue
-        key, val = m.group(1), m.group(2)
-
-        if val == "":
-            j = i + 1
-            while j < len(lines) and (lines[j].strip() == "" or lines[j].strip().startswith("#")):
-                j += 1
-            if j < len(lines):
-                next_indent = _leading_spaces(lines[j])
-                next_content = lines[j][next_indent:]
-                if next_indent > indent and (next_content == "-" or next_content.startswith("- ")):
-                    arr: List[Any] = []
-                    if isinstance(container, dict):
-                        container[key] = arr
-                    stack.append((indent, arr))
-                    i += 1
-                    continue
-                elif next_indent > indent:
-                    child: Dict[str, Any] = {}
-                    if isinstance(container, dict):
-                        container[key] = child
-                    stack.append((indent, child))
-                    i += 1
-                    continue
-            if isinstance(container, dict):
-                container[key] = ""
-            i += 1
-            continue
-
-        if val in ("|", "|-", ">"):
-            block_lines: List[str] = []
-            j = i + 1
-            while j < len(lines):
-                nr = lines[j]
-                if nr.strip() == "":
-                    block_lines.append("")
-                    j += 1
-                    continue
-                ni = _leading_spaces(nr)
-                if ni <= indent:
-                    break
-                block_lines.append(nr[min(indent + 2, len(nr)):])
-                j += 1
-            joined = "\n".join(block_lines)
-            if val == "|":
-                value = re.sub(r"\n*$", "\n", joined)
-            else:
-                value = re.sub(r"\n*$", "", joined)
-            if isinstance(container, dict):
-                container[key] = value
-            i = j
-            continue
-
-        if isinstance(container, dict):
-            container[key] = _strip_scalar(val)
-        i += 1
-
-    return root
-
-
-def _leading_spaces(s: str) -> int:
-    n = 0
-    for ch in s:
-        if ch == " ":
-            n += 1
-        elif ch == "\t":
-            n += 2
-        else:
-            break
-    return n
-
-
-def _strip_scalar(v: str) -> Any:
-    v = v.strip()
-    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-        return v[1:-1]
-    if v.startswith("[") and v.endswith("]"):
-        inner = v[1:-1].strip()
-        if not inner:
-            return []
-        return [_strip_scalar(s.strip()) for s in inner.split(",")]
-    lv = v.lower()
-    if lv == "true":
-        return True
-    if lv == "false":
-        return False
-    if lv in ("null", "~", ""):
-        return None
-    if re.match(r"^[+-]?\d+$", v):
-        return int(v)
-    if re.match(r"^[+-]?\d+\.\d+$", v):
-        return float(v)
-    return v
 
 
 # ---------------------------------------------------------------------------
