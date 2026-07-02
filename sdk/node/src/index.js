@@ -2,7 +2,7 @@
 /**
  * agentproc — AgentProc Protocol SDK (Node.js)
  *
- * Implements the AgentProc P0 protocol (spec/protocol.md, v0.1.0).
+ * Implements the AgentProc P0 protocol (spec/protocol.md, wire protocol 0.1).
  *
  * Protocol contract:
  *   Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,

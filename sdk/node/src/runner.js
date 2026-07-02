@@ -298,6 +298,14 @@ function decodeJsonValue(raw) {
   return typeof v === 'string' ? v : text;
 }
 
+// Per spec: session id is opaque but MUST NOT contain whitespace, control
+// characters, or colons. Valid: URL-safe chars + "-" + "."; non-empty.
+// A session line whose value fails this is ignored (previous id preserved).
+const SESSION_ID_RE = /^[A-Za-z0-9._~+/=-]+$/;
+function isValidSessionId(value) {
+  return typeof value === 'string' && value.length > 0 && SESSION_ID_RE.test(value);
+}
+
 /**
  * Classify one stdout line.
  * @param {string} line - Raw line, without trailing newline.
@@ -462,9 +470,16 @@ async function run(profileRaw, options) {
     const line = rawLine.replace(/\r$/, '');
     const c = classifyLine(line);
     if (c.kind === 'session') {
-      result.sessionId = c.value; // last wins
-      if (options.onSession) options.onSession(c.value);
-      if (options.onProtocolLine) options.onProtocolLine(line);
+      if (!isValidSessionId(c.value)) {
+        if (options.onStderr) {
+          options.onStderr(`[agentproc runner] ignoring invalid AGENT_SESSION value ${JSON.stringify(c.value)} (must be non-empty, no whitespace/control chars/colons); previous session id preserved`);
+        }
+        if (options.onProtocolLine) options.onProtocolLine(line);
+      } else {
+        result.sessionId = c.value; // last wins
+        if (options.onSession) options.onSession(c.value);
+        if (options.onProtocolLine) options.onProtocolLine(line);
+      }
     } else if (c.kind === 'partial') {
       if (streaming && options.onPartial) options.onPartial(c.value);
       if (options.onProtocolLine) options.onProtocolLine(line);
@@ -603,6 +618,7 @@ module.exports = {
   run,
   normalizeProfile,
   classifyLine,
+  isValidSessionId,
   decodeJsonValue,
   substitute,
   expandEnvRef,

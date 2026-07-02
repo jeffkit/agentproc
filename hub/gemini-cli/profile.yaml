@@ -18,6 +18,7 @@ agentproc:
     # Optional overrides (uncomment to use):
     # GEMINI_MODEL: "gemini-2.5-pro"   # any alias or model name gemini accepts
     # GEMINI_SANDBOX: "false"          # set to "false" to disable sandbox
+  env_allowlist: [GEMINI_API_KEY, GOOGLE_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GEMINI_MODEL, GEMINI_SANDBOX]
 tested: official
 maintainer: jeffkit
 tags: [coding, google, ai]

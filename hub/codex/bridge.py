@@ -4,7 +4,7 @@ AgentProc bridge for the `codex` CLI (OpenAI Codex).
 
 Invokes:
     codex exec --json <message>
-    codex exec resume <thread_id> <message>     # when AGENT_SESSION_ID is set
+    codex exec resume --json <thread_id> <message>   # when AGENT_SESSION_ID is set
 
 Parses the NDJSON stream and re-emits as AgentProc protocol output via
 the shared stream_utils:
@@ -31,10 +31,15 @@ INSTALL_HINT = "Install: npm install -g @openai/codex"
 
 
 def build_args(message: str, session_id: str, env) -> list[str]:
-    if session_id:
-        return [CLI_NAME, "exec", "resume", session_id, message]
-    args = [CLI_NAME, "exec", "--json", message]
     model = env.get("CODEX_MODEL", "").strip()
+    if session_id:
+        # --json MUST be present on the resume path too, otherwise codex emits
+        # non-NDJSON output that the bridge cannot parse.
+        args = [CLI_NAME, "exec", "resume", "--json", session_id, message]
+        if model:
+            args += ["-c", f'model="{model}"']
+        return args
+    args = [CLI_NAME, "exec", "--json", message]
     if model:
         args += ["-c", f'model="{model}"']
     return args

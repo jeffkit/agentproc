@@ -42,15 +42,27 @@ function emitSession(sessionId) {
   emit(`AGENT_SESSION:${sessionId}`);
 }
 
+function hasAnyAttachment(env) {
+  if ((env.AGENT_IMAGE_URL || '').trim()) return true;
+  if ((env.AGENT_FILE_URL || '').trim()) return true;
+  const raw = (env.AGENT_ATTACHMENTS || '').trim();
+  if (raw && raw !== '[]') return true;
+  return false;
+}
+
 async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
   const env = process.env;
   const message = env.AGENT_MESSAGE || '';
-  if (!message) {
-    emitError('AGENT_MESSAGE env var is required');
-    process.exit(1);
-  }
   const sessionId = env.AGENT_SESSION_ID || '';
   const streaming = (env.AGENT_STREAMING || '1') !== '0';
+
+  // Per spec: AGENT_MESSAGE may be empty when the turn carries attachments
+  // (e.g. an image-only message). Only reject when there is truly nothing
+  // to do — no text AND no attachment of any kind.
+  if (!message && !hasAnyAttachment(env)) {
+    emitError('AGENT_MESSAGE env var is required (or set AGENT_ATTACHMENTS / AGENT_IMAGE_URL / AGENT_FILE_URL)');
+    process.exit(1);
+  }
 
   const args = buildArgs(message, sessionId, env);
   let child;
@@ -105,6 +117,11 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
   const code = await new Promise(resolve => child.on('close', resolve));
 
   if (errorMessage) {
+    // Per spec: a CLI's terminal event often carries both session_id and an
+    // error indication. Persist the session for the next turn BEFORE emitting
+    // the error — the error terminates this turn but does not invalidate the
+    // session.
+    if (foundSessionId) emitSession(foundSessionId);
     emitError(errorMessage);
     process.exit(1);
   }

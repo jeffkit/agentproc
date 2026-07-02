@@ -1,7 +1,22 @@
 # AgentProc 协议规范
 
-**版本：** 0.3.0
+**线协议（Wire protocol）：** `0.1`（注入为 `AGENT_PROTOCOL_VERSION` 的字符串）
+**文档修订：** `0.5`
 **状态：** 草案
+
+线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `AGENT_PROTOCOL_VERSION` 时应遵循下方的[版本治理](#版本治理)规则。
+
+---
+
+## 版本治理
+
+`AGENT_PROTOCOL_VERSION` 是一个**不透明字符串**，不是可比较的数字。agent 与 bridge **MUST NOT** 对它进行排序、比较或范围检查。两个字符串要么相等，要么不相等。
+
+- 如果 bridge 注入了一个 agent 不识别的版本字符串，agent **SHOULD** 按变量未设置处理（best-effort，fail-soft）。
+- 如果 agent 期望某个 bridge 未注入的版本字符串，agent **MUST** 回退到其内置默认值。
+- 该字符串**不是**能力发现机制：不存在协商、不存在能力声明、也不存在排序。agent 若需要知道某项具体能力（例如多附件）是否存在，**MUST** 直接检查对应的 env 变量（例如 `AGENT_ATTACHMENTS` 非空），而不是检查版本字符串。
+
+理由：任何可比较的版本号都会诱导实现者用 `>= 0.2` 来 gate 行为，而一旦某个 bridge 没有同步 bump 数字，这种判断就会失效。把字符串视为不透明，能让契约保持诚实：某项能力的存在由承载它的 env 变量来表示。
 
 ---
 
@@ -45,6 +60,7 @@ stdin: none                   # none | message
 cwd: /path/to/workspace       # 工作目录（支持 ~ 和占位符）
 env:                          # 额外注入的环境变量
   MY_API_KEY: "${MY_API_KEY}" # 用 ${VAR} 引用已有环境变量
+env_allowlist: [MY_API_KEY]   # 可选：限制 env 块能通过 ${VAR} 读取哪些变量
 
 # 输出控制
 timeout_secs: 600             # stdout 读取超时，默认 1800
@@ -70,10 +86,67 @@ session_line_prefix: "AGENT_SESSION:"  # 标记 session 行的前缀
 | `{{MESSAGE}}` | 用户消息文本 |
 | `{{SESSION_ID}}` | 上一轮返回的 session ID（空 = 新会话） |
 | `{{SESSION_NAME}}` | 会话可读名称 |
+| `{{PROFILE_DIR}}` | 包含 profile YAML 的目录的绝对路径。让 profile 引用打包脚本（例如 `command: python3 {{PROFILE_DIR}}/bridge.py`），与 agent 的 `cwd` 解耦。bridge 在按路径调用 profile 时设置它；未设置时（例如无文件编程式调用）展开为空字符串。 |
+
+### `env` 值中的 `${VAR}` 展开
+
+profile `env` 块中的值可以用 `${VAR}` 语法引用 bridge 自身的环境变量（例如 `MY_API_KEY: "${MY_API_KEY}"`）。这是**对 bridge 进程的完整环境进行替换**，而不是对 profile 或 agent。
+
+**安全含义。** profile 是**可信输入**——能写 profile 的人就能读取 bridge 能访问到的每一个环境变量（云凭证、token、密钥）。这是设计使然（profile 是配置，不是用户输入），但有一条实操后果值得点明：
+
+> **不要运行来源不受信任的 profile。** `agentproc hub run <name>` 会从 GitHub 仓库拉取 profile 并运行。如果你不信任该仓库维护者拿到你 shell 环境的全部内容，就不要运行他们的 profile。设置了 `env_allowlist`（见下文）的 profile 能把这个边界缩小到它声明的那几个变量——但没有 allowlist 时默认仍是全环境可读，因此信任决策仍由运行 profile 的用户承担。
+
+bridge 用 POSIX shell 语义展开 `${VAR}`：未知变量展开为空字符串，而不是字面值 `${VAR}`。
+
+### `env_allowlist` —— 缩小信任边界
+
+默认情况下，`env` 块里的每个 `${VAR}` 都对 bridge 的完整环境展开。`env_allowlist` 让 profile 把这个边界缩小到它真正需要的变量：
+
+```yaml
+env:
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+env_allowlist: [ANTHROPIC_API_KEY]
+```
+
+- **可选且 opt-in。** `env_allowlist` 缺省（默认）时，所有 `${VAR}` 引用照常展开——即既有的「信任 profile」行为。现有 profile 无需改动。
+- **当其存在时**，名字**不**在列表里的 `${VAR}` 展开为空字符串，并向 stderr 记录一条警告（例如 `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`）。进程仍会启动——值或列表里的拼写错误表现为空变量 + 一条警告，而非硬失败。
+- **作用域。** `env_allowlist` 只管 profile `env` 块内的 `${VAR}` 展开，不影响 `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` 占位符、bridge 注入的 `AGENT_*` 变量，也不影响根本不含 `${VAR}` 的 `env` 值。
+- **不支持通配。** 名字必须精确匹配。`["ANTHROPIC_*"]` 匹配不到 `ANTHROPIC_API_KEY`——请逐一列出全名。这让 allowlist 保持为显式声明，而不是一种可能悄然放大的模式。
+- **建议。** Hub profile **SHOULD** 设置 `env_allowlist`，这样 `agentproc hub run <name>` 就只暴露 profile 实际需要的凭证，而不是用户 shell 环境的全部。从第三方仓库拉取的 profile 即便没设 allowlist 也不一定是恶意的，但用户无从判断它读了什么——设上列表正是 profile 作者证明「我只碰我声明的变量」的方式。
 
 ### 命令执行模型
 
-`command` 字段 MUST 按空格切分为 argv 数组，并传给操作系统的 `execve`（或等价函数），**不**调用 shell。这样能避免通过 `{{MESSAGE}}` 占位符发起的 shell 注入。
+bridge 从两个字段组装 agent 的 argv：
+
+- **`command`** —— 可执行文件（argv[0]）。把它当作单个 token。如果它包含空格，bridge **MUST** 把整个字符串原样作为 argv[0]，**MUST NOT** 切分。
+- **`args`** —— YAML 列表，承载额外的 argv token（argv[1..]）。每个列表元素是一个 argv token，原样使用。
+
+组装出的 argv（`[command, *args]`）传给操作系统的 `execve`（或等价函数），**不调用 shell**。这样能避免通过 `{{MESSAGE}}` 占位符发起的 shell 注入，也让 `command` 能承载带空格的路径。
+
+**遗留简写。** 许多现有 profile 写出多 token 的 command 字符串（例如 `command: python3 {{PROFILE_DIR}}/bridge.py`），不写 `args`。bridge **MUST** 支持这种简写：当 `args` **缺失**且 `command` 含空格时，bridge 按空格切分 `command` 得到 argv。
+
+**`args` 字段是信号。** bridge 通过 `args` 字段的**存在与否**（而非其内容）来决定是否切分：
+
+- `args` **缺失**（profile 中没有这个 key） → 按空格切分 `command`（简写）。
+- `args` **存在**（即使是空数组 `[]`） → `command` 是单个 argv token，**绝不**切分。
+
+也就是说 `args: []` 是**有意义的**：它告诉 bridge「不要切分我的 command」。这是给「`command` 含空格但应被视为单个 token」的逃生口。
+
+**引号 / 带空格路径。** 需要调用路径含空格的可执行文件的 profile **MUST** 使用显式形式：
+
+```yaml
+command: "/path with spaces/my agent"
+args: []                       # 告诉 bridge：不要切分 command
+```
+
+或者，如果还需要额外的 argv token：
+
+```yaml
+command: "/path with spaces/my agent"
+args: ["--flag", "{{MESSAGE}}"]
+```
+
+YAML 的双引号标量承载空格；bridge 把字符串作为单个 argv token 传给 `execve`。同样的规则也适用于任何包含空格的 `args` 元素。
 
 如果 bridge 实现坚持使用 shell（例如为了做环境变量展开），它 MUST 对每个占位符替换值做 POSIX shell 转义。bridge 应当优先选择不走 shell 的形式。
 
@@ -96,25 +169,46 @@ bridge 在启动进程前注入以下变量，agent process 直接读取。
 
 | 变量名 | 说明 |
 |--------|------|
-| `AGENT_MESSAGE` | 用户消息文本 |
+| `AGENT_MESSAGE` | 用户消息文本。**可为空**——见下方「空消息」。 |
 | `AGENT_SESSION_ID` | 上一轮返回的 session ID（空字符串 = 新会话） |
 | `AGENT_SESSION_NAME` | 会话可读名称（默认 `"default"`） |
 | `AGENT_FROM_USER` | 发送者标识符（平台相关：用户 ID、handle 等） |
 | `AGENT_STREAMING` | `"1"` = 流式模式，`"0"` = 单次模式 |
-| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.1"`。agent 可据此决定行为。 |
+| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.1"`。**不透明且不可比较**——见[版本治理](#版本治理)。agent **MUST NOT** 对它排序或范围检查。 |
 
-### 附件变量（P0 — 单附件）
+#### 空消息
+
+`AGENT_MESSAGE` **MAY** 是空字符串。当以下任一为真时，视为该轮「携带内容」：
+
+- `AGENT_MESSAGE` 非空
+- `AGENT_IMAGE_URL` 非空
+- `AGENT_FILE_URL` 非空
+- `AGENT_ATTACHMENTS` 已设置且不等于 `[]`
+
+若以上都不成立，则该轮为空，bridge / agent **SHOULD** 上报错误而非继续。这条规则适配常见的「仅图片消息」场景：用户发了一张截图但没附文字。
+
+### 附件变量（P0）
+
+附件通过两层变量传递。bridge **MUST** 设置与消息匹配的那一层；agent **SHOULD** 在更丰富的一层存在时优先消费它，否则回退到更简单的一层。
+
+**单附件便捷变量。**
 
 | 变量名 | 说明 |
 |--------|------|
-| `AGENT_IMAGE_URL` | 图片附件 URL（仅当消息恰好含一张图片时设置） |
-| `AGENT_FILE_URL` | 文件附件 URL（仅当消息恰好含一个文件时设置） |
+| `AGENT_IMAGE_URL` | 图片附件 URL。当消息恰好含一张图片时设置。 |
+| `AGENT_FILE_URL` | 文件附件 URL。当消息恰好含一个文件时设置。 |
 
-### 附件变量（草案 — 多附件）
+**多附件变量。**
 
 | 变量名 | 说明 |
 |------|------|
-| `AGENT_ATTACHMENTS` | JSON 数组，元素为 `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`。**草案**：bridge 可在设置单附件变量的同时设置此项；agent 应当优先使用 `AGENT_ATTACHMENTS`（如果存在），否则回退到单附件变量。 |
+| `AGENT_ATTACHMENTS` | JSON 数组，元素为 `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`。当消息携带零个或多个附件时设置。空数组等价于「无附件」。 |
+
+**agent 读取顺序。** 当 `AGENT_ATTACHMENTS` 非空时，agent **SHOULD** 消费它并忽略单附件变量。当 `AGENT_ATTACHMENTS` 未设置（空字符串）时，agent **SHOULD** 回退到 `AGENT_IMAGE_URL` / `AGENT_FILE_URL`。
+
+**bridge 一致性要求。** 当 bridge 在同一对话同时设置 `AGENT_ATTACHMENTS` **和**某个单附件变量时，两者**MUST** 一致：单附件变量中的 URL **MUST** 等于 `AGENT_ATTACHMENTS` 中对应条目的 `url`。无法保持一致的 bridge **MUST** 只设置一层。
+
+**类型分类。** `type` 字段取值为 `image`、`file`、`audio`、`video` 之一。bridge **MAY** 输出额外的类型；不识别某类型的 agent **SHOULD** 忽略该条目而不是失败。
 
 profile `env` 块中声明的自定义变量也会一并注入。
 
@@ -151,8 +245,9 @@ AGENT_SESSION:<opaque-string>
 - session 行可以出现在 stdout 的**任意位置**——首行、夹在 partial 之间、或最后一行。
 - 如果输出了多行 `AGENT_SESSION:`，**最后一行生效**。bridge 存储最终值，下一轮通过 `AGENT_SESSION_ID` 回传。
 - 这条规则兼容了底层 CLI 直到退出才知道自己 session ID 的常见场景（例如 `claude --output-format stream-json` 在终止的 `result` 事件里才发出 session ID）。
+- **与 `AGENT_ERROR:` 的交互** —— CLI 的终止事件经常同时携带 session ID 和错误指示（例如 `result{session_id, is_error: true}`）。当同一对话中同时出现 `AGENT_SESSION:` 行和 `AGENT_ERROR:` 行时，bridge **MUST** 仍然为下一轮保留 session ID，即便当前这一轮作为失败上报给用户。错误终止这一轮；它不会使 session 失效。已经知道 session ID 的 agent 在发出 `AGENT_ERROR:` 时 **SHOULD** 先发出 `AGENT_SESSION:` 行（或任意位置——无论如何 bridge 都按「最后一行生效」处理）。
 
-session ID 字符串是**不透明的**——bridge 原样存储和转发，MUST NOT 解释其格式。它可以是 UUID、CLI 内部句柄，或任何不含空白和冒号的字符串。
+session ID 字符串是**不透明的**——bridge 原样存储和转发，MUST NOT 解释其格式。它可以是 UUID、CLI 内部句柄，或任何短的不透明 token。它 **MUST NOT** 含空白、控制字符或冒号（`:`）：冒号与 `AGENT_SESSION:` 的分隔符冲突，而空白/控制字符会破坏其在 env 变量和 argv 中的往返传递。如果 agent 输出的 `AGENT_SESSION:` 行的值违反此规则，bridge **SHOULD** 向 stderr 记录警告并**忽略该行**（保留之前已捕获的 session id；若此前未捕获过，则 session 保持为空）。合法的 id 在去除首尾空白后非空，且匹配 `^[A-Za-z0-9._~+/=-]+$`（URL 安全字符加 `-` 和 `.`）；输出其他内容的 agent 将无法往返传递。
 
 这一行由 bridge 消费，**不会**出现在发给用户的回复中。
 
@@ -182,11 +277,21 @@ profile 中设置 `streaming: false` 时，bridge 忽略所有 `AGENT_PARTIAL:` 
 AGENT_ERROR:<JSON 编码的字符串>
 ```
 
-这一行**无论** `streaming` 是否开启都会被识别。bridge 将解码后的字符串作为错误回复转发给用户，并应当终止任何正在进行的 partial 流。
+这一行**无论** `streaming` 是否开启都会被识别。bridge 将解码后的字符串作为错误回复转发给用户，并停止转发该轮后续的 `AGENT_PARTIAL:` 行（见下方「与已交付 partial 的交互」——已交付的分块不会被撤回，只会抑制后续的）。
 
-如果出现了 `AGENT_ERROR:` 行，bridge 应当视进程为失败，即使退出码为 0。agent 在输出 `AGENT_ERROR:` 后应当以非零码退出。
+一旦输出了 `AGENT_ERROR:` 行，bridge **MAY** 直接停止读取 agent 的 stdout——错误已经捕获，且（按 session 行规则）若 error 之前出现过 session id 也已拿到最终值。预期 agent 进程会很快退出；若没有，bridge 的常规超时机制生效。（包装 NDJSON 输出 CLI 的 hub bridge 即采用此做法：输出 `AGENT_ERROR:` 后让进程自行收尾，而不是继续解析一个后续事件已不影响用户可见结果的流。）
+
+如果出现了 `AGENT_ERROR:` 行，bridge **MUST** 视这一轮为失败，即便进程退出码为 0。agent 在输出 `AGENT_ERROR:` 后 **SHOULD** 以非零码退出，但 bridge **MUST NOT** 依赖这一点——`AGENT_ERROR:` 行本身就足以标记这一轮失败。
 
 与 `AGENT_ERROR:` 同时产生的回复正文会被丢弃。
+
+#### 与已交付 partial 的交互
+
+当 `AGENT_ERROR:` 之前已经转发了 `AGENT_PARTIAL:` 行（常见的「流式输出一半，然后撞上上游限流」场景），bridge **MUST NOT** 试图撤回、编辑或注释已交付的分块——它们已经展示给用户了。`AGENT_ERROR:` 文本按原样交付，跟在所有 partial 之后。
+
+这意味着用户可能看到半截回复后跟一个错误。这是有意的：大多数消息平台无法撤回已交付文本，硬要这么做（删除 + 重发）既竞态又令人困惑。想要柔化这一点的 bridge **MAY** 在最后一条 partial 与错误消息之间插入可见分隔符（例如换行或「—」分隔线），但 **MUST NOT** 改写或删除 partial 文本。
+
+偏好「干净失败」的 agent **MAY** 选择缓冲输出，直到确信这一轮会成功才输出——但这样就放弃了流式，是个权衡。
 
 ### 回复正文
 
@@ -241,6 +346,16 @@ AGENT_ERROR:"上游 API 被限流，60 秒后重试。"
 
 其他非零码视为通用错误。当 `send_error_reply: true` 且进程以非零码退出（且没有输出过 `AGENT_ERROR:`）时，bridge 发送一条通用错误提示给用户。
 
+### 多个失败信号并存时的优先级
+
+一轮可能产生多个失败信号——例如 agent 输出了 `AGENT_ERROR:` 然后被 bridge 在退出前因超时杀掉，或者 agent 输出了 `AGENT_ERROR:` 后又非零退出。bridge 按以下优先级（从高到低）决定最终退出码：
+
+1. **超时（124）** —— bridge 杀掉了进程。无论杀掉前 agent 输出过什么，超时一律上报为 `124`。
+2. **`AGENT_ERROR:`（1）** —— agent 输出了错误行。即便进程随后以 0 退出，也上报为 `1`。
+3. **进程退出码** —— 上述都不适用时，采用进程返回的码。
+
+理由：超时是 agent 无法恢复的 bridge 级失败模式，所以优先。`AGENT_ERROR:` 是 agent 自己发出的出错信号，优先于裸退出码（因为 agent 可能出于自诊断原因以 0 退出后输出 `AGENT_ERROR:`）。
+
 stderr 作为调试日志记录，不发给用户（除非 `include_stderr_in_reply: true`）。
 
 ---
@@ -256,6 +371,8 @@ stderr 作为调试日志记录，不发给用户（除非 `include_stderr_in_re
 在此之前已经收到的 `AGENT_PARTIAL:` 行仍然转发给用户。然后 bridge 发送一条超时错误回复（受 `send_error_reply` 控制）。
 
 agent SHOULD 处理 `SIGTERM`——刷新任何缓冲的 partial 输出并尽快退出。
+
+**Windows 注意。** `SIGTERM` 与 `SIGKILL` 在 Windows 上并不是可投递的信号。运行在 Windows 上的 bridge **MUST** 仍然遵循两步意图——先发一个「礼貌」终止请求（在 Windows 上 `TerminateProcess` 是唯一可用的手段，因此宽限期塌缩为零），然后在 `kill_grace_secs` 之后若进程仍存活则硬终止。POSIX bridge 实现完整的 SIGTERM → 宽限 → SIGKILL 序列。需要在关闭时刷新的 agent 无法依赖在 Windows 上收到信号，**SHOULD** 改用 `atexit` 风格的钩子或在退出前显式刷新。
 
 ---
 
@@ -376,4 +493,8 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出码为 0」的惯
 
 ## Changelog
 
+本文档修订在此追踪。线协议自首个草案起保持 `0.1` 不变；下方条目记录本文档的编辑性变更与澄清，并非线协议变更。
+
+- **doc 0.5** —— 定义空 `AGENT_MESSAGE` 的语义（有附件时合法）。澄清 `command`/`args`：显式空数组 `args: []` 表示「不要切分」，与 `args` 缺失区分。新增 profile `env` 块的 `${VAR}` 安全警告。新增可选的 `env_allowlist` profile 字段：当其存在时，不在列表里的 `${VAR}` 引用展开为空 + 一条 stderr 警告，把信任边界从完整环境缩小到声明的那几个变量。明确 `AGENT_ERROR:` 与已交付 partial 的交互（不撤回），并明确 bridge 在输出 error 后 MAY 直接停止读取 stdout。重申 session-id 格式约束（不含空白/控制字符/冒号），并定义违规时 bridge 的行为（忽略该行、保留上一个 id、记录警告）。明确退出码优先级（超时 > `AGENT_ERROR:` > 退出码）。记录 SDK `send_error` 的终止性。
+- **doc 0.4** —— 头部将线协议版本（`0.1`）与文档修订号分开；新增「版本治理」章节，明确 `AGENT_PROTOCOL_VERSION` 是不透明且不可比较的字符串。将 `AGENT_ATTACHMENTS` 从草案提升至 P0，并加上 bridge 同时设置两层变量时的一致性要求。澄清 session 行顺序：当 CLI 同时输出 `AGENT_SESSION:` 与 `AGENT_ERROR:`（`result{is_error}` 的常见形态）时，bridge **MUST** 为下一轮保留 session ID，即便当前这一轮作为失败上报。`AGENT_ERROR:` → bridge **MUST** 视为失败，不论退出码（原为 SHOULD）。把 `command` 定义为 argv[0]、`args` 为其余 argv，并加上引号规则，让含空格路径仍能在不走 shell 的前提下表达。补上 SIGTERM/SIGKILL 超时合约的 Windows 注意事项。
 - **0.1.0** — 首个公开草案。定义了环境变量输入、哨兵前缀 stdout、`AGENT_SESSION:` / `AGENT_PARTIAL:` / `AGENT_ERROR:`、session 行「最后一行生效」规则、`AGENT_PROTOCOL_VERSION`、`AGENT_ATTACHMENTS`（草案）、超时/SIGTERM 合约、退出码约定、stdin EOF 合约、命令执行不走 shell 规则。

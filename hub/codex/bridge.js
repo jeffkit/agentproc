@@ -5,7 +5,7 @@
  *
  * Invokes:
  *   codex exec --json <message>
- *   codex exec resume <thread_id> <message>   // when AGENT_SESSION_ID is set
+ *   codex exec resume --json <thread_id> <message>   // when AGENT_SESSION_ID is set
  *
  * Parses the NDJSON stream via the shared stream_utils.
  */
@@ -18,11 +18,15 @@ const CLI_NAME = 'codex';
 const INSTALL_HINT = 'Install: npm install -g @openai/codex';
 
 function buildArgs(message, sessionId, env) {
+  const model = (env.CODEX_MODEL || '').trim();
   if (sessionId) {
-    return [CLI_NAME, 'exec', 'resume', sessionId, message];
+    // --json MUST be present on the resume path too, otherwise codex emits
+    // non-NDJSON output that the bridge cannot parse.
+    const args = [CLI_NAME, 'exec', 'resume', '--json', sessionId, message];
+    if (model) args.push('-c', `model="${model}"`);
+    return args;
   }
   const args = [CLI_NAME, 'exec', '--json', message];
-  const model = (env.CODEX_MODEL || '').trim();
   if (model) {
     args.push('-c', `model="${model}"`);
   }

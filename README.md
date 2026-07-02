@@ -119,7 +119,7 @@ See the [full spec](./spec/protocol.md#comparison-with-related-protocols) for th
 
 ## Status
 
-v0.1.0 — Draft. The protocol is stable enough to implement against, but expect refinements as real bridges and agents are built. See [CHANGELOG](./CHANGELOG.md).
+Wire protocol `0.1` (Draft). The on-the-wire contract (env vars + sentinel-prefixed stdout) is stable enough to implement against; the spec document is revised independently and may clarify wording without bumping the wire version. See [CHANGELOG](./CHANGELOG.md).
 
 ## License
 

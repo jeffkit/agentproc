@@ -114,7 +114,6 @@ class TestParseAttachments:
 
     def test_malformed_json(self):
         assert _parse_attachments("not json") == []
-
     def test_non_array(self):
         assert _parse_attachments('{"type":"image"}') == []
 

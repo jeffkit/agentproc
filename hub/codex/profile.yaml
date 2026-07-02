@@ -13,6 +13,7 @@ agentproc:
     OPENAI_API_KEY: "${OPENAI_API_KEY}"
     # Optional override (uncomment to use):
     # CODEX_MODEL: "gpt-5"                # model name; sets -c model="..." on first turn
+  env_allowlist: [OPENAI_API_KEY, CODEX_MODEL]
 tested: official
 maintainer: jeffkit
 tags: [coding, openai, ai]
@@ -22,4 +23,6 @@ notes: |
     - item.completed (agent_message) → emits AGENT_PARTIAL: with the text
     - turn.completed → end of turn
 
-  Session continuity uses `codex exec resume <thread_id> <prompt>` on subsequent turns.
+  Session continuity uses `codex exec resume --json <thread_id> <prompt>` on
+  subsequent turns. `--json` MUST be present on both first-turn and resume paths;
+  without it codex emits non-NDJSON output that the bridge cannot parse.

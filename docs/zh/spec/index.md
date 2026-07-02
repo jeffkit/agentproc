@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**版本：** 0.1.0 · **状态：** 草案
+**线协议：** `0.1` · **文档修订：** `0.4` · **状态：** 草案
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -41,20 +41,19 @@ session_line_prefix: "AGENT_SESSION:"
 | `AGENT_SESSION_NAME` | 会话可读名称（默认 `"default"`） |
 | `AGENT_FROM_USER` | 发送者标识符 |
 | `AGENT_STREAMING` | `"1"` = 流式，`"0"` = 单次 |
-| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.1"` |
+| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.1"`。**不透明且不可比较**——见完整规范的「版本治理」章节。agent **MUST NOT** 对它排序或范围检查。 |
 
-### 附件（P0 — 单附件）
+### 附件（P0）
 
-| 变量名 | 说明 |
-|--------|------|
-| `AGENT_IMAGE_URL` | 图片附件 URL（仅当消息恰好含一张图片时设置） |
-| `AGENT_FILE_URL` | 文件附件 URL（仅当消息恰好含一个文件时设置） |
-
-### 附件（草案 — 多附件）
+两层。bridge 设置与消息匹配的那一层；agent 在更丰富的一层存在时优先消费它，否则回退。
 
 | 变量名 | 说明 |
 |--------|------|
-| `AGENT_ATTACHMENTS` | JSON 数组，元素为 `{type, url, name}`，`type` 取值 `image` / `file` / `audio` / `video`。若存在，agent 应优先使用此项，否则回退到上面的单附件变量。 |
+| `AGENT_IMAGE_URL` | 图片附件 URL（单附件便捷变量） |
+| `AGENT_FILE_URL` | 文件附件 URL（单附件便捷变量） |
+| `AGENT_ATTACHMENTS` | JSON 数组，元素为 `{type, url, name}`，`type` 取值 `image` / `file` / `audio` / `video`。零个或多个附件时设置。空数组 = 无附件。 |
+
+当 bridge 同时设置 `AGENT_ATTACHMENTS` 与某个单附件变量时，两者 MUST 一致（URL 相同）。agent 在 `AGENT_ATTACHMENTS` 非空时消费它，否则回退到单附件变量。
 
 ---
 
@@ -73,6 +72,8 @@ AGENT_ERROR:<json-string>         ← 可选，向用户透出错误
 
 可在 stdout 任意位置输出，**多行时最后一行生效**。这一行兼容了底层 CLI 直到退出才知道 session ID 的常见场景。
 
+如果同一对话中同时出现 `AGENT_SESSION:` 行和 `AGENT_ERROR:` 行，bridge **MUST** 仍然为下一轮保留 session ID，即便当前这一轮作为失败上报。错误终止这一轮；它不会使 session 失效。
+
 ```
 AGENT_PARTIAL:"回答中..."
 AGENT_SESSION:cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c
@@ -89,7 +90,7 @@ AGENT_PARTIAL:"这是第二部分。"
 
 ### Error 行
 
-向用户透出一条错误消息。无论 `streaming` 是否开启都会被识别。bridge 转发后会终止正在进行的 partial 流，并将本次进程视为失败——即便退出码为 0。与 `AGENT_ERROR:` 同时产生的回复正文会被丢弃。
+向用户透出一条错误消息。无论 `streaming` 是否开启都会被识别。bridge 转发后会终止正在进行的 partial 流，并 **MUST** 将这一轮视为失败——即便退出码为 0。与 `AGENT_ERROR:` 同时产生的回复正文会被丢弃。
 
 ```
 AGENT_ERROR:"上游 API 被限流，60 秒后重试。"

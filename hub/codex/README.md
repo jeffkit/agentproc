@@ -98,7 +98,7 @@ codex emits NDJSON events with its own schema (different from claude's):
 | `turn.completed` | Signals end of turn (no-op for the bridge) |
 | `turn.failed` | Emits `AGENT_ERROR:` |
 
-For session continuity, the bridge invokes `codex exec resume <thread_id> <prompt>` when `AGENT_SESSION_ID` is set. The thread id is opaque — the messaging bridge forwards it without interpreting.
+For session continuity, the bridge invokes `codex exec resume --json <thread_id> <prompt>` when `AGENT_SESSION_ID` is set. The `--json` flag is present on both the first-turn and resume paths — without it codex emits non-NDJSON output that the bridge cannot parse. The thread id is opaque — the messaging bridge forwards it without interpreting.
 
 ## Environment variables
 

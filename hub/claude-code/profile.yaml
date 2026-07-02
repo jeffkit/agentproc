@@ -16,6 +16,7 @@ agentproc:
     # Optional overrides (uncomment to use):
     # CLAUDE_MODEL: "claude-sonnet-4-6"                    # any alias or full name claude accepts
     # CLAUDE_DISALLOW_TOOLS: "AskUserQuestion,WebSearch"   # default: AskUserQuestion
+  env_allowlist: [ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_DISALLOW_TOOLS]
 tested: official
 maintainer: jeffkit
 tags: [coding, anthropic, ai]

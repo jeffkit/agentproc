@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Version:** 0.1.0 · **Status:** Draft
+**Wire protocol:** `0.1` · **Document revision:** `0.4` · **Status:** Draft
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -31,7 +31,19 @@ streaming: true               # forward AGENT_PARTIAL: lines in real time
 session_line_prefix: "AGENT_SESSION:"
 ```
 
-Placeholders are substituted **without** invoking a shell. The `command` string is split into an argv array on whitespace and passed to `execve` directly — this prevents shell-injection via `{{MESSAGE}}`.
+Placeholders are substituted **without** invoking a shell. The argv is built from two fields:
+
+- **`command`** — argv[0]. A single token. If it contains whitespace it is kept whole and **not** split.
+- **`args`** — argv[1..]. Each list element is one argv token.
+
+When `args` is empty, the legacy shorthand applies: `command` is split on whitespace into argv (e.g. `command: python3 ./bridge.py`). When `args` is non-empty, `command` is treated as a single token — this lets paths with whitespace stay whole without a shell:
+
+```yaml
+command: "/path with spaces/my agent"
+args: ["--flag", "{{MESSAGE}}"]
+```
+
+The resulting argv is passed to `execve` directly, which prevents shell-injection via `{{MESSAGE}}`.
 
 ---
 
@@ -46,20 +58,19 @@ Placeholders are substituted **without** invoking a shell. The `command` string 
 | `AGENT_SESSION_NAME` | Human-readable session name (default `"default"`) |
 | `AGENT_FROM_USER` | Sender identifier |
 | `AGENT_STREAMING` | `"1"` = streaming, `"0"` = one-shot |
-| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"` |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. **Opaque and non-comparable** — see the spec's Versioning section. Agents MUST NOT order or range-check it. |
 
-### Attachments — P0 (single)
+### Attachments — P0
 
-| Variable | Description |
-|----------|-------------|
-| `AGENT_IMAGE_URL` | Image URL (set when message has exactly one image) |
-| `AGENT_FILE_URL` | File URL (set when message has exactly one file) |
-
-### Attachments — draft (multi)
+Two layers. Bridges set the layer matching the message; agents prefer the richer layer when present and fall back otherwise.
 
 | Variable | Description |
 |----------|-------------|
-| `AGENT_ATTACHMENTS` | JSON array of `{type, url, name}` (`type` = `image\|file\|audio\|video`). Draft — prefer this when present, fall back to the single-attachment vars when not. |
+| `AGENT_IMAGE_URL` | Image URL (single-attachment convenience var) |
+| `AGENT_FILE_URL` | File URL (single-attachment convenience var) |
+| `AGENT_ATTACHMENTS` | JSON array of `{type, url, name}` (`type` = `image\|file\|audio\|video`). Set for zero or more attachments. Empty array = no attachments. |
+
+When a bridge sets `AGENT_ATTACHMENTS` **and** a single-attachment var, the two MUST agree (same URL). Agents consume `AGENT_ATTACHMENTS` when non-empty, else fall back to the single-attachment vars.
 
 ### stdin
 
@@ -89,6 +100,8 @@ Reply-body lines MUST NOT start with `AGENT_SESSION:`, `AGENT_PARTIAL:`, or `AGE
 
 The session line MAY appear at **any position** in stdout — first line, interleaved with partials, or last line. If multiple are emitted, the **last one wins**. This accommodates CLIs that only learn their session id at exit time (e.g. `claude --output-format stream-json`).
 
+If an `AGENT_SESSION:` line and an `AGENT_ERROR:` line appear in the same turn, the bridge **MUST** still persist the session id for the next turn even though the current turn is reported as failed. The error terminates the turn; it does not invalidate the session.
+
 ```
 AGENT_PARTIAL:"thinking..."
 AGENT_PARTIAL:"answer"
@@ -106,7 +119,7 @@ AGENT_PARTIAL:"And here is more."
 
 ### Error lines
 
-JSON-encoded user-readable error. Honored **regardless** of `streaming` mode. The bridge forwards it to the user, terminates any in-progress partial stream, and treats the process as failed even if the exit code is 0. Any reply body produced alongside is discarded.
+JSON-encoded user-readable error. Honored **regardless** of `streaming` mode. The bridge forwards it to the user, terminates any in-progress partial stream, and **MUST** treat the turn as failed even if the exit code is 0. Any reply body produced alongside is discarded.
 
 ```
 AGENT_ERROR:"Upstream API rate limited. Try again in 60s."

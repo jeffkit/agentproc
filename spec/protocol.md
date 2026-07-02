@@ -1,7 +1,22 @@
 # AgentProc Protocol Specification
 
-**Version:** 0.3.0
+**Wire protocol:** `0.1` (the string injected as `AGENT_PROTOCOL_VERSION`)
+**Document revision:** `0.5`
 **Status:** Draft
+
+The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `AGENT_PROTOCOL_VERSION`.
+
+---
+
+## Versioning
+
+`AGENT_PROTOCOL_VERSION` is an **opaque string**, not a comparable number. Agents and bridges MUST NOT attempt to order, compare, or range-check it. Two strings are either equal or not equal.
+
+- If a bridge injects a version string the agent does not recognise, the agent SHOULD behave as if the variable were unset (best-effort, fail-soft).
+- If an agent expects a version string the bridge does not inject, the agent MUST fall back to its built-in default.
+- The string is not a feature-detection mechanism: there is no negotiation, no capability advertisement, and no ordering. Agents that need to know whether a specific feature (e.g. multi-attachment) is present MUST inspect the relevant env var directly (e.g. `AGENT_ATTACHMENTS` non-empty), not the version string.
+
+The rationale is that any comparable version invites implementers to gate behaviour on `>= 0.2`, which breaks the moment a bridge ships without bumping the number. Treating the string as opaque keeps the contract honest: presence of a feature is signalled by presence of the env var that carries it.
 
 ---
 
@@ -45,6 +60,7 @@ stdin: none                   # none | message
 cwd: /path/to/workspace       # working directory (~ and placeholders supported)
 env:                          # extra environment variables
   MY_API_KEY: "${MY_API_KEY}" # reference existing env vars with ${VAR}
+env_allowlist: [MY_API_KEY]   # optional: restrict which ${VAR} the env block may read
 
 # Output control
 timeout_secs: 600             # stdout read timeout, default 1800
@@ -72,6 +88,32 @@ Placeholders in `command`, `args`, `cwd`, and `env` values are replaced before t
 | `{{SESSION_NAME}}` | Human-readable session name |
 | `{{PROFILE_DIR}}` | Absolute path to the directory containing the profile YAML. Lets a profile reference a bundled script (e.g. `command: python3 {{PROFILE_DIR}}/bridge.py`) independently of the agent's `cwd`. Bridges set this when invoking a profile by path; if unset (e.g. programmatic use without a file), it expands to empty. |
 
+### `${VAR}` expansion in `env` values
+
+Values in the profile `env` block may reference the bridge's own environment variables with `${VAR}` syntax (e.g. `MY_API_KEY: "${MY_API_KEY}"`). This is **substitution against the bridge process's full environment**, not against the profile or the agent.
+
+**Security implication.** A profile is **trusted input** — anyone who can write the profile can read every environment variable the bridge has access to (cloud credentials, tokens, secrets). This is by design (profiles are configuration, not user input), but it has one practical consequence worth calling out:
+
+> **Do not run profiles from untrusted sources.** `agentproc hub run <name>` fetches a profile from a GitHub repo and runs it. If you would not trust that repo's maintainer with the entire contents of your shell environment, do not run their profile. A profile that sets `env_allowlist` (see below) shrinks this boundary to the variables it declares — but the default, with no allowlist, is still full-environment access, so the trust decision still rests with the user running the profile.
+
+Bridges expand `${VAR}` using POSIX-shell semantics: unknown variables expand to the empty string, not to the literal `${VAR}`.
+
+### `env_allowlist` — shrinking the trust boundary
+
+By default, every `${VAR}` in the `env` block expands against the bridge's full environment. `env_allowlist` lets a profile shrink that boundary to exactly the variables it needs:
+
+```yaml
+env:
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+env_allowlist: [ANTHROPIC_API_KEY]
+```
+
+- **Optional and opt-in.** When `env_allowlist` is absent (the default), all `${VAR}` references expand normally — the existing trust-the-profile behaviour. Existing profiles keep working unchanged.
+- **When present**, a `${VAR}` whose name is **not** in the list expands to the empty string, and the bridge logs a warning to stderr (e.g. `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`). The process still starts — a typo in either the value or the list surfaces as an empty variable and a warning, not a hard failure.
+- **Scope.** `env_allowlist` governs only `${VAR}` expansion inside the profile `env` block. It does not affect `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, the bridge-injected `AGENT_*` vars, or `env` values that contain no `${VAR}` at all.
+- **No globbing.** Names must match exactly. `["ANTHROPIC_*"]` does not match `ANTHROPIC_API_KEY` — list each name in full. This keeps the allowlist an explicit declaration rather than a pattern that can quietly broaden.
+- **Recommendation.** Hub profiles SHOULD set `env_allowlist` so that `agentproc hub run <name>` exposes only the credentials the profile actually needs, not the user's entire shell environment. A profile fetched from a third-party repo that omits `env_allowlist` is not malicious by that fact alone, but the user has no way to tell what it reads — setting the list is how a profile author proves they only touch what they declare.
+
 ### `cwd` semantics
 
 | Source | What happens |
@@ -85,7 +127,37 @@ The split between `{{PROFILE_DIR}}` (locates bundled scripts) and `cwd` (where t
 
 ### Command execution model
 
-The `command` field MUST be split into an argv array on whitespace and passed to the platform's `execve` (or equivalent) **without** invoking a shell. This avoids shell-injection attacks via the `{{MESSAGE}}` placeholder.
+The bridge assembles the agent's argv from two fields:
+
+- **`command`** — the executable (argv[0]). Treat it as a single token. If it contains whitespace, the bridge MUST treat the entire string as argv[0] verbatim and MUST NOT split it.
+- **`args`** — a YAML list of additional argv tokens (argv[1..]). Each list element is one argv token, verbatim.
+
+The resulting argv (`[command, *args]`) is passed to the platform's `execve` (or equivalent) **without invoking a shell**. This avoids shell-injection attacks via the `{{MESSAGE}}` placeholder and lets `command` carry a path that contains spaces.
+
+**Legacy shorthand.** Many existing profiles write a multi-token command string (e.g. `command: python3 {{PROFILE_DIR}}/bridge.py`) and leave `args` unset. Bridges MUST support this shorthand: when `args` is **absent** and `command` contains whitespace, the bridge splits `command` on whitespace into argv.
+
+**The `args` field is the signal.** The bridge decides whether to split by the **presence** of the `args` field, not by its contents:
+
+- `args` **absent** (key not in the profile) → split `command` on whitespace (the shorthand).
+- `args` **present** (even an empty array `[]`) → `command` is a single argv token, never split.
+
+This means `args: []` is **meaningful**: it tells the bridge "do not split my command". This is the escape hatch for a `command` that contains whitespace but should be treated as one token.
+
+**Quoting / paths with whitespace.** A profile that needs to invoke an executable whose path contains spaces MUST use the explicit form:
+
+```yaml
+command: "/path with spaces/my agent"
+args: []                       # tells the bridge: do not split command
+```
+
+or, if additional argv tokens are needed:
+
+```yaml
+command: "/path with spaces/my agent"
+args: ["--flag", "{{MESSAGE}}"]
+```
+
+YAML's double-quoted scalar carries the spaces; the bridge passes the string to `execve` as a single argv token. The same rule applies to any `args` element that contains whitespace.
 
 If a bridge implementation chooses to use a shell (e.g., for environment-variable expansion), it MUST apply POSIX shell quoting to every placeholder substitution. Bridges SHOULD prefer the no-shell form.
 
@@ -108,25 +180,46 @@ The bridge injects the following variables before spawning the process. The agen
 
 | Variable | Description |
 |----------|-------------|
-| `AGENT_MESSAGE` | User message text |
+| `AGENT_MESSAGE` | User message text. May be empty — see "Empty messages" below. |
 | `AGENT_SESSION_ID` | Session ID from the previous turn (empty string = new session) |
 | `AGENT_SESSION_NAME` | Human-readable session name (default: `"default"`) |
 | `AGENT_FROM_USER` | Sender identifier (platform-specific: user ID, handle, etc.) |
 | `AGENT_STREAMING` | `"1"` = streaming mode, `"0"` = one-shot mode |
-| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. Agents MAY inspect this to gate behavior. |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. **Opaque and non-comparable** — see [Versioning](#versioning). Agents MUST NOT order or range-check this value. |
 
-### Attachment variables (P0 — single attachment)
+#### Empty messages
+
+`AGENT_MESSAGE` MAY be an empty string. A turn is considered to "carry content" when **any** of the following is true:
+
+- `AGENT_MESSAGE` is non-empty
+- `AGENT_IMAGE_URL` is non-empty
+- `AGENT_FILE_URL` is non-empty
+- `AGENT_ATTACHMENTS` is set and is not `[]`
+
+If none of the above holds, the turn is empty and the bridge / agent SHOULD surface an error rather than proceed. This rule accommodates the common "image-only message" case where a user posts a screenshot with no accompanying text.
+
+### Attachment variables (P0)
+
+Attachments are conveyed by two layers of variables. Bridges MUST set the layer that matches the message; agents SHOULD read the richer layer when present and fall back to the simpler one when not.
+
+**Single-attachment convenience variables.**
 
 | Variable | Description |
 |----------|-------------|
-| `AGENT_IMAGE_URL` | Image attachment URL (only set when the message contains exactly one image) |
-| `AGENT_FILE_URL` | File attachment URL (only set when the message contains exactly one file) |
+| `AGENT_IMAGE_URL` | Image attachment URL. Set when the message contains exactly one image. |
+| `AGENT_FILE_URL` | File attachment URL. Set when the message contains exactly one file. |
 
-### Attachment variables (draft — multi-attachment)
+**Multi-attachment variable.**
 
 | Variable | Description |
 |------|-------------|
-| `AGENT_ATTACHMENTS` | JSON array of `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`. **Draft**: bridges MAY set this in addition to the single-attachment vars; agents SHOULD prefer `AGENT_ATTACHMENTS` when present and fall back to the single-attachment vars when not. |
+| `AGENT_ATTACHMENTS` | JSON array of `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`. Set when the message carries zero or more attachments. An empty array is equivalent to "no attachments". |
+
+**Agent reading order.** When `AGENT_ATTACHMENTS` is non-empty, agents SHOULD consume it and ignore the single-attachment vars. When `AGENT_ATTACHMENTS` is unset (empty string), agents SHOULD fall back to `AGENT_IMAGE_URL` / `AGENT_FILE_URL`.
+
+**Bridge consistency requirement.** When a bridge sets `AGENT_ATTACHMENTS` **and** one of the single-attachment vars in the same turn, the two MUST agree: the URL in the single-attachment var MUST equal the `url` of the corresponding entry in `AGENT_ATTACHMENTS`. A bridge that cannot keep them consistent MUST set only one layer.
+
+**Type taxonomy.** The `type` field is one of `image`, `file`, `audio`, `video`. Bridges MAY emit additional types; agents that do not recognise a type SHOULD ignore that entry rather than fail.
 
 Custom variables declared in the profile's `env` block are also injected.
 
@@ -163,8 +256,9 @@ AGENT_SESSION:<opaque-string>
 - The session line MAY appear at **any position** in stdout — first line, interleaved with partials, or last line.
 - If multiple `AGENT_SESSION:` lines are emitted, the **last one wins**. The bridge stores the final value and passes it back as `AGENT_SESSION_ID` on the next turn.
 - This rule accommodates the common case where the session ID is only known after the underlying CLI exits (e.g., `claude --output-format stream-json` emits the session ID in its terminal `result` event).
+- **Interaction with `AGENT_ERROR:`** — a CLI's terminal event frequently carries both the session id and an error indication (e.g. `result{session_id, is_error: true}`). When an `AGENT_SESSION:` line and an `AGENT_ERROR:` line appear in the same turn, the bridge MUST still persist the session id for the next turn, even though the current turn is reported to the user as a failure. The error terminates the turn; it does not invalidate the session. Agents that emit `AGENT_ERROR:` and have already learned their session id SHOULD emit the `AGENT_SESSION:` line first (or at any point — the bridge honours last-wins either way).
 
-The session-ID string is **opaque** — the bridge stores and forwards it verbatim and MUST NOT interpret its format. It MAY be a UUID, a CLI-internal handle, or any string without whitespace or colons.
+The session-ID string is **opaque** — the bridge stores and forwards it verbatim and MUST NOT interpret its format. It MAY be a UUID, a CLI-internal handle, or any short opaque token. It MUST NOT contain whitespace, control characters, or colons (`:`): the colon collides with the `AGENT_SESSION:` delimiter and whitespace/control characters break round-tripping through env vars and argv. If an agent emits a `AGENT_SESSION:` line whose value violates this, the bridge SHOULD log a warning to stderr and **ignore the line** (the previously captured session id is preserved; if none was captured yet, the session stays empty). A valid id is non-empty after stripping and matches `^[A-Za-z0-9._~+/=-]+$` (URL-safe characters plus `-` and `.`); agents that emit anything else will not round-trip.
 
 This line is consumed by the bridge and does **not** appear in the reply sent to the user.
 
@@ -194,11 +288,23 @@ When the agent encounters an error that should be communicated to the user, it e
 AGENT_ERROR:<json-encoded-string>
 ```
 
-This line is honored **regardless** of `streaming` mode. The bridge forwards the decoded string to the user as an error reply and SHOULD terminate any in-progress partial stream.
+This line is honored **regardless** of `streaming` mode. The bridge forwards the decoded string to the user as an error reply and SHOULD stop forwarding any further `AGENT_PARTIAL:` lines from the same turn (see "Interaction with already-delivered partials" below — already-delivered chunks are not retracted, only future ones are suppressed).
 
-If an `AGENT_ERROR:` line is emitted, the bridge SHOULD treat the process as failed even if the exit code is 0. The agent SHOULD exit with a non-zero code after emitting `AGENT_ERROR:`.
+Once an `AGENT_ERROR:` line has been emitted, the bridge MAY stop reading the agent's stdout entirely — it has already captured the error and (per the session-line rule) the final session id if one appeared before the error. The agent process is expected to exit shortly after; if it does not, the bridge's normal timeout applies. (Hub bridges that wrap an NDJSON-emitting CLI take this option: they emit `AGENT_ERROR:` and let the process wind down, rather than continuing to parse a stream whose subsequent events no longer affect the user-visible result.)
+
+If an `AGENT_ERROR:` line is emitted, the bridge MUST treat the turn as failed even if the process exits 0. The agent SHOULD exit with a non-zero code after emitting `AGENT_ERROR:`, but a bridge MUST NOT rely on that — the `AGENT_ERROR:` line alone is sufficient to mark the turn failed.
 
 Any reply body produced alongside an `AGENT_ERROR:` line is discarded.
+
+**SDK convention.** SDKs that wrap this protocol (e.g. the official Python and Node `create_profile`/`createProfile` helpers) treat `send_error()` as **terminal**: the agent SHOULD NOT emit further `AGENT_PARTIAL:` or reply body after calling it. The SDK MAY enforce this by exiting the process immediately after `send_error()`. This is a stricter rule than the raw protocol requires (the protocol allows an agent to emit `AGENT_ERROR:` and continue writing — the bridge just discards the rest), but it is the recommended SDK ergonomic because mixing an error with subsequent content is confusing to users.
+
+#### Interaction with already-delivered partials
+
+When `AGENT_PARTIAL:` lines were forwarded before the `AGENT_ERROR:` arrived (the common "stream half the answer, then hit an upstream rate limit" case), the bridge MUST NOT attempt to retract, edit, or annotate the already-delivered chunks — they have already been shown to the user. The `AGENT_ERROR:` text is delivered as-is, after any partials.
+
+This means the user may see a half-finished reply followed by an error. This is intentional: retracting delivered text is not possible on most messaging platforms, and trying to do so (delete + repost) is racy and surprising. Bridges that want to soften this MAY insert a visible separator (e.g. a newline or "—" rule) between the last partial and the error message, but MUST NOT rewrite or remove the partial text.
+
+Agents that prefer a clean failure MAY choose to buffer their output and emit no `AGENT_PARTIAL:` until they are confident the turn will succeed — but then they lose streaming, which is the trade-off.
 
 ### Reply body
 
@@ -253,6 +359,16 @@ The agent MUST NOT block on stdin when `stdin: none` is in effect.
 
 Other non-zero codes are treated as generic errors. When `send_error_reply: true` is set and the process exits non-zero (without having emitted `AGENT_ERROR:`), the bridge sends a generic error message to the user.
 
+### Precedence when multiple failure signals arrive
+
+A turn may produce more than one failure signal — for example, the agent emits `AGENT_ERROR:` and then the bridge kills it on timeout before it exits, or the agent exits non-zero after emitting `AGENT_ERROR:`. The bridge resolves the final exit code by this precedence (highest first):
+
+1. **Timeout (124)** — the bridge killed the process. A timeout is always reported as `124` regardless of what the agent emitted before the kill.
+2. **`AGENT_ERROR:` (1)** — the agent emitted an error line. Reported as `1` even if the process then exited 0.
+3. **Process exit code** — whatever the process returned, used when neither of the above apply.
+
+Rationale: a timeout is a bridge-level failure mode that the agent cannot recover from, so it takes precedence. `AGENT_ERROR:` is the agent's own signal that something went wrong, which takes precedence over the raw exit code (because the agent may exit 0 after emitting `AGENT_ERROR:` for self-diagnostic reasons).
+
 stderr is captured as a debug log and not shown to the user, unless `include_stderr_in_reply: true`.
 
 ---
@@ -268,6 +384,8 @@ When `timeout_secs` is reached without the process exiting:
 Any `AGENT_PARTIAL:` lines already received are forwarded to the user. The bridge then sends a timeout error reply (subject to `send_error_reply`).
 
 The agent SHOULD handle `SIGTERM` by flushing any buffered partial output and exiting promptly.
+
+**Windows caveat.** `SIGTERM` and `SIGKILL` do not exist as deliverable signals on Windows. A bridge running on Windows MUST still honour the two-step intent — first a "polite" termination request (on Windows, `TerminateProcess` is the only available lever, so the grace period collapses to zero) and then, if the process is still alive after `kill_grace_secs`, a hard termination. POSIX bridges implement the full SIGTERM → grace → SIGKILL sequence. Agents that need to flush on shutdown cannot rely on receiving a signal on Windows and SHOULD use `atexit`-style hooks or explicit flush-before-exit discipline instead.
 
 ---
 
@@ -388,4 +506,8 @@ The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on suc
 
 ## Changelog
 
+Document revisions are tracked here. The wire protocol has remained `0.1` since the initial draft; entries below record editorial changes and clarifications to this document, not wire-format changes.
+
+- **doc 0.5** — Defined empty-`AGENT_MESSAGE` semantics (legal when attachments are present). Disambiguated `command`/`args`: `args: []` (explicit empty) now means "do not split", distinct from `args` absent. Added `${VAR}` security warning for profile `env` blocks. Added optional `env_allowlist` profile field: when present, `${VAR}` references not in the list expand to empty + a stderr warning, shrinking the trust boundary from the full environment to the declared variables. Codified `AGENT_ERROR:` interaction with already-delivered partials (not retracted), and that the bridge MAY stop reading stdout after the error. Restated the session-id format constraint (no whitespace/control/colon) and defined bridge behaviour on violation (ignore the line, preserve previous id, warn). Codified exit-code precedence (timeout > `AGENT_ERROR:` > exit code). Documented SDK `send_error` terminality.
+- **doc 0.4** — Split wire-protocol version (`0.1`) from document revision in the header; added a Versioning section codifying that `AGENT_PROTOCOL_VERSION` is an opaque, non-comparable string. Promoted `AGENT_ATTACHMENTS` from Draft to P0 with a consistency requirement when bridges set it alongside the single-attachment vars. Clarified session-line ordering: when a CLI emits `AGENT_SESSION:` together with `AGENT_ERROR:` (the common `result{is_error}` shape), bridges MUST preserve the session id for the next turn even though the current turn is reported as a failure. Added `AGENT_ERROR:` → bridge MUST treat the turn as failed regardless of exit code. Defined `command` as argv[0] and `args` as the remaining argv, with a quoting rule so paths containing whitespace remain expressible without a shell. Noted Windows caveat for the timeout SIGTERM/SIGKILL contract.
 - **0.1.0** — Initial public draft. Defined env-var input, sentinel-prefixed stdout, `AGENT_SESSION:` / `AGENT_PARTIAL:` / `AGENT_ERROR:`, session-line "last wins" rule, `AGENT_PROTOCOL_VERSION`, `AGENT_ATTACHMENTS` (draft), timeout/SIGTERM contract, exit-code conventions, stdin EOF contract, command-execution no-shell rule.

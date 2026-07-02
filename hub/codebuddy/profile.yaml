@@ -13,6 +13,7 @@ agentproc:
     # Auth via codebuddy's own login flow (run `codebuddy` once interactively).
     # Override model if desired:
     # CODEBUDDY_MODEL: "claude-sonnet-4.6"
+  env_allowlist: [CODEBUDDY_MODEL]
 tested: official
 maintainer: jeffkit
 tags: [coding, tencent, ai]

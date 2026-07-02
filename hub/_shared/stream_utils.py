@@ -48,6 +48,23 @@ def emit(line: str) -> None:
     sys.stdout.flush()
 
 
+def _has_any_attachment(env) -> bool:
+    """True if the bridge signalled any attachment on this turn.
+
+    AGENT_MESSAGE may legitimately be empty when the user sent an image-only
+    or file-only message. We accept any of the three attachment signals.
+    AGENT_ATTACHMENTS "[]" counts as no attachment (empty array per spec).
+    """
+    if env.get("AGENT_IMAGE_URL", "").strip():
+        return True
+    if env.get("AGENT_FILE_URL", "").strip():
+        return True
+    raw = env.get("AGENT_ATTACHMENTS", "").strip()
+    if raw and raw != "[]":
+        return True
+    return False
+
+
 def emit_error(text: str) -> None:
     emit(f"AGENT_ERROR:{json.dumps(text, ensure_ascii=False)}")
 
@@ -75,11 +92,15 @@ def run_bridge(
     """
     env = os.environ
     message = env.get("AGENT_MESSAGE", "")
-    if not message:
-        emit_error("AGENT_MESSAGE env var is required")
-        return 1
     session_id = env.get("AGENT_SESSION_ID", "")
     streaming = env.get("AGENT_STREAMING", "1") != "0"
+
+    # Per spec: AGENT_MESSAGE may be empty when the turn carries attachments
+    # (e.g. an image-only message). Only reject when there is truly nothing
+    # to do — no text AND no attachment of any kind.
+    if not message and not _has_any_attachment(env):
+        emit_error("AGENT_MESSAGE env var is required (or set AGENT_ATTACHMENTS / AGENT_IMAGE_URL / AGENT_FILE_URL)")
+        return 1
 
     args = build_args(message, session_id, env)
     try:
@@ -132,6 +153,12 @@ def run_bridge(
     stderr_output = proc.stderr.read() if proc.stderr else ""
 
     if error_message:
+        # Per spec: a CLI's terminal event often carries both session_id and
+        # an error indication. Persist the session for the next turn BEFORE
+        # emitting the error — the error terminates this turn but does not
+        # invalidate the session.
+        if found_session_id:
+            emit_session(found_session_id)
         emit_error(error_message)
         return 1
     if proc.returncode != 0 and not found_session_id:

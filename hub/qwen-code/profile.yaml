@@ -15,6 +15,7 @@ agentproc:
     #   OPENAI_API_KEY    — any OpenAI-compatible endpoint via Qwen's settings
     # Optional overrides:
     # QWEN_MODEL: "qwen3-coder-plus"
+  env_allowlist: [QWEN_API_KEY, DASHSCOPE_API_KEY, OPENAI_API_KEY, QWEN_MODEL]
 tested: community
 maintainer: jeffkit
 tags: [coding, alibaba, ai]

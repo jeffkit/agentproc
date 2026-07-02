@@ -47,6 +47,7 @@ __all__ = [
     "run",
     "normalize_profile",
     "classify_line",
+    "is_valid_session_id",
     "decode_json_value",
     "substitute",
     "expand_env_ref",
@@ -356,6 +357,18 @@ def classify_line(line: str) -> Dict[str, str]:
     return {"kind": "body", "value": line}
 
 
+# Per spec: session id is opaque but MUST NOT contain whitespace, control
+# characters, or colons. Valid: URL-safe chars + "-" + "."; non-empty.
+# A session line whose value fails this is ignored (previous id preserved).
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
+
+
+def is_valid_session_id(value: str) -> bool:
+    """True if ``value`` is a spec-compliant session id (non-empty, no
+    whitespace / control chars / colons)."""
+    return bool(value) and bool(_SESSION_ID_RE.fullmatch(value))
+
+
 # ---------------------------------------------------------------------------
 # run() — the main entry point
 # ---------------------------------------------------------------------------
@@ -496,11 +509,21 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         line = raw_line.rstrip("\r")
         c = classify_line(line)
         if c["kind"] == "session":
-            result.session_id = c["value"]
-            if options.on_session:
-                options.on_session(c["value"])
-            if options.on_protocol_line:
-                options.on_protocol_line(line)
+            if not is_valid_session_id(c["value"]):
+                if options.on_stderr:
+                    options.on_stderr(
+                        f"[agentproc runner] ignoring invalid AGENT_SESSION value "
+                        f"{c['value']!r} (must be non-empty, no whitespace/"
+                        "control chars/colons); previous session id preserved"
+                    )
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
+            else:
+                result.session_id = c["value"]
+                if options.on_session:
+                    options.on_session(c["value"])
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
         elif c["kind"] == "partial":
             if streaming and options.on_partial:
                 options.on_partial(c["value"])

@@ -21,6 +21,7 @@ agentproc:
     # Optional overrides (uncomment to use):
     # CURSOR_MODEL: "gpt-5"            # any model name `agent --list-models` shows
     # CURSOR_FORCE: "1"                # set to "1" to add --yolo (skip approvals)
+  env_allowlist: [CURSOR_API_KEY, CURSOR_MODEL, CURSOR_FORCE]
 tested: official
 maintainer: jeffkit
 tags: [coding, cursor, ai]

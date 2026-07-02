@@ -15,6 +15,7 @@ from agentproc.runner import (
     PROTOCOL_VERSION,
     RunOptions,
     classify_line,
+    is_valid_session_id,
     decode_json_value,
     expand_env_ref,
     expand_path,
@@ -61,6 +62,34 @@ class TestClassifyLine:
 
     def test_prefix_like_but_not_exact(self):
         assert classify_line("AGENT_SESSION") == {"kind": "body", "value": "AGENT_SESSION"}
+
+
+class TestIsValidSessionId:
+    def test_valid_uuid(self):
+        assert is_valid_session_id("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+
+    def test_valid_cli_handle(self):
+        assert is_valid_session_id("cli-sess-9f3a2c1e")
+
+    def test_valid_short_token(self):
+        assert is_valid_session_id("abc123")
+
+    def test_empty_rejected(self):
+        assert not is_valid_session_id("")
+
+    def test_whitespace_rejected(self):
+        assert not is_valid_session_id("has space")
+        assert not is_valid_session_id("tab\there")
+
+    def test_colon_rejected(self):
+        assert not is_valid_session_id("thread:abc")
+
+    def test_control_chars_rejected(self):
+        assert not is_valid_session_id("ctrl\x07char")
+
+    def test_url_safe_chars_allowed(self):
+        # The full valid set: letters, digits, . _ ~ + / = -
+        assert is_valid_session_id("a.b_c~d+e/f=g-h")
 
 
 class TestDecodeJsonValue:
@@ -113,6 +142,30 @@ class TestExpandEnvRef:
 
     def test_mixed(self):
         assert expand_env_ref("key=${HOME} and ${missing}", {"HOME": "/h"}) == "key=/h and "
+
+    def test_allowlist_permits_listed_var(self):
+        assert expand_env_ref("${HOME}", {"HOME": "/h"}, allowlist={"HOME"}) == "/h"
+
+    def test_allowlist_blocks_unlisted_var(self):
+        # AWS_SECRET is in env but not in allowlist → blocked, expands to empty.
+        assert expand_env_ref(
+            "${AWS_SECRET_ACCESS_KEY}", {"AWS_SECRET_ACCESS_KEY": "s3cr3t"},
+            allowlist={"HOME"},
+        ) == ""
+
+    def test_allowlist_blocked_callback(self):
+        blocked = []
+        out = expand_env_ref(
+            "${A} ${B}", {"A": "1", "B": "2"},
+            allowlist={"A"},
+            on_blocked=blocked.append,
+        )
+        assert out == "1 "
+        assert blocked == ["B"]
+
+    def test_allowlist_none_means_all_permitted(self):
+        # allowlist=None (default) ⇒ no restriction, even on unknown vars.
+        assert expand_env_ref("${ANYTHING}", {"ANYTHING": "x"}, allowlist=None) == "x"
 
 
 class TestExpandPath:
@@ -181,6 +234,74 @@ class TestNormalizeProfile:
         assert normalize_profile({"command": "x", "streaming": False})["streaming"] is False
         assert normalize_profile({"command": "x", "streaming": True})["streaming"] is True
         assert normalize_profile({"command": "x"})["streaming"] is True
+
+    def test_command_split_when_args_empty(self):
+        """Legacy shorthand: `command: python3 ./bridge.py` with no args
+        splits into argv on whitespace."""
+        p = normalize_profile({"command": "python3 ./bridge.py"})
+        assert p["argv"] == ["python3", "./bridge.py"]
+
+    def test_command_kept_whole_when_args_present(self):
+        """Explicit form: when args is non-empty, command is a single token
+        (argv[0]) verbatim — lets paths with whitespace stay whole."""
+        p = normalize_profile({
+            "command": "/path with spaces/my agent",
+            "args": ["--flag", "value"],
+        })
+        assert p["argv"] == ["/path with spaces/my agent"]
+        assert p["args"] == ["--flag", "value"]
+
+    def test_command_with_spaces_runs_end_to_end(self, tmp_path):
+        """A profile whose executable path contains spaces must actually spawn,
+        not be split into bogus argv. Uses the explicit form (args non-empty)
+        so command is treated as a single argv token per spec."""
+        nested = tmp_path / "has space"
+        nested.mkdir()
+        script = nested / "agent.sh"
+        script.write_text("#!/usr/bin/env bash\necho \"ok: $AGENT_MESSAGE\"\n")
+        script.chmod(script.stat().st_mode | 0o111)
+        r = run(
+            {"command": str(script), "args": ["{{MESSAGE}}"]},
+            RunOptions(message="payload"),
+        )
+        assert r.reply.strip() == "ok: payload"
+        assert r.exit_code == 0
+
+    def test_command_kept_whole_with_empty_args_list(self):
+        """`args: []` (explicit empty list) tells the bridge: do not split
+        command. This is the escape hatch for a whitespace-bearing executable
+        path that takes no extra argv tokens. Distinct from `args` absent."""
+        p = normalize_profile({
+            "command": "/path with spaces/my agent",
+            "args": [],
+        })
+        assert p["argv"] == ["/path with spaces/my agent"]
+        assert p["args"] == []
+
+    def test_command_split_when_args_absent(self):
+        """When `args` is absent entirely, the legacy shorthand applies and
+        command is split on whitespace."""
+        p = normalize_profile({"command": "python3 ./bridge.py"})
+        assert p["argv"] == ["python3", "./bridge.py"]
+
+    def test_args_none_treated_as_absent(self):
+        """If someone explicitly sets `args: null`, treat as absent (shorthand
+        applies). This protects hand-written YAML where `args:` with no value
+        parses as None."""
+        p = normalize_profile({"command": "python3 ./bridge.py", "args": None})
+        assert p["argv"] == ["python3", "./bridge.py"]
+
+    def test_env_allowlist_absent_is_none(self):
+        p = normalize_profile({"command": "x", "env": {"A": "1"}})
+        assert p["env_allowlist"] is None
+
+    def test_env_allowlist_parsed_to_set(self):
+        p = normalize_profile({"command": "x", "env_allowlist": ["A", "B"]})
+        assert p["env_allowlist"] == {"A", "B"}
+
+    def test_env_allowlist_non_list_raises(self):
+        with pytest.raises(ValueError, match="env_allowlist"):
+            normalize_profile({"command": "x", "env_allowlist": "A"})
 
 
 def test_protocol_version_is_0_1():
@@ -372,3 +493,64 @@ class TestRunEndToEnd:
             RunOptions(message="hi"),
         )
         assert r.exit_code == 1
+
+    def test_env_allowlist_end_to_end(self, agent_script, monkeypatch):
+        """Allowlist permits listed var, blocks unlisted var, warns via on_stderr."""
+        monkeypatch.setenv("ALLOWED_KEY", "ok-val")
+        monkeypatch.setenv("SECRET_KEY", "top-secret")
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "ALLOWED=$ALLOWED_KEY"\n'
+            'echo "SECRET=$SECRET_KEY"\n'
+        )
+        warnings: List[str] = []
+        r = run(
+            {
+                "command": str(agent),
+                "env": {
+                    "ALLOWED_KEY": "${ALLOWED_KEY}",
+                    "SECRET_KEY": "${SECRET_KEY}",
+                },
+                "env_allowlist": ["ALLOWED_KEY"],
+            },
+            RunOptions(message="hi", on_stderr=warnings.append),
+        )
+        assert "ALLOWED=ok-val" in r.reply
+        # SECRET_KEY was blocked → expands to empty → agent sees empty value.
+        assert "SECRET=" in r.reply
+        assert "top-secret" not in r.reply
+        # Bridge logged a warning about the blocked reference.
+        assert any("SECRET_KEY" in w and "allowlist" in w for w in warnings)
+
+    def test_invalid_session_id_ignored_preserves_previous(self, agent_script):
+        """A malformed AGENT_SESSION line is ignored; the previous valid id wins."""
+        agent = agent_script(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            echo "AGENT_SESSION:valid-id-1"
+            echo "AGENT_SESSION:bad:with:colons"
+            echo "done"
+        """))
+        warnings: List[str] = []
+        r = run(
+            {"command": str(agent)},
+            RunOptions(message="hi", on_stderr=warnings.append),
+        )
+        # The invalid line did not overwrite the valid one.
+        assert r.session_id == "valid-id-1"
+        assert r.reply.strip() == "done"
+        # Bridge warned about the invalid value.
+        assert any("invalid" in w and "AGENT_SESSION" in w for w in warnings)
+
+    def test_invalid_session_id_when_no_previous(self, agent_script):
+        """If the first session line is invalid, session stays empty."""
+        agent = agent_script(textwrap.dedent("""\
+            #!/usr/bin/env bash
+            echo "AGENT_SESSION:has space"
+            echo "done"
+        """))
+        r = run(
+            {"command": str(agent)},
+            RunOptions(message="hi"),
+        )
+        assert r.session_id == ""
+        assert r.reply.strip() == "done"

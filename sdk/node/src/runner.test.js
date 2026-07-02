@@ -25,6 +25,7 @@ const {
   normalizeProfile,
   expandEnvRef,
   expandPath,
+  isValidSessionId,
   PROTOCOL_VERSION,
 } = require('./runner.js');
 
@@ -76,6 +77,41 @@ describe('classifyLine', () => {
 
   test('body line: prefix-like but not exact prefix', () => {
     assert.deepStrictEqual(classifyLine('AGENT_SESSION'), { kind: 'body', value: 'AGENT_SESSION' });
+  });
+});
+
+describe('isValidSessionId', () => {
+  test('valid UUID', () => {
+    assert.ok(isValidSessionId('f47ac10b-58cc-4372-a567-0e02b2c3d479'));
+  });
+
+  test('valid CLI handle', () => {
+    assert.ok(isValidSessionId('cli-sess-9f3a2c1e'));
+  });
+
+  test('valid short token', () => {
+    assert.ok(isValidSessionId('abc123'));
+  });
+
+  test('empty rejected', () => {
+    assert.strictEqual(isValidSessionId(''), false);
+  });
+
+  test('whitespace rejected', () => {
+    assert.strictEqual(isValidSessionId('has space'), false);
+    assert.strictEqual(isValidSessionId('tab\there'), false);
+  });
+
+  test('colon rejected', () => {
+    assert.strictEqual(isValidSessionId('thread:abc'), false);
+  });
+
+  test('control chars rejected', () => {
+    assert.strictEqual(isValidSessionId('ctrl\x07char'), false);
+  });
+
+  test('url-safe chars allowed', () => {
+    assert.ok(isValidSessionId('a.b_c~d+e/f=g-h'));
   });
 });
 
@@ -147,6 +183,29 @@ describe('expandEnvRef', () => {
       'key=/h and ',
     );
   });
+
+  test('allowlist permits listed var', () => {
+    assert.strictEqual(expandEnvRef('${HOME}', { HOME: '/h' }, new Set(['HOME'])), '/h');
+  });
+
+  test('allowlist blocks unlisted var', () => {
+    // AWS_SECRET is in env but not in allowlist → blocked, expands to empty.
+    assert.strictEqual(
+      expandEnvRef('${AWS_SECRET_ACCESS_KEY}', { AWS_SECRET_ACCESS_KEY: 's3cr3t' }, new Set(['HOME'])),
+      '',
+    );
+  });
+
+  test('allowlist blocked callback fires', () => {
+    const blocked = [];
+    const out = expandEnvRef('${A} ${B}', { A: '1', B: '2' }, new Set(['A']), (n) => blocked.push(n));
+    assert.strictEqual(out, '1 ');
+    assert.deepStrictEqual(blocked, ['B']);
+  });
+
+  test('allowlist null means all permitted', () => {
+    assert.strictEqual(expandEnvRef('${ANYTHING}', { ANYTHING: 'x' }, null), 'x');
+  });
 });
 
 describe('expandPath', () => {
@@ -207,6 +266,39 @@ describe('normalizeProfile', () => {
     assert.deepStrictEqual(p.args, ['--foo', '42']);
   });
 
+  test('command is split into argv when args is empty (legacy shorthand)', () => {
+    const p = normalizeProfile({ command: 'python3 ./bridge.py' });
+    assert.deepStrictEqual(p.argv, ['python3', './bridge.py']);
+  });
+
+  test('command is kept whole when args is non-empty (explicit form)', () => {
+    // Lets paths with whitespace stay whole as argv[0].
+    const p = normalizeProfile({
+      command: '/path with spaces/my agent',
+      args: ['--flag', 'value'],
+    });
+    assert.deepStrictEqual(p.argv, ['/path with spaces/my agent']);
+    assert.deepStrictEqual(p.args, ['--flag', 'value']);
+  });
+
+  test('command is kept whole when args is an explicit empty array', () => {
+    // `args: []` (present but empty) tells the bridge: do not split.
+    // Distinct from args being absent (which falls back to the shorthand).
+    const p = normalizeProfile({
+      command: '/path with spaces/my agent',
+      args: [],
+    });
+    assert.deepStrictEqual(p.argv, ['/path with spaces/my agent']);
+    assert.deepStrictEqual(p.args, []);
+  });
+
+  test('command is split when args is null (treated as absent)', () => {
+    // Hand-written YAML may parse `args:` with no value as null. Treat null
+    // the same as absent — fall back to the whitespace-splitting shorthand.
+    const p = normalizeProfile({ command: 'python3 ./bridge.py', args: null });
+    assert.deepStrictEqual(p.argv, ['python3', './bridge.py']);
+  });
+
   test('cwd ~ is expanded', () => {
     const p = normalizeProfile({ command: 'x', cwd: '~/proj' });
     assert.strictEqual(p.cwd, path.join(os.homedir(), 'proj'));
@@ -223,6 +315,21 @@ describe('normalizeProfile', () => {
     assert.strictEqual(normalizeProfile({ command: 'x', streaming: false }).streaming, false);
     assert.strictEqual(normalizeProfile({ command: 'x', streaming: true }).streaming, true);
     assert.strictEqual(normalizeProfile({ command: 'x' }).streaming, true);
+  });
+
+  test('env_allowlist absent → null', () => {
+    assert.strictEqual(normalizeProfile({ command: 'x', env: { A: '1' } }).env_allowlist, null);
+  });
+
+  test('env_allowlist parsed to Set', () => {
+    const p = normalizeProfile({ command: 'x', env_allowlist: ['A', 'B'] });
+    assert.ok(p.env_allowlist instanceof Set);
+    assert.ok(p.env_allowlist.has('A'));
+    assert.ok(p.env_allowlist.has('B'));
+  });
+
+  test('env_allowlist non-array throws', () => {
+    assert.throws(() => normalizeProfile({ command: 'x', env_allowlist: 'A' }), /env_allowlist/);
   });
 });
 
@@ -431,6 +538,63 @@ describe('run() — end-to-end', () => {
       { message: 'hi' },
     );
     assert.strictEqual(r.exitCode, 1);
+  });
+
+  test('env_allowlist permits listed var, blocks unlisted, warns onStderr', async () => {
+    process.env.ALLOWED_KEY = 'ok-val';
+    process.env.SECRET_KEY = 'top-secret';
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "ALLOWED=$ALLOWED_KEY"\n' +
+      'echo "SECRET=$SECRET_KEY"\n',
+    );
+    try {
+      const warnings = [];
+      const r = await run(
+        {
+          command: agent,
+          env: {
+            ALLOWED_KEY: '${ALLOWED_KEY}',
+            SECRET_KEY: '${SECRET_KEY}',
+          },
+          env_allowlist: ['ALLOWED_KEY'],
+        },
+        { message: 'hi', onStderr: (s) => warnings.push(s) },
+      );
+      assert.ok(r.reply.includes('ALLOWED=ok-val'), `reply was: ${r.reply}`);
+      // SECRET_KEY was blocked → expands to empty → agent sees empty value.
+      assert.ok(r.reply.includes('SECRET='), `reply was: ${r.reply}`);
+      assert.ok(!r.reply.includes('top-secret'), `secret leaked: ${r.reply}`);
+      assert.ok(warnings.some((w) => w.includes('SECRET_KEY') && w.includes('allowlist')));
+    } finally {
+      delete process.env.ALLOWED_KEY;
+      delete process.env.SECRET_KEY;
+    }
+  });
+
+  test('invalid AGENT_SESSION ignored, preserves previous valid id', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "AGENT_SESSION:valid-id-1"\n' +
+      'echo "AGENT_SESSION:bad:with:colons"\n' +
+      'echo "done"\n',
+    );
+    const warnings = [];
+    const r = await run({ command: agent }, { message: 'hi', onStderr: (s) => warnings.push(s) });
+    assert.strictEqual(r.sessionId, 'valid-id-1');
+    assert.strictEqual(r.reply.trim(), 'done');
+    assert.ok(warnings.some((w) => w.includes('invalid') && w.includes('AGENT_SESSION')));
+  });
+
+  test('invalid AGENT_SESSION when no previous → session stays empty', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "AGENT_SESSION:has space"\n' +
+      'echo "done"\n',
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.sessionId, '');
+    assert.strictEqual(r.reply.trim(), 'done');
   });
 });
 

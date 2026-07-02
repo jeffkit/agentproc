@@ -4,7 +4,7 @@ agentproc — AgentProc Protocol SDK (Python)
 Implements the AgentProc P0 protocol so you can write a single async handler
 instead of manually reading env vars and formatting stdout.
 
-Protocol contract (spec/protocol.md, v0.1.0):
+Protocol contract (spec/protocol.md, wire protocol 0.1):
   Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,
                      AGENT_FROM_USER, AGENT_STREAMING, AGENT_PROTOCOL_VERSION,
                      AGENT_IMAGE_URL, AGENT_FILE_URL, AGENT_ATTACHMENTS (draft)
