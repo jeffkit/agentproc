@@ -193,7 +193,9 @@ function createProfile(handler) {
       process.exit(0);
     })
     .catch(err => {
-      // Match Python SDK behavior: a ProtocolError-like object signals a user-facing error.
+      // A ProtocolError (thrown via sdk.protocolError) signals a user-facing
+      // error → emit AGENT_ERROR. The isProtocolError marker is set on the
+      // class, so legacy errors that only set the boolean still work too.
       if (err && err.isProtocolError) {
         const msg = String(err.message || 'unknown error');
         process.stdout.write(`AGENT_ERROR:${JSON.stringify(msg)}\n`);
@@ -205,18 +207,31 @@ function createProfile(handler) {
 }
 
 /**
- * Throw this to surface a user-readable error via AGENT_ERROR.
- * @param {string} message
- * @returns {Promise<never>}
+ * Error surfaced to the user as an AGENT_ERROR: line. Throw an instance from
+ * a handler to report a user-readable error:
+ *
+ *   throw sdk.protocolError('API key expired');
+ *
+ * `await protocolError(...)` from older callers still works: awaiting a
+ * non-thenable Error instance returns the instance itself, so the legacy
+ * `throw await sdk.protocolError(msg)` form keeps functioning.
+ *
+ * Mirrors Python's `ProtocolError` exception class.
  */
-async function protocolError(message) {
-  const err = new Error(message || 'unknown error');
-  err.isProtocolError = true;
-  throw err;
+class ProtocolError extends Error {
+  constructor(message) {
+    super(message || 'unknown error');
+    this.isProtocolError = true;
+  }
+}
+
+function protocolError(message) {
+  return new ProtocolError(message);
 }
 
 module.exports = {
   createProfile,
+  ProtocolError,
   loadHistory,
   appendHistory,
   sessionFilePath,

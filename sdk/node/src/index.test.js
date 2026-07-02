@@ -242,12 +242,28 @@ describe('createProfile end-to-end', () => {
       { AGENT_MESSAGE: 'hi', AGENT_STREAMING: '0' },
       `(async (sdk) => {
         sdk.createProfile(async (ctx) => {
-          throw await sdk.protocolError('bad input');
+          throw sdk.protocolError('bad input');
         });
       })`
     );
     assert.strictEqual(r.code, 1, 'stdout=' + r.stdout + ' stderr=' + r.stderr);
     assert.ok(r.stdout.includes('AGENT_ERROR:"bad input"\n'), 'stdout=' + JSON.stringify(r.stdout));
+  });
+
+  test('legacy `throw await sdk.protocolError(...)` still works', async () => {
+    // The old idiom awaited the helper. Awaiting a non-thenable Error instance
+    // returns the instance, so this form must keep functioning after the
+    // switch from an async-throwing function to a synchronous factory.
+    const r = await runAgent(
+      { AGENT_MESSAGE: 'hi', AGENT_STREAMING: '0' },
+      `(async (sdk) => {
+        sdk.createProfile(async (ctx) => {
+          throw await sdk.protocolError('legacy form');
+        });
+      })`
+    );
+    assert.strictEqual(r.code, 1, 'stdout=' + r.stdout + ' stderr=' + r.stderr);
+    assert.ok(r.stdout.includes('AGENT_ERROR:"legacy form"\n'), 'stdout=' + JSON.stringify(r.stdout));
   });
 
   test('handler exception → exit 1, stderr has stack', async () => {

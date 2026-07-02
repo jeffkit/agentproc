@@ -78,6 +78,12 @@ declare module 'agentproc' {
   /** Parse AGENT_ATTACHMENTS JSON. Returns [] on parse failure. */
   export function parseAttachments(raw: string): Attachment[];
 
-  /** Reject with a user-readable error; surfaced via AGENT_ERROR. */
-  export function protocolError(message: string): Promise<never>;
+  /** Reject with a user-readable error; surfaced via AGENT_ERROR.
+   *  Throw the returned instance (or a `ProtocolError`) from a handler. */
+  export class ProtocolError extends Error {
+    isProtocolError: boolean;
+  }
+
+  /** Construct a ProtocolError to throw from a handler. */
+  export function protocolError(message: string): ProtocolError;
 }
