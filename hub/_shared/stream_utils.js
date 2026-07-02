@@ -49,6 +49,13 @@ function hasAnyAttachment(env) {
 }
 
 async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
+  // Exit semantics: we use process.exit(n) for fatal pre-spawn / parse failures
+  // rather than setting process.exitCode and letting the loop drain. This
+  // bridge is an async reader loop; after we emit AGENT_ERROR we want the
+  // process gone immediately so the bridge doesn't keep reading a child we
+  // never started (or a child whose output we've already given up on). The
+  // `recursive` bridge uses exitCode because it owns a different control flow;
+  // don't "normalise" this one to match — the immediacy is the point.
   const env = process.env;
   const message = env.AGENT_MESSAGE || '';
   const sessionId = env.AGENT_SESSION_ID || '';
