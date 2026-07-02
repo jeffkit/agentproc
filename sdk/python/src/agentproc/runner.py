@@ -360,9 +360,12 @@ def classify_line(line: str) -> Dict[str, str]:
 
 
 # Per spec: session id is opaque but MUST NOT contain whitespace, control
-# characters, or colons. Valid: URL-safe chars + "-" + "."; non-empty.
-# A session line whose value fails this is ignored (previous id preserved).
-_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._~+/=-]+$")
+# characters, or colons. Valid: base64url alphabet (A-Z a-z 0-9 - _) plus
+# . ~ = ; non-empty. `/` and `+` are deliberately excluded — `/` makes the id
+# unsafe as a filename component (the SDK history helpers store <id>.jsonl,
+# and a `/`-bearing id would path-traverse). A session line whose value
+# fails this is ignored (previous id preserved).
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._~=-]+$")
 
 
 def is_valid_session_id(value: str) -> bool:

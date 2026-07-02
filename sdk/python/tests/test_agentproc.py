@@ -65,6 +65,14 @@ class TestSessionFilePath:
         with pytest.raises(ValueError, match="session_id must be non-empty"):
             session_file_path("")
 
+    def test_rejects_path_traversal_ids(self):
+        # Defense in depth: the bridge rejects `/`-bearing ids, but a handler
+        # can call session_file_path with any string. Reject path separators
+        # and `..` so a malicious id can't escape the sessions directory.
+        for bad in ["a/b", "a\\b", "..", "../../tmp/x"]:
+            with pytest.raises(ValueError, match="safe filename component"):
+                session_file_path(bad)
+
 
 class TestLoadAppendHistory:
     def test_load_empty_session_id(self):

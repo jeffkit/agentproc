@@ -44,6 +44,13 @@ describe('sessionFilePath', () => {
   test('throws on empty sessionId', () => {
     assert.throws(() => SDK.sessionFilePath(''), /sessionId must be non-empty/);
   });
+
+  test('rejects path-traversal ids (defense in depth)', () => {
+    assert.throws(() => SDK.sessionFilePath('a/b'), /safe filename component/);
+    assert.throws(() => SDK.sessionFilePath('a\\b'), /safe filename component/);
+    assert.throws(() => SDK.sessionFilePath('..'), /safe filename component/);
+    assert.throws(() => SDK.sessionFilePath('../../tmp/x'), /safe filename component/);
+  });
 });
 
 describe('loadHistory / appendHistory', () => {

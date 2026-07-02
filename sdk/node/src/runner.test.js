@@ -110,8 +110,21 @@ describe('isValidSessionId', () => {
     assert.strictEqual(isValidSessionId('ctrl\x07char'), false);
   });
 
-  test('url-safe chars allowed', () => {
-    assert.ok(isValidSessionId('a.b_c~d+e/f=g-h'));
+  test('url-safe chars allowed (no / or +)', () => {
+    // Valid set: letters, digits, . _ ~ = -
+    assert.ok(isValidSessionId('a.b_c~d=e-h'));
+  });
+
+  test('slash rejected (path-traversal vector)', () => {
+    // `/` is excluded so the id is safe as a <id>.jsonl filename component.
+    assert.strictEqual(isValidSessionId('a/b'), false);
+    assert.strictEqual(isValidSessionId('../../tmp/x'), false);
+  });
+
+  test('plus rejected', () => {
+    // `+` is excluded to keep the "URL-safe" label honest (standard base64
+    // uses + and /; base64url uses - and _).
+    assert.strictEqual(isValidSessionId('a+b'), false);
   });
 });
 

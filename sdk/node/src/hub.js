@@ -31,7 +31,9 @@
  *   showReadme(name, opts) -> Promise<string>
  *   installProfile(name, targetDir, opts) -> Promise<string>
  *
- * All network access is via global fetch() (Node 18+). Zero dependencies.
+ * All network access is via global fetch() (Node 18+) — no network-related
+ * dependencies. (The SDK package depends on `js-yaml` for profile parsing; see
+ * yaml.js.)
  */
 
 const fs = require('node:fs');

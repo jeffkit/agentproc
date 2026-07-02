@@ -299,9 +299,12 @@ function decodeJsonValue(raw) {
 }
 
 // Per spec: session id is opaque but MUST NOT contain whitespace, control
-// characters, or colons. Valid: URL-safe chars + "-" + "."; non-empty.
-// A session line whose value fails this is ignored (previous id preserved).
-const SESSION_ID_RE = /^[A-Za-z0-9._~+/=-]+$/;
+// characters, or colons. Valid: base64url alphabet (A-Z a-z 0-9 - _) plus
+// . ~ = ; non-empty. `/` and `+` are deliberately excluded — `/` makes the id
+// unsafe as a filename component (the SDK history helpers store <id>.jsonl,
+// and a `/`-bearing id would path-traverse). A session line whose value
+// fails this is ignored (previous id preserved).
+const SESSION_ID_RE = /^[A-Za-z0-9._~=-]+$/;
 function isValidSessionId(value) {
   return typeof value === 'string' && value.length > 0 && SESSION_ID_RE.test(value);
 }

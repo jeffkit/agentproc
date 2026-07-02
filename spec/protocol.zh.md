@@ -231,7 +231,7 @@ AGENT_SESSION:<opaque-string>
 - 这条规则兼容了底层 CLI 直到退出才知道自己 session ID 的常见场景（例如 `claude --output-format stream-json` 在终止的 `result` 事件里才发出 session ID）。
 - **与 `AGENT_ERROR:` 的交互** —— CLI 的终止事件经常同时携带 session ID 和错误指示（例如 `result{session_id, is_error: true}`）。当同一对话中同时出现 `AGENT_SESSION:` 行和 `AGENT_ERROR:` 行时，bridge **MUST** 仍然为下一轮保留 session ID，即便当前这一轮作为失败上报给用户。错误终止这一轮；它不会使 session 失效。已经知道 session ID 的 agent 在发出 `AGENT_ERROR:` 时 **SHOULD** 先发出 `AGENT_SESSION:` 行（或任意位置——无论如何 bridge 都按「最后一行生效」处理）。
 
-session ID 字符串是**不透明的**——bridge 原样存储和转发，MUST NOT 解释其格式。它可以是 UUID、CLI 内部句柄，或任何短的不透明 token。它 **MUST NOT** 含空白、控制字符或冒号（`:`）：冒号与 `AGENT_SESSION:` 的分隔符冲突，而空白/控制字符会破坏其在 env 变量和 argv 中的往返传递。如果 agent 输出的 `AGENT_SESSION:` 行的值违反此规则，bridge **SHOULD** 向 stderr 记录警告并**忽略该行**（保留之前已捕获的 session id；若此前未捕获过，则 session 保持为空）。合法的 id 在去除首尾空白后非空，且匹配 `^[A-Za-z0-9._~+/=-]+$`（URL 安全字符加 `-` 和 `.`）；输出其他内容的 agent 将无法往返传递。
+session ID 字符串是**不透明的**——bridge 原样存储和转发，MUST NOT 解释其格式。它可以是 UUID、CLI 内部句柄，或任何短的不透明 token。它 **MUST NOT** 含空白、控制字符或冒号（`:`）：冒号与 `AGENT_SESSION:` 的分隔符冲突，而空白/控制字符会破坏其在 env 变量和 argv 中的往返传递。如果 agent 输出的 `AGENT_SESSION:` 行的值违反此规则，bridge **SHOULD** 向 stderr 记录警告并**忽略该行**（保留之前已捕获的 session id；若此前未捕获过，则 session 保持为空）。合法的 id 在去除首尾空白后非空，且匹配 `^[A-Za-z0-9._~=-]+$`——即 URL 安全的 base64url 字母表（`A-Z`、`a-z`、`0-9`、`-`、`_`）加上 `.`、`~`、`=`。该集合**刻意排除 `/` 和 `+`**：两者都出现在标准 base64 中，但 `/` 会使 id 不能安全地用作文件名组成部分——SDK 的历史记录辅助函数把每个 session 存为 `<id>.jsonl`，含 `/` 的 id（如 `../../tmp/x`）会从 sessions 目录路径穿越出去。输出其他内容的 agent 将无法往返传递。
 
 这一行由 bridge 消费，**不会**出现在发给用户的回复中。
 

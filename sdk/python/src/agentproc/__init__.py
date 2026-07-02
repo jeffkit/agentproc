@@ -172,9 +172,17 @@ def session_file_path(session_id: str, base_dir: Optional[str] = None) -> Path:
 
     Returns the path even if the file does not yet exist. Raises ``ValueError``
     when ``session_id`` is empty — callers should guard with ``if session_id``.
+
+    Also rejects ids containing path separators or ``..``: the bridge already
+    rejects session ids with ``/`` (see ``is_valid_session_id`` in runner.py),
+    but a handler can call this with any string, and we store each session as
+    ``<id>.jsonl`` — a ``/``-bearing id would path-traverse out of the
+    sessions directory.
     """
     if not session_id:
         raise ValueError("session_id must be non-empty")
+    if "/" in session_id or "\\" in session_id or ".." in session_id:
+        raise ValueError(f"session_id is not a safe filename component: {session_id!r}")
     root = Path(base_dir) if base_dir else Path.home() / ".agentproc" / "sessions"
     root.mkdir(parents=True, exist_ok=True)
     return root / f"{session_id}.jsonl"

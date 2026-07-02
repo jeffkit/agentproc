@@ -52,6 +52,13 @@ function sessionFilePath(sessionId, sessionDir) {
   if (!sessionId) {
     throw new Error('sessionId must be non-empty');
   }
+  // Defense in depth: the bridge rejects session ids containing `/` (see
+  // SESSION_ID_RE in runner.js), but a handler can call loadHistory with any
+  // string. Reject path separators and `..` so a malicious or buggy id can't
+  // escape the sessions directory via `<id>.jsonl`.
+  if (/[\\/]/.test(sessionId) || sessionId === '.' || sessionId === '..' || sessionId.includes('..')) {
+    throw new Error(`sessionId is not a safe filename component: ${JSON.stringify(sessionId)}`);
+  }
   return path.join(sessionDir || defaultSessionDir(), `${sessionId}.jsonl`);
 }
 

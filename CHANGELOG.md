@@ -4,9 +4,26 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.1`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.6`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.5.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.5.1`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### SDK 0.5.1 — security: tighten session-id charset (path-traversal fix)
+
+The `AGENT_SESSION:` value's valid character set is tightened from `^[A-Za-z0-9._~+/=-]+$` to `^[A-Za-z0-9._~=-]+$` — `/` and `+` are removed.
+
+- **Why.** The SDK history helpers (`session_file_path` / `sessionFilePath`) store each session as `<id>.jsonl` directly under the sessions directory. The old charset allowed `/`, so a session id like `../../tmp/x` — which a malicious or buggy agent could emit as `AGENT_SESSION:../../tmp/x` — would pass bridge validation and then path-traverse out of the sessions directory when a handler called `load_history` / `loadHistory` with it. `+` was removed at the same time to make the spec's "URL-safe" label truthful (standard base64 uses `+`/`/`; base64url uses `-`/`_`).
+- **Impact on agents.** Real CLI tools emit UUIDs or base64url handles (no `/` or `+`), so conformant agents are unaffected. An agent that emitted standard-base64 session ids will now have its `AGENT_SESSION:` line ignored (with a stderr warning) and the previous session id preserved — same handling as any other invalid id.
+- **Defense in depth.** `session_file_path` / `sessionFilePath` now also reject ids containing path separators or `..`, raising `ValueError` / throwing — so even a handler that bypasses bridge validation cannot traverse.
+- **Wire protocol stays `0.1`.** The `AGENT_SESSION:` line format is unchanged; only the set of values a bridge accepts is tightened. The spec document revision is unchanged (this is a conformance tightening, not an editorial change).
+
+### SDK 0.5.1 — yaml.js retired in favour of `js-yaml`
+
+The hand-rolled YAML parser (`sdk/node/src/yaml.js`, ~126 lines) is replaced by a thin wrapper around `js-yaml`, which becomes a runtime dependency.
+
+- **Why.** A diff of the hand-rolled parser against `js-yaml` over every checked-in `profile.yaml` exposed two latent bugs: (1) inline `#` comments were not stripped, so `streaming: false  # agy's --print mode …` parsed as the string `"false  # agy's …"` and the runner's `is not False` check left streaming **on** — the `agy` profile has been silently running in streaming mode despite declaring `streaming: false`; (2) an empty `env:` value parsed as `""` instead of `null`. `js-yaml` is the ecosystem standard; maintaining a subset parser forever is not a trade worth making.
+- **Behaviour change.** `agy` now correctly runs with `streaming: false` (one-shot, full text at end), as the profile intended. No other checked-in profile's parsed shape changed.
+- **Public API unchanged.** `parseYaml` / `parseYamlSimple` keep the same signature; `cli.js` and `hub.js` are unchanged.
 
 ### Spec: protocol document 0.6 — remove `AGENT_ATTACHMENTS` (wire protocol unchanged)
 

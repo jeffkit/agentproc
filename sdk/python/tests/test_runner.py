@@ -88,8 +88,17 @@ class TestIsValidSessionId:
         assert not is_valid_session_id("ctrl\x07char")
 
     def test_url_safe_chars_allowed(self):
-        # The full valid set: letters, digits, . _ ~ + / = -
-        assert is_valid_session_id("a.b_c~d+e/f=g-h")
+        # Valid set: letters, digits, . _ ~ = -  (no / or +)
+        assert is_valid_session_id("a.b_c~d=e-h")
+
+    def test_slash_rejected(self):
+        # `/` is excluded so the id is safe as a <id>.jsonl filename component.
+        assert not is_valid_session_id("a/b")
+        assert not is_valid_session_id("../../tmp/x")
+
+    def test_plus_rejected(self):
+        # `+` is excluded to keep the "URL-safe" label honest.
+        assert not is_valid_session_id("a+b")
 
 
 class TestDecodeJsonValue:
