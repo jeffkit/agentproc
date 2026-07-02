@@ -135,7 +135,7 @@ function expandPath(p) {
  * This is intentionally narrow — we only flag high-confidence patterns to
  * avoid mis-diagnosing genuine agent errors.
  */
-function diagnoseStderrFailure(stderrText, { argv }) {
+function diagnoseStderrFailure(stderrText) {
   if (!stderrText) return '';
   const lower = stderrText.toLowerCase();
 
@@ -586,7 +586,7 @@ async function run(profileRaw, options) {
   // Uses the FULL stderr — a noisy agent can fill the 8 KB window with
   // progress junk before the real error lands at the end.
   if (!killed && !result.error && exitCode !== 0) {
-    const hint = diagnoseStderrFailure(stderrFull, { argv });
+    const hint = diagnoseStderrFailure(stderrFull);
     if (hint) {
       result.error = hint;
       if (options.onError) options.onError(hint);
