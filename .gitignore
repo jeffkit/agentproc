@@ -17,6 +17,10 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Bundled hub copy generated at publish time (npm + PyPI build)
+sdk/node/hub/
+sdk/python/src/agentproc/hub_data/
+
 # VitePress
 docs/.vitepress/dist/
 docs/.vitepress/cache/

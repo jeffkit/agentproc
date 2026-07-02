@@ -1,6 +1,6 @@
 {
   "name": "agentproc",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "AgentProc Protocol SDK + CLI for Node.js — connect any Agent CLI to a messaging platform",
   "main": "src/index.js",
   "types": "src/index.d.ts",
@@ -8,13 +8,15 @@
     "agentproc": "src/cli.js"
   },
   "scripts": {
-    "test": "node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js"
+    "test": "node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js",
+    "prepublishOnly": "node scripts/prepare-hub.js"
   },
   "keywords": ["agentproc", "agent", "bridge", "protocol", "cli", "ai", "runner"],
   "license": "MIT",
   "engines": {
     "node": ">=18"
   },
+  "files": ["src", "hub"],
   "repository": {
     "type": "git",
     "url": "https://github.com/jeffkit/agentproc.git"

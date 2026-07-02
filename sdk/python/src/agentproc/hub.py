@@ -1,8 +1,22 @@
 """Hub client — fetch and manage profile directories from the official Hub.
 
 The Hub lives at https://github.com/jeffkit/agentproc/tree/main/hub/
-Profiles are cached locally at ~/.agentproc/cache/hub/<name>/ with a
-24-hour TTL. Pass refresh=True to force re-fetch.
+
+Resolution order (so `hub run` / `hub list` work with zero network in the
+common case, and stay usable where GitHub itself is unreachable, e.g. China):
+
+  1. Bundled copy — the entire hub/ directory is shipped inside this package
+     (at ``<pkg>/hub_data/``). ``hub run`` and ``hub list`` read from it
+     directly. No network. This is the default and what most users hit.
+  2. jsDelivr CDN — for ``--refresh`` or a profile newer than the installed
+     CLI: files come from cdn.jsdelivr.net (Fastly CDN, not GitHub's
+     rate-limited API), and the directory listing from jsDelivr's data API.
+     jsDelivr is reachable in regions where raw.githubusercontent.com is not.
+
+Remote-fetched profiles are cached at ~/.agentproc/cache/hub/<name>/ with a
+24-hour TTL; the shared ``_shared/`` bridge helpers are cached alongside at
+~/.agentproc/cache/hub/_shared/ (the bridge scripts import them via a
+sibling path).
 
 Public API:
     HUB_REPO            — the github repo id ("jeffkit/agentproc")
@@ -22,7 +36,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -33,9 +46,15 @@ HUB_REPO = "jeffkit/agentproc"
 HUB_REF = "main"
 HUB_CACHE_TTL_SECS = 24 * 60 * 60  # 24 hours
 
-GITHUB_API = "https://api.github.com/repos/{repo}/contents/{path}?ref={ref}"
-GITHUB_TREES = "https://api.github.com/repos/{repo}/git/trees/{ref}?recursive=1"
-GITHUB_RAW = "https://raw.githubusercontent.com/{repo}/{ref}/{path}"
+# jsDelivr mirrors the GitHub repo on a global CDN (Fastly), reachable where
+# raw.githubusercontent.com / api.github.com are not. No token, no 60/hr limit.
+JSDELIVR_RAW = "https://cdn.jsdelivr.net/gh/{repo}@{ref}/{path}"
+JSDELIVR_DATA = "https://data.jsdelivr.com/v1/packages/gh/{repo}@{ref}"
+
+# The hub directory shipped inside this package. Defaults to <pkg>/hub_data/
+# (this file is at <pkg>/hub.py). Named ``hub_data`` rather than ``hub`` so it
+# does not shadow this module. Overridable via set_bundled_hub_dir() for tests.
+_bundled_hub_dir: Path = Path(__file__).parent / "hub_data"
 
 
 class HubError(RuntimeError):
@@ -54,20 +73,30 @@ class HubError(RuntimeError):
         self.status = status
 
 
-def _auth_headers(*, json: bool = False) -> Dict[str, str]:
-    """Build HTTP headers, adding Authorization if a token is in env.
+def set_bundled_hub_dir(p: Path) -> Path:
+    """Override the bundled hub directory (used by tests). Returns the prior."""
+    global _bundled_hub_dir
+    prev = _bundled_hub_dir
+    _bundled_hub_dir = Path(p)
+    return prev
 
-    GITHUB_TOKEN (the env var GitHub Actions injects) or GH_TOKEN (what
-    the `gh` CLI sets) raises GitHub's anonymous rate limit from ~60/hr
-    to ~5000/hr.
-    """
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-    h: Dict[str, str] = {"User-Agent": "agentproc-cli"}
-    if json:
-        h["Accept"] = "application/vnd.github+json"
-    if token:
-        h["Authorization"] = f"Bearer {token}"
-    return h
+
+def _bundled_has(name: str) -> bool:
+    return (_bundled_hub_dir / name / "profile.yaml").exists()
+
+
+def _auth_headers() -> Dict[str, str]:
+    return {"User-Agent": "agentproc-cli"}
+
+
+_NETWORK_HINT = (
+    "Could not reach the hub CDN (jsDelivr). Try:\n"
+    "  1. Re-run the command (often succeeds on retry).\n"
+    "  2. If your network requires a proxy, set HTTPS_PROXY.\n"
+    "  3. Profiles ship bundled with this CLI, so the common case needs no\n"
+    '     network. To use a local checkout instead:\n'
+    '       agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"'
+)
 
 
 def _cache_root() -> Path:
@@ -106,7 +135,7 @@ def _write_cache_meta(name: str) -> None:
 
 def _http_get_json(url: str, timeout: int = 30) -> Any:
     """GET a URL, return parsed JSON. Raises HubError on failure."""
-    req = urllib.request.Request(url, headers=_auth_headers(json=True))
+    req = urllib.request.Request(url, headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -116,24 +145,17 @@ def _http_get_json(url: str, timeout: int = 30) -> Any:
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             pass
-        raise _http_error_to_hub(e.code, body[:200], url, is_json=True) from e
-    except urllib.error.URLError as e:
-        # Network/DNS/connection-level errors (no HTTP status).
         raise HubError(
-            "could not reach GitHub while fetching hub profile",
-            status=0,
-            hint=(
-                "This is usually a transient network issue. Try:\n"
-                "  1. Re-run the command (often succeeds on retry).\n"
-                "  2. If your network requires a proxy, set HTTPS_PROXY.\n"
-                "  3. To avoid the network entirely, run against a local checkout:\n"
-                "       agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\""
-            ),
+            f"hub CDN returned HTTP {e.code}",
+            status=e.code,
+            hint=body[:200] or _NETWORK_HINT,
         ) from e
+    except urllib.error.URLError as e:
+        raise HubError("could not reach the hub CDN", status=0, hint=_NETWORK_HINT) from e
 
 
 def _http_get_text(url: str, timeout: int = 30) -> str:
-    req = urllib.request.Request(url, headers=_auth_headers(json=False))
+    req = urllib.request.Request(url, headers=_auth_headers())
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8")
@@ -143,28 +165,28 @@ def _http_get_text(url: str, timeout: int = 30) -> str:
             body = e.read().decode("utf-8", errors="replace")
         except Exception:
             pass
-        raise _http_error_to_hub(e.code, body[:200], url, is_json=False) from e
-    except urllib.error.URLError as e:
+        if e.code == 404:
+            raise HubError(
+                f"fetch failed (HTTP 404) for {url}",
+                status=404,
+                hint="Profile files should exist in the hub repo. Try `agentproc hub list`.",
+            ) from e
         raise HubError(
-            "could not reach GitHub while fetching hub profile",
-            status=0,
-            hint=(
-                "This is usually a transient network issue. Try:\n"
-                "  1. Re-run the command (often succeeds on retry).\n"
-                "  2. If your network requires a proxy, set HTTPS_PROXY.\n"
-                "  3. To avoid the network entirely, run against a local checkout:\n"
-                "       agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\""
-            ),
+            f"fetch failed (HTTP {e.code}) for {url}",
+            status=e.code,
+            hint=body[:200] or _NETWORK_HINT,
         ) from e
+    except urllib.error.URLError as e:
+        raise HubError("could not reach the hub CDN", status=0, hint=_NETWORK_HINT) from e
 
 
 def _http_get_text_optional(url: str, timeout: int = 30) -> Optional[str]:
     """Like _http_get_text, but returns None on 404 instead of raising.
 
     Used for probing optional profile files (e.g. bridge.sh only exists for
-    echo-agent) and for detecting "profile does not exist" without burning
-    a rate-limited Trees API call. Delegates to _http_get_text so callers
-    that patch _http_get_text in tests automatically cover this path.
+    echo-agent) and for detecting "profile does not exist" without a separate
+    API call. Delegates to _http_get_text so callers that patch
+    _http_get_text in tests automatically cover this path.
     """
     try:
         return _http_get_text(url, timeout=timeout)
@@ -174,54 +196,9 @@ def _http_get_text_optional(url: str, timeout: int = 30) -> Optional[str]:
         raise
 
 
-def _http_error_to_hub(status: int, body: str, url: str, *, is_json: bool) -> HubError:
-    """Translate a GitHub HTTP error into a HubError with a remediation hint."""
-    authed = bool(os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
-    if status in (403, 429):
-        if authed:
-            hint = (
-                "Your GITHUB_TOKEN is set but still rate-limited. Wait a few minutes and retry,\n"
-                "or run against a local checkout instead:\n"
-                "  agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\"\n"
-                "\n"
-                "Not sure the profile name is right? Check with: agentproc hub list"
-            )
-        else:
-            hint = (
-                "GitHub limits anonymous hub fetches to ~60/hour. To raise this to 5,000/hour:\n"
-                "  export GITHUB_TOKEN=$(gh auth token)   # if you have the GitHub CLI\n"
-                "  # or set GITHUB_TOKEN to any personal access token\n"
-                "\n"
-                "To skip the network entirely, run against a local checkout:\n"
-                "  git clone https://github.com/jeffkit/agentproc && cd agentproc\n"
-                "  agentproc --profile ./hub/<name>/profile.yaml --prompt \"hi\"\n"
-                "\n"
-                "Not sure the profile name is right? Check with: agentproc hub list"
-            )
-        return HubError(f"GitHub rate-limited the hub fetch (HTTP {status})", status=status, hint=hint)
-    if status == 404:
-        return HubError(
-            "profile not found on GitHub (HTTP 404)",
-            status=404,
-            hint="Check the profile name with `agentproc hub list`. (Typos are case-sensitive.)",
-        )
-    return HubError(
-        f"GitHub returned HTTP {status} for hub fetch",
-        status=status,
-        hint=body or "No additional detail from GitHub.",
-    )
-
-
 # ---------------------------------------------------------------------------
-# Repo tree — cached in-memory and on disk (24h TTL)
+# Repo tree (jsDelivr data API) — cached in-memory and on disk (24h TTL)
 # ---------------------------------------------------------------------------
-#
-# The GitHub Trees API is the one call that rate-limits anonymous users to
-# ~60/hr. Every CLI invocation is a fresh process, so an in-memory cache
-# alone doesn't help across calls. The disk cache (~/.agentproc/cache/hub/
-# tree.json) is what gives rate-limit relief: a normal user makes at most
-# ~1 Trees API call per day, regardless of how many `hub list` / `hub run`
-# invocations they run.
 
 _tree_cache: Optional[List[Dict[str, str]]] = None
 
@@ -242,11 +219,31 @@ def _clear_tree_cache() -> None:
             pass
 
 
+def _flatten_jsdelivr_tree(files: list, prefix: str = "") -> List[Dict[str, str]]:
+    """Flatten jsDelivr's nested {files:[{type:'directory', files:[...]}]} tree
+    into the flat [{path, type:'blob'|'tree'}] shape the rest of this module
+    expects (same shape GitHub's Trees API returned).
+    """
+    out: List[Dict[str, str]] = []
+    for e in files:
+        if not isinstance(e, dict):
+            continue
+        p = prefix + str(e.get("name", ""))
+        if e.get("type") == "directory":
+            out.append({"path": p, "type": "tree"})
+            if isinstance(e.get("files"), list):
+                out.extend(_flatten_jsdelivr_tree(e["files"], p + "/"))
+        else:
+            out.append({"path": p, "type": "blob"})
+    return out
+
+
 def _get_tree() -> List[Dict[str, str]]:
     """Return the full repo tree as a list of {path, type('blob'|'tree')}.
 
-    Serves from in-memory cache → disk cache (24h TTL) → GitHub API, writing
-    each layer as it misses. The API is the only rate-limited step.
+    Serves from in-memory cache → disk cache (24h TTL) → jsDelivr data API,
+    writing each layer as it misses. The API is not rate-limited like
+    GitHub's Trees API.
     """
     global _tree_cache
     if _tree_cache is not None:
@@ -266,14 +263,11 @@ def _get_tree() -> List[Dict[str, str]]:
         except (ValueError, OSError):
             pass  # corrupt cache file — refetch
 
-    url = GITHUB_TREES.format(repo=HUB_REPO, ref=HUB_REF)
+    url = JSDELIVR_DATA.format(repo=HUB_REPO, ref=HUB_REF)
     data = _http_get_json(url)
-    if not isinstance(data, dict) or not isinstance(data.get("tree"), list):
-        raise RuntimeError(f"unexpected tree API response: {type(data).__name__}")
-    _tree_cache = [
-        {"path": str(e.get("path", "")), "type": str(e.get("type", ""))}
-        for e in data["tree"] if isinstance(e, dict)
-    ]
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list):
+        raise RuntimeError(f"unexpected jsDelivr data API response: {type(data).__name__}")
+    _tree_cache = _flatten_jsdelivr_tree(data["files"])
 
     try:
         _cache_root().mkdir(parents=True, exist_ok=True)
@@ -290,11 +284,7 @@ def _get_tree() -> List[Dict[str, str]]:
 
 
 def _list_remote_files(subpath: str) -> List[Dict[str, str]]:
-    """List top-level entries in a hub subpath (e.g. 'hub' → all profile dirs).
-
-    Uses _get_tree(), which is cached in-memory and on disk (24h TTL) so
-    repeated calls don't re-hit the rate-limited Trees API.
-    """
+    """List top-level entries in a hub subpath (e.g. 'hub' → all profile dirs)."""
     if not subpath.endswith("/"):
         subpath = subpath + "/"
     tree = _get_tree()
@@ -321,9 +311,16 @@ def _list_remote_files(subpath: str) -> List[Dict[str, str]]:
 def _list_profile_names() -> List[str]:
     """List top-level profile names (directories directly under hub/).
 
-    Cheap: uses the disk-cached tree, so this is at most ~1 Trees API call
-    per day regardless of how many times it's called.
+    Uses the bundled copy if present (no network), else the disk-cached
+    remote tree. `_`-prefixed utility dirs (e.g. `_shared`) are excluded.
     """
+    if _bundled_hub_dir.exists():
+        names = []
+        for entry in _bundled_hub_dir.iterdir():
+            if entry.is_dir() and not entry.name.startswith("_") \
+                    and (entry / "profile.yaml").exists():
+                names.append(entry.name)
+        return sorted(names)
     tree = _get_tree()
     names: List[str] = []
     seen = set()
@@ -332,8 +329,6 @@ def _list_profile_names() -> List[str]:
         if not p.startswith("hub/"):
             continue
         seg = p[len("hub/"):].split("/")[0]
-        # Directories prefixed with `_` (e.g. `_shared`) hold bridge
-        # utilities, not profiles — exclude from listings and suggestions.
         if seg and not seg.startswith("_") and seg not in seen:
             seen.add(seg)
             names.append(seg)
@@ -353,11 +348,9 @@ def _suggest_close_name(input_name: str, candidates: List[str]) -> str:
     if not input_name or not candidates:
         return ""
     n = input_name.lower()
-    # Path 1: unique prefix match.
     prefix_matches = [c for c in candidates if c.lower().startswith(n)]
     if len(prefix_matches) == 1:
         return prefix_matches[0]
-    # Path 2: edit distance.
     threshold = 1 if len(input_name) <= 6 else (2 if len(input_name) <= 12 else 3)
     best = ""
     best_dist = float("inf")
@@ -394,10 +387,9 @@ def _edit_distance(a: str, b: str) -> int:
 
 # Every hub profile is this fixed set of files (see hub/README.md):
 #   profile.yaml (required) + bridge.py + bridge.js + README.md,
-# with echo-agent additionally shipping bridge.sh. We fetch them directly
-# via raw.githubusercontent.com (CDN, not rate-limited) so `hub run` never
-# calls the GitHub Trees API in the happy path. If a future profile adds a
-# new file type, extend this list.
+# with echo-agent additionally shipping bridge.sh. `_shared/` ships
+# stream_utils.{py,js} + README.md. If a future profile adds a new file
+# type, extend these tuples.
 _PROFILE_FILE_CANDIDATES = (
     "profile.yaml",
     "bridge.py",
@@ -405,6 +397,57 @@ _PROFILE_FILE_CANDIDATES = (
     "bridge.sh",
     "README.md",
 )
+_SHARED_FILE_CANDIDATES = ("stream_utils.py", "stream_utils.js", "README.md")
+
+# Exclude Python bytecode / editor cruft when copying bundled dirs to cache.
+_COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc")
+
+
+def _clear_dir(d: Path) -> None:
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True, exist_ok=True)
+
+
+def _copy_bundled(subname: str, dest: Path) -> bool:
+    src = _bundled_hub_dir / subname
+    if not src.exists():
+        return False
+    # copytree creates dest itself; it errors if dest already exists, so wipe
+    # first without recreating.
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest, ignore=_COPY_IGNORE)
+    return True
+
+
+def _ensure_shared_cached(*, refresh: bool, on_log) -> None:
+    """Ensure `_shared/` is in the cache root, from the bundle or jsDelivr.
+
+    Bridges do `from _shared.stream_utils import ...` with the cache root on
+    sys.path, so this must be populated whenever a profile is fetched.
+    Skipped if a fresh _shared cache already exists.
+    """
+    age = _cache_age_secs("_shared")
+    sdir = cache_dir("_shared")
+    if not refresh and age is not None and age < HUB_CACHE_TTL_SECS \
+            and (sdir / "stream_utils.py").exists():
+        return
+    if _bundled_hub_dir.exists():
+        if _copy_bundled("_shared", sdir):
+            _write_cache_meta("_shared")
+            return
+    # Remote: fetch the candidate file set via jsDelivr raw URLs.
+    _clear_dir(sdir)
+    for fname in _SHARED_FILE_CANDIDATES:
+        url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/_shared/{fname}")
+        text = _http_get_text_optional(url)
+        if text is None:
+            continue
+        (sdir / fname).write_text(text, encoding="utf-8")
+        if on_log:
+            on_log(f"  - _shared/{fname}")
+    _write_cache_meta("_shared")
 
 
 # ---------------------------------------------------------------------------
@@ -418,10 +461,9 @@ def fetch_profile(
 ) -> Path:
     """Fetch a profile directory to local cache. Returns the cache path.
 
-    Fetches files directly via raw.githubusercontent.com (CDN, not
-    rate-limited) — no GitHub Trees API call in the happy path. Only an
-    unknown profile name (profile.yaml 404) falls back to the disk-cached
-    tree to produce a "did you mean" suggestion.
+    Resolution: fresh cache → bundled copy (default, zero network) → jsDelivr
+    CDN (for refresh or a profile not in the bundle). ``_shared/`` is
+    populated alongside so the bridge scripts can import it.
 
     If a fresh cache exists (younger than HUB_CACHE_TTL_SECS) and refresh
     is False, returns immediately without network access.
@@ -438,21 +480,27 @@ def fetch_profile(
             on_log(f"using cached profile: {cached} (age {int(age)}s)")
         return cached
 
+    # 1) Bundled fast path — zero network, the default for most users.
+    if not refresh and _bundled_has(name):
+        if on_log:
+            on_log(f"using bundled profile: {name}")
+        _copy_bundled(name, cached)
+        _write_cache_meta(name)
+        _ensure_shared_cached(refresh=refresh, on_log=on_log)
+        return cached
+
     if on_log:
         if refresh:
-            on_log(f"refreshing profile '{name}' from {HUB_REPO}:{HUB_REF}...")
+            on_log(f"refreshing profile '{name}' from jsDelivr CDN...")
         else:
-            on_log(f"fetching profile '{name}' from {HUB_REPO}:{HUB_REF}...")
+            on_log(f"fetching profile '{name}' from jsDelivr CDN...")
 
-    # Probe profile.yaml via raw URL. raw.githubusercontent.com is CDN-backed
-    # and not subject to the 60/hr anonymous API limit, so this does not burn
-    # rate-limit budget.
-    probe_url = GITHUB_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/profile.yaml")
+    # 2) Remote via jsDelivr. Probe profile.yaml first.
+    probe_url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/profile.yaml")
     probe = _http_get_text_optional(probe_url)
     if probe is None:
-        # profile.yaml 404 → the name is wrong. Fall back to the (disk-cached)
-        # tree to produce a "did you mean" suggestion. This is the only path
-        # that may call the Trees API for `hub run`, and it's cached for 24h.
+        # profile.yaml 404 → wrong name. Produce a "did you mean" hint from
+        # the bundled listing (no network) or the disk-cached remote tree.
         known: List[str] = []
         try:
             known = _list_profile_names()
@@ -473,11 +521,7 @@ def fetch_profile(
         )
 
     # Clear cache, then download the candidate file set via raw URLs.
-    if cached.exists():
-        shutil.rmtree(cached)
-    cached.mkdir(parents=True, exist_ok=True)
-
-    # profile.yaml already fetched via the probe.
+    _clear_dir(cached)
     (cached / "profile.yaml").write_text(probe, encoding="utf-8")
     if on_log:
         on_log("  - profile.yaml")
@@ -485,7 +529,7 @@ def fetch_profile(
     for fname in _PROFILE_FILE_CANDIDATES:
         if fname == "profile.yaml":
             continue
-        url = GITHUB_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/{fname}")
+        url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/{fname}")
         text = _http_get_text_optional(url)
         if text is None:
             continue  # optional file not present for this profile
@@ -494,6 +538,7 @@ def fetch_profile(
             on_log(f"  - {fname}")
 
     _write_cache_meta(name)
+    _ensure_shared_cached(refresh=refresh, on_log=on_log)
     return cached
 
 
@@ -503,25 +548,54 @@ def list_profiles(
 ) -> List[Dict[str, str]]:
     """List profiles in the official hub.
 
+    Reads from the bundled copy by default (zero network). With refresh=True
+    (or no bundle) it queries jsDelivr's data API and fetches each
+    profile.yaml for metadata.
+
     Returns list of dicts: {name, description, cli, tested}.
     """
+    from .cli import parse_yaml  # local import to avoid cycle
+
+    if not refresh and _bundled_hub_dir.exists():
+        profiles: List[Dict[str, str]] = []
+        for entry in _bundled_hub_dir.iterdir():
+            if not (entry.is_dir() and not entry.name.startswith("_")):
+                continue
+            yaml_path = entry / "profile.yaml"
+            if not yaml_path.exists():
+                continue
+            try:
+                data = parse_yaml(yaml_path.read_text(encoding="utf-8"))
+                profiles.append({
+                    "name": str(data.get("name", entry.name)),
+                    "description": str(data.get("description", "")),
+                    "cli": str(data.get("cli", "")),
+                    "tested": str(data.get("tested", "unverified")),
+                })
+            except Exception as e:
+                if on_log:
+                    on_log(f"warning: could not read metadata for {entry.name}: {e}")
+                profiles.append({
+                    "name": entry.name,
+                    "description": "(failed to read metadata)",
+                    "cli": "",
+                    "tested": "unverified",
+                })
+        return profiles
+
     entries = _list_remote_files("hub")
-    profiles: List[Dict[str, str]] = []
+    profiles = []
     for entry in entries:
         if entry["type"] != "dir":
             continue
         name = entry["name"]
-        # Skip utility directories like `_shared/` — they hold shared bridge
-        # helpers, not a runnable profile (no profile.yaml).
         if name.startswith("_"):
             continue
-        # Read profile.yaml from raw URL to get metadata.
         try:
-            yaml_url = GITHUB_RAW.format(
+            yaml_url = JSDELIVR_RAW.format(
                 repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/profile.yaml"
             )
             yaml_text = _http_get_text(yaml_url)
-            from .cli import parse_yaml  # local import to avoid cycle
             data = parse_yaml(yaml_text)
             profiles.append({
                 "name": str(data.get("name", name)),
@@ -560,23 +634,23 @@ def install_profile(
     refresh: bool = False,
     on_log: Optional[Callable[[str], None]] = None,
 ) -> Path:
-    """Copy a cached profile into target_dir/<name>/.
+    """Copy a profile into target_dir/<name>/, along with `_shared/`.
 
-    Useful when the user wants to own and edit the profile locally.
+    The bridge scripts import from `_shared` via a sibling path, so it must
+    be installed alongside for the installed profile to run.
     """
     cached = fetch_profile(name, refresh=refresh, on_log=on_log)
     dest = Path(target_dir) / name
     if dest.exists():
         raise RuntimeError(f"target already exists: {dest}")
-    shutil.copytree(cached, dest)
-    # Don't copy our cache meta file.
+    shutil.copytree(cached, dest, ignore=_COPY_IGNORE)
     meta = dest / ".cache-meta.json"
     if meta.exists():
         meta.unlink()
+    shared_src = cache_dir("_shared")
+    shared_dest = Path(target_dir) / "_shared"
+    if shared_src.exists() and not shared_dest.exists():
+        shutil.copytree(shared_src, shared_dest, ignore=_COPY_IGNORE)
     if on_log:
         on_log(f"installed to: {dest}")
     return dest
-
-
-# Re-export for type checker
-from typing import Any  # noqa: E402

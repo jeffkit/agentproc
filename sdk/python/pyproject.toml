@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentproc"
-version = "0.4.1"
+version = "0.4.2"
 description = "AgentProc Protocol SDK + CLI — connect any Agent CLI to a messaging platform"
 readme = "README.md"
 license = { text = "MIT" }
@@ -22,3 +22,8 @@ Issues = "https://github.com/jeffkit/agentproc/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The bundled hub/ profiles (copied into src/agentproc/hub_data/ by
+# scripts/prepare_hub.py before build) so `hub run`/`hub list` work offline.
+[tool.setuptools.package-data]
+agentproc = ["hub_data/**/*", "hub_data/*"]

@@ -1,8 +1,73 @@
 # Changelog
 
-All notable changes to AgentProc are documented here. The protocol version and the SDK package versions are kept in lockstep.
+All notable changes to AgentProc are documented here. Three version tracks are kept independent:
+
+- **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.1`. Only changes when bytes on stdin/stdout change.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.4`. Does not change the wire contract.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.4.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec: protocol document 0.5 (wire protocol unchanged)
+
+Editorial pass on `spec/protocol.md` in response to a second deep review (protocol-level, security, cross-implementation consistency). The wire protocol remains `0.1`; no conformant agent or bridge needs to change **unless** it does something the spec previously left ambiguous (see breaking-ish items below). Highlights:
+
+- **Empty `AGENT_MESSAGE` is now defined.** Spec previously didn't say whether an empty message was legal. Now: empty + no attachment = error; empty + attachment present = legal turn (the "image-only message" case). Hub `stream_utils` updated to reject only the truly-empty case.
+- **`command`/`args` disambiguation.** `args: []` (explicit empty list) now means "do not split command" — distinct from `args` absent (which keeps the whitespace-splitting shorthand). This gives a clean escape hatch for executable paths containing spaces that take no extra argv tokens. `args: null` (YAML `args:` with no value) is treated as absent.
+- **`${VAR}` security warning in profile `env`.** Spec now explicitly states that profile `env` values are substituted against the bridge's full environment, so a profile is trusted input — do not run profiles from untrusted sources via `agentproc hub run`.
+- **Optional `env_allowlist` profile field.** A new opt-in field that shrinks the `${VAR}` trust boundary: when present, references to names not in the list expand to empty + a stderr warning instead of the variable's value. Absent (the default) keeps the current full-environment behaviour. Hub profiles SHOULD set it so `hub run` exposes only the credentials a profile actually needs.
+- **`AGENT_ERROR:` interaction with already-delivered partials.** Spec now states that partials forwarded before the error are not retracted (most platforms can't), only future partials are suppressed. Bridges MAY stop reading stdout entirely after emitting the error — the result is already captured.
+- **Session ID format enforced.** Spec restates that the `AGENT_SESSION:` value MUST NOT contain whitespace, control characters, or colons, and now defines bridge behaviour: an invalid value is ignored (the previous valid id is preserved; if none, the session stays empty) with a stderr warning. Runners implement this via a new `is_valid_session_id` / `isValidSessionId` helper.
+- **Exit-code precedence codified.** When multiple failure signals arrive, precedence is: timeout (124) > `AGENT_ERROR:` (1) > process exit code. Both runners already followed this; now the spec matches.
+- **SDK `send_error` terminality documented.** Spec notes that SDKs treat `send_error` as terminal (no further partial/reply body after), stricter than the raw protocol allows.
+
+### Runner / SDK
+
+- `sdk/{python,node}/src/runner` parse `env_allowlist`; when set, `${VAR}` references in the `env` block not on the list expand to empty + an `on_stderr`/`onStderr` warning.
+- `sdk/python/src/agentproc/runner.py` adds `RunOptions.forward_stdin` (parity with Node's `forwardStdin`).
+- `args: []` and `args: null` handling aligned between Python and Node runners.
+
+### Hub
+
+- `hub/_shared/stream_utils.{py,js}` — empty-message rejection now considers attachments; only rejects when there is no message text AND no attachment of any kind.
+
+### Tests
+
+- New `spec/conformance/cases.json` + `sdk/python/tests/test_conformance.py` + `sdk/node/src/conformance.test.js`: both reference implementations run the same stdout-classification fixture, so future spec changes can't cause silent drift.
+- New `spec/conformance/scenarios.json` + `sdk/python/tests/test_scenarios.py` + `sdk/node/src/scenarios.test.js`: both reference implementations run the same multi-line-turn fixture (last-wins, error-mid-stream, session-with-error, invalid-session, streaming vs one-shot), so interaction-level semantics can't drift either.
+- New tests for `args: []` / `args: null` behaviour, empty-message-with-attachment acceptance in the hub layer, `env_allowlist` end-to-end, invalid-session-id handling.
+
+### Breaking-ish (clarifications, not wire changes)
+
+None of these change bytes on the wire. They pin down behaviour the spec previously left ambiguous. An implementation that exploited the ambiguity (e.g. a hub that rejected empty messages unconditionally even with attachments, or a profile author relying on `args: []` being treated as absent) will see different behaviour after this revision. The reference implementations were already correct on most of these; the change is to make the spec match.
+
+### No wire protocol changes
+
+Still protocol `0.1`. This revision clarifies the document; no conformant agent or bridge needs to change.
+
+
+
+Editorial pass on `spec/protocol.md` in response to a deep review. The wire protocol remains `0.1`; no conformant agent or bridge needs to change. Highlights:
+
+- **Versioning section added.** Codifies that `AGENT_PROTOCOL_VERSION` is opaque and non-comparable. Agents MUST NOT order or range-check it; feature presence is signalled by the corresponding env var, not the version string.
+- **`AGENT_ATTACHMENTS` promoted from Draft to P0.** The SDK already parsed it; the spec now matches. Added a consistency requirement: when a bridge sets `AGENT_ATTACHMENTS` alongside `AGENT_IMAGE_URL` / `AGENT_FILE_URL`, the two MUST agree.
+- **Session-line ordering clarified.** When a CLI emits `AGENT_SESSION:` together with `AGENT_ERROR:` (the common `result{is_error}` shape from claude/cursor), bridges MUST preserve the session id for the next turn even though the current turn is reported as failed. The hub `stream_utils` module now emits `AGENT_SESSION:` before `AGENT_ERROR:` so the id is not lost.
+- **`AGENT_ERROR:` → bridge MUST treat as failed** (was SHOULD). Exit code 0 + `AGENT_ERROR:` is still a failed turn.
+- **`command` defined as argv[0], `args` as the rest.** Adds an explicit quoting rule so paths with whitespace remain expressible without a shell.
+- **Windows caveat** noted for the SIGTERM/SIGKILL timeout contract.
+
+### Hub: codex resume bug fix
+
+- `hub/codex/bridge.{py,js}` — the `codex exec resume <thread_id> <message>` path was missing `--json`, so multi-turn resume produced non-NDJSON output that the bridge could not parse. Fixed in both bridges.
+
+### Runner: cross-platform timeout + full-stderr diagnosis
+
+- `sdk/{python,node}/src/runner` — timeout now uses `terminate()` / `kill()` instead of `SIGTERM` / `SIGKILL` directly, so it works on Windows (where those signal constants are absent). Behaviour on POSIX is unchanged.
+- `sdk/{python,node}/src/runner` — post-mortem stderr diagnosis now reads the **full** captured stderr instead of the 8 KB sliding window, so a noisy agent can no longer push the real error out of the diagnostic window. The displayed/captured buffer is still bounded for memory; only diagnosis uses the unbounded copy.
+
+### Tests: hub bridge end-to-end coverage
+
+- New `sdk/python/tests/test_bridges.py` exercises every hub bridge's `parse_event` against fixture NDJSON streams, asserting the resulting `AGENT_PARTIAL:` / `AGENT_SESSION:` / `AGENT_ERROR:` output. Covers the codex resume path, the error-with-session-id case, and cursor's accumulated-dedup closure.
 
 ### Hub: two new profiles + shared bridge module
 
@@ -43,6 +108,32 @@ The previous bridges had a latent duplicate-emission bug: when a CLI streams par
 ### No protocol changes
 
 Still protocol `0.1`. The new profiles and the shared module are bridge-side concerns; agents see the same env vars and emit the same stdout protocol.
+
+## 0.4.2 — 2026-07-02
+
+Hub distribution: bundle the profiles into the packages and serve remote fetches from jsDelivr. No protocol changes — `AGENT_*` env vars, stdout sentinels, and profile schema are unchanged.
+
+### The problem
+
+`raw.githubusercontent.com` and `api.github.com` are often unreachable or slow in some regions (notably China), and every `hub run` / `hub list` depended on them. A latent bug also meant NDJSON-style profiles (claude-code, codex, cursor, …) could not actually run from a `hub run` fetch: their `bridge.py` does `from _shared.stream_utils import …`, but `fetch_profile` only cached the profile directory, not `_shared/`, so the import failed at runtime (echo-agent worked only because its bridge is self-contained).
+
+### The fix
+
+- **Profiles are now bundled inside the packages.** The entire `hub/` directory (including `_shared/`) is copied into the npm package at `<pkg>/hub/` (via `prepublishOnly`) and into the Python package at `agentproc/hub_data/` (via `scripts/prepare_hub.py`, run before `python -m build` in `publish.yml`). `hub run` and `hub list` read from the bundled copy by default — **zero network** in the common case. npm/PyPI both have fast China mirrors (npmmirror, 清华/阿里), so installing the package also installs the hub.
+- **Remote fallback switched from GitHub to jsDelivr.** For `--refresh` or a profile newer than the installed CLI, file fetches now come from `cdn.jsdelivr.net/gh/jeffkit/agentproc@main/…` (Fastly CDN, reachable where GitHub is not) and the directory listing from jsDelivr's data API (`data.jsdelivr.com`). The GitHub Trees API and `raw.githubusercontent.com` are no longer used, so the ~60/hr anonymous rate limit and `GITHUB_TOKEN` hint are gone.
+- **`_shared/` is now populated in the cache** alongside any fetched profile (from the bundle or from jsDelivr), so NDJSON profiles actually run. `install_profile` also installs `_shared/` next to the profile.
+
+### Changes
+
+- `sdk/node/src/hub.js`, `sdk/python/src/agentproc/hub.py`: bundled-copy fast path (zero network) → jsDelivr remote fallback → `_shared/` cache population; jsDelivr data API replaces the GitHub Trees API (nested-tree flattener added).
+- `sdk/node/src/yaml.js` (new): the YAML parser extracted from `cli.js` so `hub.js` can parse bundled `profile.yaml` without a circular `require('./cli.js')` (cli.js requires hub.js at the top and is only fully exported after `main()` runs — the sync bundled path hit a partial-exports bug).
+- `sdk/node/src/cli.js`: now imports `parseYaml` from `./yaml.js`; behavior unchanged.
+- `sdk/node/scripts/prepare-hub.js`, `sdk/python/scripts/prepare_hub.py` (new): copy `hub/` into the package at build/publish time, excluding `__pycache__`/`*.pyc`.
+- `sdk/node/package.json`: `prepublishOnly` script + `"files": ["src", "hub"]`.
+- `sdk/python/pyproject.toml`: `[tool.setuptools.package-data]` includes `hub_data/**`.
+- `.github/workflows/publish.yml`: PyPI build runs `prepare_hub.py` before `python -m build`.
+- `.gitignore`: ignore the generated `sdk/node/hub/` and `sdk/python/src/agentproc/hub_data/`.
+- Tests rewritten on both sides: jsDelivr data-API shape, bundled-path coverage, `_shared` population, `install` installs `_shared`.
 
 ## 0.4.1 — 2026-07-01
 

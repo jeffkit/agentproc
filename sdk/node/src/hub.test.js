@@ -2,11 +2,11 @@
 /**
  * Tests for hub.js — mock-based, no real network access.
  *
- * Run with: `node --test src/hub.test.js`
- *
- * Strategy: redirect HOME to a tmp dir for cache isolation; intercept
- * global.fetch with fixtures. Concurrency is disabled because HOME is
- * process-global state.
+ * Strategy: redirect HOME to a tmp dir for cache isolation; point the
+ * bundled-hub dir at a tmp path (non-existent by default, so tests exercise
+ * the jsDelivr remote path; populated explicitly for bundled-path tests);
+ * intercept global.fetch with fixtures. Concurrency is disabled because HOME
+ * and the bundled-dir pointer are process-global state.
  */
 
 const { test, describe, before, after, beforeEach, afterEach } = require('node:test');
@@ -18,7 +18,7 @@ const path = require('node:path');
 const hub = require('./hub.js');
 
 // ---------------------------------------------------------------------------
-// Test fixtures
+// Test fixtures: synthetic GitHub tree + file contents
 // ---------------------------------------------------------------------------
 
 const FAKE_TREE = [
@@ -41,6 +41,9 @@ const FAKE_TREE = [
 ];
 
 const FAKE_FILE_CONTENTS = {
+  'hub/_shared/stream_utils.py': 'def main_entry():\n    pass\n',
+  'hub/_shared/stream_utils.js': "'use strict';\nmodule.exports = {};\n",
+  'hub/_shared/README.md': '# shared\n',
   'hub/echo-agent/profile.yaml':
     'name: echo-agent\n' +
     'description: Minimal hello-world agent\n' +
@@ -69,11 +72,16 @@ const FAKE_FILE_CONTENTS = {
 
 let _origHome = null;
 let _tmpHome = null;
+let _origBundled = null;
 
 function setupHome() {
   _origHome = process.env.HOME;
   _tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-hub-home-'));
   process.env.HOME = _tmpHome;
+  // Disable the bundled copy by default so tests exercise the jsDelivr
+  // remote path. Bundled-path tests point this at a real tmp dir.
+  _origBundled = hub.setBundledHubDir(path.join(_tmpHome, 'no-such-bundle'));
+  hub.clearTreeCache();
 }
 
 function teardownHome() {
@@ -81,27 +89,53 @@ function teardownHome() {
   if (_tmpHome && fs.existsSync(_tmpHome)) {
     fs.rmSync(_tmpHome, { recursive: true, force: true });
   }
+  if (_origBundled !== null) hub.setBundledHubDir(_origBundled);
   _tmpHome = null;
+  _origBundled = null;
 }
 
 /**
- * Install a fake global.fetch that serves our fixtures.
+ * Convert a flat [{path, type:'blob'|'tree'}] tree (GitHub Trees API shape)
+ * into the nested {files:[{type:'directory'|'file', name, files}]} shape that
+ * jsDelivr's data API returns, so the fake fetch can serve it.
+ */
+function flatToNested(flat) {
+  const root = { files: [] };
+  const dirNodes = new Map([['', root]]);
+  // Sort so directory entries come before their children.
+  const sorted = flat.slice().sort((a, b) => a.path.localeCompare(b.path));
+  for (const e of sorted) {
+    const segs = e.path.split('/');
+    const name = segs.pop();
+    const parentPath = segs.join('/');
+    const parent = dirNodes.get(parentPath) || root;
+    if (e.type === 'tree') {
+      const node = { type: 'directory', name, files: [] };
+      parent.files.push(node);
+      dirNodes.set(e.path, node);
+    } else {
+      parent.files.push({ type: 'file', name });
+    }
+  }
+  return root.files;
+}
+
+/**
+ * Install a fake global.fetch that serves our fixtures from jsDelivr URLs.
  */
 function installFakeFetch(tree = FAKE_TREE, contents = FAKE_FILE_CONTENTS) {
   const counter = { json: 0, text: 0 };
   const orig = global.fetch;
+  const nested = flatToNested(tree);
   global.fetch = async (url, opts) => {
-    const acceptJson = opts && opts.headers && opts.headers.Accept && opts.headers.Accept.includes('json');
-    if (acceptJson && url.includes('git/trees')) {
+    if (typeof url !== 'string') url = String(url);
+    if (url.includes('data.jsdelivr.com')) {
       counter.json++;
       return {
         ok: true,
-        json: async () => ({ tree }),
-        text: async () => JSON.stringify({ tree }),
+        json: async () => ({ files: nested }),
+        text: async () => JSON.stringify({ files: nested }),
       };
-    }
-    if (acceptJson) {
-      throw new Error(`unexpected JSON URL: ${url}`);
     }
     for (const [p, content] of Object.entries(contents)) {
       if (url.endsWith(p)) {
@@ -109,20 +143,44 @@ function installFakeFetch(tree = FAKE_TREE, contents = FAKE_FILE_CONTENTS) {
         return { ok: true, text: async () => content };
       }
     }
-    // Unmatched raw URL → 404. This is now legitimate: `hub run` probes a
-    // fixed candidate file set via raw URLs, and optional files (e.g.
-    // bridge.sh on a non-echo profile) or a wrong profile name legitimately
-    // 404 without burning GitHub's rate-limited Trees API.
+    // Unmatched raw URL → 404 (optional file missing, or wrong profile name).
     return { ok: false, status: 404, text: async () => '' };
   };
   counter.restore = () => { global.fetch = orig; };
   return counter;
 }
 
+/**
+ * Materialize a tmp "bundled hub" directory with the given profile subdirs
+ * (copied from FAKE_FILE_CONTENTS) and point the module at it.
+ */
+function useBundledDir(profileNames) {
+  const dir = path.join(_tmpHome, 'bundled-hub');
+  fs.mkdirSync(dir, { recursive: true });
+  for (const name of profileNames) {
+    const prefix = `hub/${name}/`;
+    const dest = path.join(dir, name);
+    fs.mkdirSync(dest, { recursive: true });
+    for (const [p, content] of Object.entries(FAKE_FILE_CONTENTS)) {
+      if (p.startsWith(prefix)) {
+        fs.writeFileSync(path.join(dest, path.basename(p)), content, 'utf8');
+      }
+    }
+  }
+  // Always include _shared in the bundle.
+  const sharedDest = path.join(dir, '_shared');
+  fs.mkdirSync(sharedDest, { recursive: true });
+  for (const [p, content] of Object.entries(FAKE_FILE_CONTENTS)) {
+    if (p.startsWith('hub/_shared/')) {
+      fs.writeFileSync(path.join(sharedDest, path.basename(p)), content, 'utf8');
+    }
+  }
+  hub.setBundledHubDir(dir);
+  return dir;
+}
 
 // ---------------------------------------------------------------------------
 // All tests live inside this suite so we can disable concurrency.
-// (Mutating process.env.HOME is global state; parallel tests would clash.)
 // ---------------------------------------------------------------------------
 
 describe('hub', { concurrency: false }, () => {
@@ -168,9 +226,9 @@ describe('hub', { concurrency: false }, () => {
     });
   });
 
-  // ----- fetchProfile -----
+  // ----- fetchProfile (remote / jsDelivr) -----
 
-  describe('fetchProfile', () => {
+  describe('fetchProfile (remote)', () => {
     test('downloads all files', async () => {
       const counter = installFakeFetch();
       try {
@@ -187,10 +245,7 @@ describe('hub', { concurrency: false }, () => {
       }
     });
 
-    test('happy path does not call the rate-limited Trees API', async () => {
-      // `hub run` fetches profile files via raw.githubusercontent.com (CDN,
-      // not rate-limited). A known profile must not trigger any api.github.com
-      // call — that's the whole point of the rate-limit fix.
+    test('happy path does not call the jsDelivr data API', async () => {
       const counter = installFakeFetch();
       try {
         await hub.fetchProfile('echo-agent');
@@ -209,8 +264,20 @@ describe('hub', { concurrency: false }, () => {
         assert.ok(names.includes('bridge.py'));
         assert.ok(names.includes('bridge.js'));
         assert.ok(names.includes('README.md'));
-        // claude-code has no bridge.sh — the 404 is swallowed, not stored.
         assert.ok(!names.includes('bridge.sh'));
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('populates _shared in the cache root (bridge import dependency)', async () => {
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('claude-code');
+        const shared = path.join(hub.cacheRoot(), '_shared');
+        assert.ok(fs.existsSync(path.join(shared, 'stream_utils.py')),
+          '_shared/stream_utils.py not cached — bridge.py import would fail');
+        assert.ok(fs.existsSync(path.join(shared, 'stream_utils.js')));
       } finally {
         counter.restore();
       }
@@ -244,8 +311,6 @@ describe('hub', { concurrency: false }, () => {
         await hub.fetchProfile('echo-agent');
         const firstText = counter.text;
         await hub.fetchProfile('echo-agent', { refresh: true });
-        // hub run fetches files via raw URLs (CDN), not the rate-limited
-        // Trees API — so a refresh re-fetches the file set, not the tree.
         assert.ok(counter.text > firstText);
       } finally {
         counter.restore();
@@ -267,10 +332,55 @@ describe('hub', { concurrency: false }, () => {
     });
   });
 
+  // ----- fetchProfile (bundled) -----
+
+  describe('fetchProfile (bundled)', () => {
+    test('uses the bundled copy with zero network', async () => {
+      useBundledDir(['echo-agent']);
+      const counter = installFakeFetch();
+      try {
+        const dir = await hub.fetchProfile('echo-agent');
+        assert.ok(fs.existsSync(path.join(dir, 'profile.yaml')));
+        assert.ok(fs.existsSync(path.join(dir, 'bridge.py')));
+        assert.strictEqual(counter.json, 0);
+        assert.strictEqual(counter.text, 0);
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('bundled NDJSON profile also caches _shared', async () => {
+      // The pre-bundle bug: fetching claude-code did not bring _shared, so
+      // bridge.py's `from _shared.stream_utils import ...` failed at runtime.
+      useBundledDir(['claude-code']);
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('claude-code');
+        assert.ok(fs.existsSync(path.join(hub.cacheRoot(), '_shared', 'stream_utils.py')));
+        assert.strictEqual(counter.text, 0);
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('falls back to remote for a profile not in the bundle', async () => {
+      // Bundle only has echo-agent; requesting claude-code goes to jsDelivr.
+      useBundledDir(['echo-agent']);
+      const counter = installFakeFetch();
+      try {
+        const dir = await hub.fetchProfile('claude-code');
+        assert.ok(fs.existsSync(path.join(dir, 'profile.yaml')));
+        assert.ok(counter.text > 0);
+      } finally {
+        counter.restore();
+      }
+    });
+  });
+
   // ----- listProfiles -----
 
   describe('listProfiles', () => {
-    test('returns all profile dirs with metadata', async () => {
+    test('remote: returns all profile dirs with metadata', async () => {
       const counter = installFakeFetch();
       try {
         const profiles = await hub.listProfiles({ refresh: true });
@@ -285,9 +395,7 @@ describe('hub', { concurrency: false }, () => {
       }
     });
 
-    test('skips underscore-prefixed utility dirs like _shared', async () => {
-      // _shared/ has no profile.yaml; it must not appear in the listing and
-      // must not trigger a "could not read metadata" warning/fetch.
+    test('remote: skips underscore-prefixed utility dirs like _shared', async () => {
       const counter = installFakeFetch();
       try {
         const profiles = await hub.listProfiles({ refresh: true });
@@ -299,19 +407,29 @@ describe('hub', { concurrency: false }, () => {
       }
     });
 
-    test('disk-caches the tree so repeat calls skip the Trees API', async () => {
-      // The first listProfiles hits the Trees API (counter.json 0→1) and
-      // writes ~/.agentproc/cache/hub/tree.json. A second call in the same
-      // process reuses the cached tree and must not make another API call.
+    test('remote: disk-caches the tree so repeat calls skip the data API', async () => {
       const counter = installFakeFetch();
       try {
-        hub.clearTreeCache();  // reset in-memory + disk from prior tests
-        await hub.listProfiles();
+        await hub.listProfiles({ refresh: true });
         assert.strictEqual(counter.json, 1);
         const treeCache = path.join(hub.cacheRoot(), 'tree.json');
         assert.ok(fs.existsSync(treeCache), 'tree.json not written to disk');
-        await hub.listProfiles();
-        assert.strictEqual(counter.json, 1, 'second call hit the Trees API again');
+        await hub.listProfiles({ refresh: true });
+        assert.strictEqual(counter.json, 1, 'second call hit the data API again');
+      } finally {
+        counter.restore();
+      }
+    });
+
+    test('bundled: reads metadata locally with zero network', async () => {
+      useBundledDir(['echo-agent', 'claude-code']);
+      const counter = installFakeFetch();
+      try {
+        const profiles = await hub.listProfiles();
+        const names = profiles.map(p => p.name).sort();
+        assert.deepStrictEqual(names, ['claude-code', 'echo-agent']);
+        assert.strictEqual(counter.json, 0);
+        assert.strictEqual(counter.text, 0);
       } finally {
         counter.restore();
       }
@@ -363,6 +481,19 @@ describe('hub', { concurrency: false }, () => {
         assert.ok(fs.existsSync(path.join(dest, 'profile.yaml')));
         assert.ok(fs.existsSync(path.join(dest, 'bridge.py')));
         assert.ok(!fs.existsSync(path.join(dest, '.cache-meta.json')));
+      } finally {
+        counter.restore();
+        fs.rmSync(tmpTarget, { recursive: true, force: true });
+      }
+    });
+
+    test('installs _shared alongside so bridge imports resolve', async () => {
+      const counter = installFakeFetch();
+      const tmpTarget = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-install-'));
+      try {
+        await hub.installProfile('claude-code', tmpTarget, { refresh: true });
+        assert.ok(fs.existsSync(path.join(tmpTarget, '_shared', 'stream_utils.py')),
+          '_shared not installed — bridge.py import would fail');
       } finally {
         counter.restore();
         fs.rmSync(tmpTarget, { recursive: true, force: true });

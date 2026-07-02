@@ -64,6 +64,10 @@ jobs:
       - name: Install build tools
         run: pip install build twine
 
+      - name: Bundle hub profiles into the package
+        run: python scripts/prepare_hub.py
+        working-directory: sdk/python
+
       - name: Build package
         run: python -m build
         working-directory: sdk/python

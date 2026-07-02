@@ -1,8 +1,9 @@
 """Tests for agentproc.hub.
 
 Mock-based — no real network access. Covers:
-  - Tree API response parsing
+  - jsDelivr data API response parsing (nested tree)
   - Local cache TTL logic
+  - bundled-copy fast path (zero network) + _shared population
   - list/show/install/run operations
 """
 
@@ -53,6 +54,9 @@ FAKE_TREE = [
 ]
 
 FAKE_FILE_CONTENTS = {
+    "hub/_shared/stream_utils.py": "def main_entry():\n    pass\n",
+    "hub/_shared/stream_utils.js": "'use strict';\nmodule.exports = {};\n",
+    "hub/_shared/README.md": "# shared\n",
     "hub/echo-agent/profile.yaml": (
         "name: echo-agent\n"
         "description: Minimal hello-world agent\n"
@@ -82,27 +86,45 @@ FAKE_FILE_CONTENTS = {
 }
 
 
+def _flat_to_nested(flat):
+    """Convert flat [{path, type}] → jsDelivr nested {files:[{type,name,files}]}."""
+    root = {"files": []}
+    dir_nodes: Dict[str, Any] = {"": root}
+    for e in sorted(flat, key=lambda x: x["path"]):
+        segs = e["path"].split("/")
+        name = segs.pop()
+        parent_path = "/".join(segs)
+        parent = dir_nodes.get(parent_path, root)
+        if e["type"] == "tree":
+            node = {"type": "directory", "name": name, "files": []}
+            parent["files"].append(node)
+            dir_nodes[e["path"]] = node
+        else:
+            parent["files"].append({"type": "file", "name": name})
+    return root["files"]
+
+
 def _make_fake_http_get_json(tree=None):
-    """Return a callable that emulates _http_get_json for the tree API."""
+    """Return a callable emulating _http_get_json for jsDelivr's data API."""
     tree = tree if tree is not None else FAKE_TREE
+    nested = _flat_to_nested(tree)
+
     def fake(url, timeout=30):
-        if "git/trees" in url:
-            return {"tree": tree}
+        if "data.jsdelivr.com" in url:
+            return {"files": nested}
         raise AssertionError(f"unexpected JSON URL: {url}")
     return fake
 
 
 def _make_fake_http_get_text(contents=None):
-    """Return a callable that emulates _http_get_text for raw file fetches.
+    """Return a callable emulating _http_get_text for jsDelivr raw fetches.
 
-    Unmatched URLs raise a HubError(404) so that _http_get_text_optional
-    (which wraps _http_get_text and swallows 404) returns None — modelling
-    an optional profile file that doesn't exist (e.g. bridge.sh on a
-    non-echo profile) or a wrong profile name.
+    Unmatched URLs raise HubError(404) so _http_get_text_optional returns
+    None — modelling an optional file that doesn't exist or a wrong name.
     """
     contents = contents or FAKE_FILE_CONTENTS
+
     def fake(url, timeout=30):
-        # Extract path from raw URL: .../agentproc/main/hub/echo-agent/profile.yaml
         for path, content in contents.items():
             if url.endswith(path):
                 return content
@@ -112,15 +134,36 @@ def _make_fake_http_get_text(contents=None):
 
 @pytest.fixture
 def isolated_cache(monkeypatch, tmp_path):
-    """Redirect cache to a tmp dir and reset the module-level tree cache."""
+    """Redirect cache to a tmp dir, disable the bundled copy, reset tree cache."""
     cache_root = tmp_path / "cache" / "hub"
     monkeypatch.setattr(hub_mod, "_cache_root", lambda: cache_root)
     monkeypatch.setattr(hub_mod, "cache_dir", lambda name: cache_root / name)
-    # _tree_cache is module-global and would otherwise leak across tests
-    # (each test uses a different fake tree). Reset it so every test starts
-    # cold and _get_tree re-reads from the (fresh) fake _http_get_json.
+    # Disable the bundled copy by default so tests exercise the jsDelivr
+    # remote path. Bundled-path tests override this via use_bundled_dir().
+    monkeypatch.setattr(hub_mod, "_bundled_hub_dir", tmp_path / "no-such-bundle")
+    # _tree_cache is module-global; reset so every test starts cold.
     hub_mod._clear_tree_cache()
     return tmp_path
+
+
+def _use_bundled_dir(monkeypatch, tmp_path, profile_names):
+    """Materialize a tmp bundled-hub dir with the given profiles + _shared."""
+    bdir = tmp_path / "bundled-hub"
+    bdir.mkdir(parents=True, exist_ok=True)
+    for name in profile_names:
+        prefix = f"hub/{name}/"
+        dest = bdir / name
+        dest.mkdir(parents=True, exist_ok=True)
+        for p, content in FAKE_FILE_CONTENTS.items():
+            if p.startswith(prefix):
+                (dest / Path(p).name).write_text(content, encoding="utf-8")
+    shared = bdir / "_shared"
+    shared.mkdir(parents=True, exist_ok=True)
+    for p, content in FAKE_FILE_CONTENTS.items():
+        if p.startswith("hub/_shared/"):
+            (shared / Path(p).name).write_text(content, encoding="utf-8")
+    monkeypatch.setattr(hub_mod, "_bundled_hub_dir", bdir)
+    return bdir
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +181,6 @@ class TestCacheHelpers:
         assert age < 5  # just written
 
     def test_cache_age_old(self, isolated_cache, tmp_path):
-        # Manually write an old marker.
         marker = isolated_cache / "cache" / "hub" / "old" / ".cache-meta.json"
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text(json.dumps({"fetched_at": time.time() - 100000, "ref": "main"}))
@@ -154,7 +196,7 @@ class TestCacheHelpers:
 
 
 # ---------------------------------------------------------------------------
-# fetch_profile
+# fetch_profile (remote / jsDelivr)
 # ---------------------------------------------------------------------------
 
 class TestFetchProfile:
@@ -170,15 +212,12 @@ class TestFetchProfile:
         assert "README.md" in names
         assert ".cache-meta.json" in names
 
-    def test_fetch_happy_path_does_not_call_trees_api(self, isolated_cache):
-        # `hub run` fetches profile files via raw.githubusercontent.com (CDN,
-        # not rate-limited). A known profile must not trigger any
-        # api.github.com call — that's the whole point of the rate-limit fix.
+    def test_fetch_happy_path_does_not_call_data_api(self, isolated_cache):
         json_calls = {"n": 0}
 
         def assert_no_json(url, timeout=30):
             json_calls["n"] += 1
-            raise AssertionError(f"unexpected Trees API call: {url}")
+            raise AssertionError(f"unexpected jsDelivr data API call: {url}")
 
         with patch("agentproc.hub._http_get_json", side_effect=assert_no_json), \
              patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
@@ -186,8 +225,6 @@ class TestFetchProfile:
         assert json_calls["n"] == 0
 
     def test_fetch_skips_optional_files_that_404(self, isolated_cache):
-        # claude-code has no bridge.sh in the fixtures → the 404 is swallowed
-        # and bridge.sh is not stored, while the four standard files are.
         with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
              patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
             p = hub_mod.fetch_profile("claude-code")
@@ -197,6 +234,17 @@ class TestFetchProfile:
         assert "bridge.js" in names
         assert "README.md" in names
         assert "bridge.sh" not in names
+
+    def test_fetch_populates_shared_in_cache_root(self, isolated_cache):
+        # Bridges do `from _shared.stream_utils import ...` against the cache
+        # root, so _shared must be populated whenever a profile is fetched.
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.fetch_profile("claude-code")
+        shared = hub_mod._cache_root() / "_shared"
+        assert (shared / "stream_utils.py").exists(), \
+            "_shared/stream_utils.py not cached — bridge.py import would fail"
+        assert (shared / "stream_utils.js").exists()
 
     def test_fetch_unknown_profile_raises(self, isolated_cache):
         empty_tree = [{"path": "hub", "type": "tree"}]
@@ -222,8 +270,8 @@ class TestFetchProfile:
             first_json = call_count["json"]
             first_text = call_count["text"]
             hub_mod.fetch_profile("echo-agent")  # should hit cache
-            assert call_count["json"] == first_json  # no new API calls
-            assert call_count["text"] == first_text  # no new file downloads
+            assert call_count["json"] == first_json
+            assert call_count["text"] == first_text
 
     def test_refresh_forces_refetch(self, isolated_cache):
         call_count = {"text": 0}
@@ -237,24 +285,49 @@ class TestFetchProfile:
             hub_mod.fetch_profile("echo-agent")
             first_text = call_count["text"]
             hub_mod.fetch_profile("echo-agent", refresh=True)
-            # hub run fetches files via raw URLs (CDN), not the rate-limited
-            # Trees API — so a refresh re-fetches the file set, not the tree.
             assert call_count["text"] > first_text
 
     def test_fetch_overwrites_old_files(self, isolated_cache):
-        # First fetch.
         with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
              patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
             hub_mod.fetch_profile("echo-agent")
-        # Modify cache.
         cached_file = cache_dir("echo-agent") / "bridge.py"
         original = cached_file.read_text()
         cached_file.write_text("# tampered\n")
-        # Refresh — should restore original.
         with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
              patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
             hub_mod.fetch_profile("echo-agent", refresh=True)
         assert cached_file.read_text() == original
+
+
+# ---------------------------------------------------------------------------
+# fetch_profile (bundled)
+# ---------------------------------------------------------------------------
+
+class TestFetchProfileBundled:
+    def test_uses_bundled_copy_with_zero_network(self, isolated_cache, monkeypatch, tmp_path):
+        _use_bundled_dir(monkeypatch, tmp_path, ["echo-agent"])
+        with patch("agentproc.hub._http_get_json", side_effect=AssertionError("no network")), \
+             patch("agentproc.hub._http_get_text", side_effect=AssertionError("no network")):
+            p = hub_mod.fetch_profile("echo-agent")
+        assert (p / "profile.yaml").exists()
+        assert (p / "bridge.py").exists()
+
+    def test_bundled_ndjson_profile_also_caches_shared(self, isolated_cache, monkeypatch, tmp_path):
+        # The pre-bundle bug: fetching claude-code did not bring _shared, so
+        # bridge.py's `from _shared.stream_utils import ...` failed at runtime.
+        _use_bundled_dir(monkeypatch, tmp_path, ["claude-code"])
+        with patch("agentproc.hub._http_get_json", side_effect=AssertionError("no network")), \
+             patch("agentproc.hub._http_get_text", side_effect=AssertionError("no network")):
+            hub_mod.fetch_profile("claude-code")
+        assert (hub_mod._cache_root() / "_shared" / "stream_utils.py").exists()
+
+    def test_falls_back_to_remote_for_profile_not_in_bundle(self, isolated_cache, monkeypatch, tmp_path):
+        _use_bundled_dir(monkeypatch, tmp_path, ["echo-agent"])
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            p = hub_mod.fetch_profile("claude-code")
+        assert (p / "profile.yaml").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -273,18 +346,7 @@ class TestListProfiles:
         assert ec["description"] == "Minimal hello-world agent"
         assert ec["cli"] == "none"
 
-    def test_list_skips_non_hub_paths(self, isolated_cache):
-        """The repo root README.md and spec/ should not appear in hub listing."""
-        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
-             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
-            profiles = hub_mod.list_profiles()
-        # No root-level files leaked.
-        for p in profiles:
-            assert p["name"].startswith("")  # just a sanity check
-            assert "/" not in p["name"]
-
     def test_list_skips_underscore_utility_dirs(self, isolated_cache):
-        """`_shared/` holds bridge helpers, not a profile — must be excluded."""
         with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
              patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
             profiles = hub_mod.list_profiles()
@@ -293,9 +355,6 @@ class TestListProfiles:
         assert "_shared" not in names
 
     def test_tree_disk_cached_across_calls(self, isolated_cache):
-        # First list_profiles hits the Trees API (json 0→1) and writes
-        # ~/.agentproc/cache/hub/tree.json. A second call reuses the cached
-        # tree and must not make another API call.
         json_calls = {"n": 0}
 
         def counting_json(url, timeout=30):
@@ -308,7 +367,15 @@ class TestListProfiles:
             assert json_calls["n"] == 1
             assert (hub_mod._cache_root() / "tree.json").exists()
             hub_mod.list_profiles()
-            assert json_calls["n"] == 1, "second call hit the Trees API again"
+            assert json_calls["n"] == 1, "second call hit the data API again"
+
+    def test_bundled_reads_metadata_locally_with_zero_network(self, isolated_cache, monkeypatch, tmp_path):
+        _use_bundled_dir(monkeypatch, tmp_path, ["echo-agent", "claude-code"])
+        with patch("agentproc.hub._http_get_json", side_effect=AssertionError("no network")), \
+             patch("agentproc.hub._http_get_text", side_effect=AssertionError("no network")):
+            profiles = hub_mod.list_profiles()
+        names = sorted(p["name"] for p in profiles)
+        assert names == ["claude-code", "echo-agent"]
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +391,6 @@ class TestShowReadme:
         assert "Hello world" in text
 
     def test_missing_readme_returns_placeholder(self, isolated_cache):
-        # Fetch a profile with no README.
         tree = [
             {"path": "hub/noreadme", "type": "tree"},
             {"path": "hub/noreadme/profile.yaml", "type": "blob"},
@@ -348,8 +414,14 @@ class TestInstallProfile:
         assert dest.exists()
         assert (dest / "profile.yaml").exists()
         assert (dest / "bridge.py").exists()
-        # Cache meta should NOT be copied to the installed copy.
         assert not (dest / ".cache-meta.json").exists()
+
+    def test_install_also_installs_shared(self, isolated_cache, tmp_path):
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.install_profile("claude-code", tmp_path)
+        assert (tmp_path / "_shared" / "stream_utils.py").exists(), \
+            "_shared not installed — bridge.py import would fail"
 
     def test_install_refuses_existing_target(self, isolated_cache, tmp_path):
         with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \

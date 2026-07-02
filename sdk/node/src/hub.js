@@ -3,8 +3,23 @@
  * Hub client — fetch and manage profile directories from the official Hub.
  *
  * The Hub lives at https://github.com/jeffkit/agentproc/tree/main/hub/
- * Profiles are cached locally at ~/.agentproc/cache/hub/<name>/ with a
- * 24-hour TTL. Pass refresh=true to force re-fetch.
+ *
+ * Resolution order (so `hub run` / `hub list` work with zero network in the
+ * common case, and stay usable where GitHub itself is unreachable, e.g. China):
+ *
+ *   1. Bundled copy — the entire hub/ directory is shipped inside this npm
+ *      package (at <pkg>/hub/). `hub run` and `hub list` read from it
+ *      directly. No network. This is the default and what most users hit.
+ *   2. jsDelivr CDN — for `--refresh` or a profile newer than the installed
+ *      CLI: files come from cdn.jsdelivr.net (Fastly CDN, not GitHub's
+ *      rate-limited API), and the directory listing from jsDelivr's data
+ *      API. jsDelivr is reachable in regions where raw.githubusercontent.com
+ *      is not.
+ *
+ * Remote-fetched profiles are cached at ~/.agentproc/cache/hub/<name>/ with a
+ * 24-hour TTL; the shared `_shared/` bridge helpers are cached alongside at
+ * ~/.agentproc/cache/hub/_shared/ (the bridge scripts import them via a
+ * sibling path).
  *
  * Public API:
  *   HUB_REPO            — 'jeffkit/agentproc'
@@ -27,11 +42,39 @@ const HUB_REPO = 'jeffkit/agentproc';
 const HUB_REF = 'main';
 const HUB_CACHE_TTL_SECS = 24 * 60 * 60;  // 24 hours
 
-const GITHUB_API = (subpath) =>
-  `https://api.github.com/repos/${HUB_REPO}/contents/${subpath}?ref=${HUB_REF}`;
-const GITHUB_TREES = `https://api.github.com/repos/${HUB_REPO}/git/trees/${HUB_REF}?recursive=1`;
-const GITHUB_RAW = (p) =>
-  `https://raw.githubusercontent.com/${HUB_REPO}/${HUB_REF}/${p}`;
+// jsDelivr mirrors the GitHub repo on a global CDN (Fastly), reachable where
+// raw.githubusercontent.com / api.github.com are not. No token, no 60/hr limit.
+const JSDELIVR_RAW = (p) =>
+  `https://cdn.jsdelivr.net/gh/${HUB_REPO}@${HUB_REF}/${p}`;
+const JSDELIVR_DATA =
+  `https://data.jsdelivr.com/v1/packages/gh/${HUB_REPO}@${HUB_REF}`;
+
+// The hub directory shipped inside this npm package. Defaults to <pkg>/hub/
+// (this file is at <pkg>/src/hub.js). Overridable via setBundledHubDir() for
+// tests.
+let _bundledHubDir = path.resolve(__dirname, '..', 'hub');
+function bundledHubDir() { return _bundledHubDir; }
+function setBundledHubDir(p) { _bundledHubDir = p; }
+function bundledHas(name) {
+  return fs.existsSync(path.join(_bundledHubDir, name, 'profile.yaml'));
+}
+
+// Every hub profile is this fixed set of files (see hub/README.md):
+//   profile.yaml (required) + bridge.py + bridge.js + README.md,
+// with echo-agent additionally shipping bridge.sh. `_shared/` ships
+// stream_utils.{py,js} + README.md. If a future profile adds a new file
+// type, extend these lists.
+const PROFILE_FILE_CANDIDATES = [
+  'profile.yaml', 'bridge.py', 'bridge.js', 'bridge.sh', 'README.md',
+];
+const SHARED_FILE_CANDIDATES = ['stream_utils.py', 'stream_utils.js', 'README.md'];
+
+// Exclude Python bytecode / editor cruft when copying bundled dirs to cache.
+const COPY_FILTER = (src) => {
+  const base = path.basename(src);
+  if (base === '__pycache__' || base.endsWith('.pyc')) return false;
+  return true;
+};
 
 // ---------------------------------------------------------------------------
 // Cache helpers
@@ -89,86 +132,41 @@ class HubError extends Error {
   }
 }
 
-function authHeaders({ json = false } = {}) {
-  // Optional: an explicit token raises GitHub's anonymous rate limit from
-  // 60 req/hour to 5,000. We accept either GITHUB_TOKEN (the env var GitHub
-  // Actions injects) or GH_TOKEN (what `gh` CLI users typically have).
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || '';
-  const h = { 'User-Agent': 'agentproc-cli' };
-  if (json) h.Accept = 'application/vnd.github+json';
-  if (token) h.Authorization = `Bearer ${token}`;
-  return h;
+function httpHeaders() {
+  return { 'User-Agent': 'agentproc-cli' };
 }
+
+const NETWORK_HINT = [
+  'Could not reach the hub CDN (jsDelivr). Try:',
+  '  1. Re-run the command (often succeeds on retry).',
+  '  2. If your network requires a proxy, set HTTPS_PROXY.',
+  '  3. Profiles ship bundled with this CLI, so the common case needs no',
+  '     network. To use a local checkout instead:',
+  '       agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
+].join('\n');
 
 async function httpGetJson(url) {
   let r;
   try {
-    r = await fetch(url, { headers: authHeaders({ json: true }) });
+    r = await fetch(url, { headers: httpHeaders() });
   } catch (e) {
-    throw new HubError(
-      `could not reach GitHub while fetching hub profile`,
-      {
-        status: 0,
-        cause: e,
-        hint: [
-          'This is usually a transient network issue. Try:',
-          '  1. Re-run the command (often succeeds on retry).',
-          '  2. If your network requires a proxy, set HTTPS_PROXY.',
-          '  3. To avoid the network entirely, run against a local checkout:',
-          '       agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
-        ].join('\n'),
-      }
-    );
+    throw new HubError(`could not reach the hub CDN`, {
+      status: 0, cause: e, hint: NETWORK_HINT,
+    });
   }
   if (!r.ok) {
     const text = await r.text().catch(() => '');
-    if (r.status === 403 || r.status === 429) {
-      const authed = !!(process.env.GITHUB_TOKEN || process.env.GH_TOKEN);
-      throw new HubError(
-        `GitHub rate-limited the hub fetch (HTTP ${r.status})`,
-        {
-          status: r.status,
-          hint: authed
-            ? [
-              'Your GITHUB_TOKEN is set but still rate-limited. Wait a few minutes and retry,',
-              'or run against a local checkout instead:',
-              '  agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
-              '',
-              `Not sure the profile name is right? Check with: agentproc hub list`,
-            ].join('\n')
-            : [
-              'GitHub limits anonymous hub fetches to ~60/hour. To raise this to 5,000/hour:',
-              '  export GITHUB_TOKEN=$(gh auth token)   # if you have the GitHub CLI',
-              '  # or set GITHUB_TOKEN to any personal access token',
-              '',
-              'To skip the network entirely, run against a local checkout:',
-              '  git clone https://github.com/jeffkit/agentproc && cd agentproc',
-              '  agentproc --profile ./hub/<name>/profile.yaml --prompt "hi"',
-              '',
-              `Not sure the profile name is right? Check with: agentproc hub list`,
-            ].join('\n'),
-        }
-      );
-    }
-    if (r.status === 404) {
-      throw new HubError(`profile not found on GitHub (HTTP 404)`, {
-        status: 404,
-        hint: 'Check the profile name with `agentproc hub list`. (Typos are case-sensitive.)',
-      });
-    }
-    throw new HubError(`GitHub returned HTTP ${r.status} for hub fetch`, {
+    throw new HubError(`hub CDN returned HTTP ${r.status}`, {
       status: r.status,
-      hint: text.slice(0, 200) || 'No additional detail from GitHub.',
+      hint: text.slice(0, 200) || NETWORK_HINT,
     });
   }
   return r.json();
 }
 
 async function httpGetText(url) {
-  const r = await fetch(url, { headers: authHeaders({ json: false }) });
+  const r = await fetch(url, { headers: httpHeaders() });
   if (!r.ok) {
-    // raw.githubusercontent.com is essentially unrate-limited; a failure
-    // here is more likely a genuine 404 (profile file missing) than 403.
     throw new HubError(`fetch failed (HTTP ${r.status}) for ${url}`, {
       status: r.status,
       hint: 'Profile files should exist in the hub repo. Try `agentproc hub list` to verify.',
@@ -180,10 +178,10 @@ async function httpGetText(url) {
 /**
  * Like httpGetText, but returns null on 404 instead of throwing. Used for
  * probing optional profile files (e.g. bridge.sh only exists for echo-agent)
- * and for detecting "profile does not exist" without burning an API call.
+ * and for detecting "profile does not exist" without a separate API call.
  */
 async function httpGetTextOptional(url) {
-  const r = await fetch(url, { headers: authHeaders({ json: false }) });
+  const r = await fetch(url, { headers: httpHeaders() });
   if (r.status === 404) return null;
   if (!r.ok) {
     throw new HubError(`fetch failed (HTTP ${r.status}) for ${url}`, {
@@ -194,18 +192,10 @@ async function httpGetTextOptional(url) {
   return r.text();
 }
 
-/**
- * Fetch the entire repo tree (1 API call, returns all paths under hub/).
- * Cached two ways: in-memory for the lifetime of the process, and on disk
- * at ~/.agentproc/cache/hub/tree.json with the same 24h TTL as profiles.
- *
- * The disk cache is the important one for rate-limit relief: the GitHub
- * Trees API is the single call that rate-limits anonymous users to ~60/hr,
- * and every CLI invocation is a fresh process (so the in-memory cache never
- * survives). With the disk cache, a normal user makes at most ~1 Trees API
- * call per day regardless of how many `hub list` / `hub run` they run.
- * @returns {Promise<Array<{path: string, type: 'blob'|'tree'}>>}
- */
+// ---------------------------------------------------------------------------
+// Repo tree (jsDelivr data API) — cached in-memory and on disk (24h TTL)
+// ---------------------------------------------------------------------------
+
 let _treeCache = null;
 
 function treeCachePath() {
@@ -220,6 +210,33 @@ function clearTreeCache() {
   }
 }
 
+/**
+ * Flatten jsDelivr's nested {files:[{type:'directory',files:[...]}]} tree
+ * into the flat [{path, type:'blob'|'tree'}] shape the rest of this module
+ * already expects (same shape GitHub's Trees API returned).
+ */
+function flattenJsdelivrTree(files, prefix = '') {
+  const out = [];
+  for (const e of files) {
+    if (!e || typeof e !== 'object') continue;
+    const p = prefix + String(e.name || '');
+    if (e.type === 'directory') {
+      out.push({ path: p, type: 'tree' });
+      if (Array.isArray(e.files)) out.push(...flattenJsdelivrTree(e.files, p + '/'));
+    } else {
+      out.push({ path: p, type: 'blob' });
+    }
+  }
+  return out;
+}
+
+/**
+ * Fetch the entire repo tree from jsDelivr's data API (1 call, not
+ * rate-limited like GitHub's Trees API). Cached in-memory and on disk at
+ * ~/.agentproc/cache/hub/tree.json (24h TTL) so repeat `hub list --refresh`
+ * calls don't re-hit the network.
+ * @returns {Promise<Array<{path: string, type: 'blob'|'tree'}>>}
+ */
 async function getTree() {
   if (_treeCache) return _treeCache;
 
@@ -238,16 +255,11 @@ async function getTree() {
     } catch { /* corrupt cache file — refetch */ }
   }
 
-  const data = await httpGetJson(GITHUB_TREES);
-  if (!data || !Array.isArray(data.tree)) {
-    throw new Error('unexpected tree API response');
+  const data = await httpGetJson(JSDELIVR_DATA);
+  if (!data || !Array.isArray(data.files)) {
+    throw new Error('unexpected jsDelivr data API response');
   }
-  _treeCache = data.tree
-    .filter((e) => e && typeof e === 'object')
-    .map((e) => ({
-      path: String(e.path || ''),
-      type: String(e.type || ''),  // 'blob' or 'tree'
-    }));
+  _treeCache = flattenJsdelivrTree(data.files);
 
   fs.mkdirSync(cacheRoot(), { recursive: true });
   try {
@@ -263,6 +275,7 @@ async function getTree() {
 
 /**
  * List top-level entries under a hub subpath (e.g. 'hub/' → all profile dirs).
+ * Uses the disk-cached tree.
  * @param {string} subpath  e.g. 'hub' or 'hub/claude-code'
  * @returns {Promise<Array<{name: string, type: 'file'|'dir'}>>}
  */
@@ -276,7 +289,6 @@ async function listRemoteFiles(subpath) {
     const name = e.path.slice(subpath.length).split('/')[0];
     if (!name || seen.has(name)) continue;
     seen.add(name);
-    // Determine type: is there a path equal to subpath+name with type 'tree'?
     const isDir = tree.some((t) => t.path === subpath + name && t.type === 'tree');
     out.push({
       name,
@@ -289,19 +301,24 @@ async function listRemoteFiles(subpath) {
 }
 
 /**
- * List top-level profile names (the directories directly under hub/).
- * Cheap: uses the same disk-cached tree as getTree(), so calling this
- * after listRemoteFiles does not cost an extra API request.
+ * List top-level profile names (directories directly under hub/), excluding
+ * `_`-prefixed utility dirs like `_shared`. Uses the bundled copy if present
+ * (no network), else the disk-cached remote tree.
  * @returns {Promise<string[]>}
  */
 async function listProfileNames() {
+  if (fs.existsSync(_bundledHubDir)) {
+    return fs.readdirSync(_bundledHubDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_') &&
+        fs.existsSync(path.join(_bundledHubDir, e.name, 'profile.yaml')))
+      .map((e) => e.name)
+      .sort();
+  }
   const tree = await getTree();
   const seen = new Set();
   for (const e of tree) {
     if (!e.path.startsWith('hub/')) continue;
     const seg = e.path.slice('hub/'.length).split('/')[0];
-    // Directories prefixed with `_` (e.g. `_shared`) hold bridge utilities,
-    // not profiles — exclude them from listings and "did you mean" suggestions.
     if (seg && !seg.startsWith('_') && !seen.has(seg)) seen.add(seg);
   }
   return [...seen].sort();
@@ -309,29 +326,15 @@ async function listProfileNames() {
 
 /**
  * Lightweight "did you mean" hint using edit distance + prefix matching.
- * Returns the best candidate name, or '' if none is close enough.
- *
- * Two paths to a match:
- *   1. Prefix match — `claude` matches `claude-code`, `echo` matches
- *      `echo-agent`. This is the common typo pattern (user forgot a suffix).
- *      Only accepts an unambiguous prefix — if multiple candidates share
- *      the prefix, none is returned (better no suggestion than a wrong one).
- *   2. Edit distance — tolerate ~1/3 of the input length in edits. Catches
- *      transpositions (`calude`) and small typos (`coudex` → `codex`).
  */
 function suggestCloseName(input, candidates) {
   if (!input || !candidates || candidates.length === 0) return '';
 
   const n = input.toLowerCase();
 
-  // Path 1: unique prefix match.
   const prefixMatches = candidates.filter(c => c.toLowerCase().startsWith(n));
   if (prefixMatches.length === 1) return prefixMatches[0];
 
-  // Path 2: edit distance. Threshold scales with input length:
-  //   - short (≤6): allow 1 edit (typos in `agy`, `codex`)
-  //   - medium (7-12): allow 2 edits (transpositions in `calude-code`)
-  //   - long (>12): allow 3 edits
   const threshold = input.length <= 6 ? 1 : input.length <= 12 ? 2 : 3;
   let best = '';
   let bestDist = Infinity;
@@ -355,9 +358,9 @@ function editDistance(a, b) {
     for (let j = 1; j <= n; j++) {
       const cost = a[i - 1] === b[j - 1] ? 0 : 1;
       curr[j] = Math.min(
-        prev[j] + 1,        // deletion
-        curr[j - 1] + 1,    // insertion
-        prev[j - 1] + cost  // substitution
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + cost
       );
     }
     for (let j = 0; j <= n; j++) prev[j] = curr[j];
@@ -366,26 +369,62 @@ function editDistance(a, b) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Cache population — from the bundled copy or from jsDelivr
 // ---------------------------------------------------------------------------
 
-// Every hub profile is this fixed set of files (see hub/README.md):
-//   profile.yaml (required) + bridge.py + bridge.js + README.md,
-// with echo-agent additionally shipping bridge.sh. We fetch them directly
-// via raw.githubusercontent.com (CDN, not rate-limited) so `hub run` never
-// calls the GitHub Trees API in the happy path. If a future profile adds a
-// new file type, extend this list.
-const PROFILE_FILE_CANDIDATES = [
-  'profile.yaml', 'bridge.py', 'bridge.js', 'bridge.sh', 'README.md',
-];
+function clearDir(dir) {
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(dir, { recursive: true });
+}
+
+function copyBundledDir(subname, destDir) {
+  const src = path.join(_bundledHubDir, subname);
+  if (!fs.existsSync(src)) return false;
+  clearDir(destDir);
+  fs.cpSync(src, destDir, { recursive: true, filter: COPY_FILTER });
+  return true;
+}
+
+/**
+ * Ensure `_shared/` is present in the cache root, copying from the bundle or
+ * fetching from jsDelivr. Bridges do `from _shared.stream_utils import ...`
+ * with the cache root on sys.path, so this must be populated whenever a
+ * profile is fetched. Skipped if a fresh _shared cache already exists.
+ */
+async function ensureSharedCached({ refresh, onLog }) {
+  const age = cacheAgeSecs('_shared');
+  const sdir = cacheDir('_shared');
+  if (!refresh && age !== null && age < HUB_CACHE_TTL_SECS &&
+      fs.existsSync(path.join(sdir, 'stream_utils.py'))) {
+    return;
+  }
+  if (fs.existsSync(_bundledHubDir)) {
+    if (copyBundledDir('_shared', sdir)) {
+      writeCacheMeta('_shared');
+      return;
+    }
+  }
+  // Remote: fetch the candidate file set via jsDelivr raw URLs.
+  clearDir(sdir);
+  for (const fname of SHARED_FILE_CANDIDATES) {
+    const text = await httpGetTextOptional(JSDELIVR_RAW(`hub/_shared/${fname}`));
+    if (text === null) continue;
+    fs.writeFileSync(path.join(sdir, fname), text, 'utf8');
+    if (onLog) onLog(`  - _shared/${fname}`);
+  }
+  writeCacheMeta('_shared');
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 /**
  * Fetch a profile directory to local cache. Returns the cache path.
  *
- * Fetches files directly via raw.githubusercontent.com (CDN, not
- * rate-limited) — no GitHub Trees API call in the happy path. Only an
- * unknown profile name (profile.yaml 404) falls back to the disk-cached
- * tree to produce a "did you mean" suggestion.
+ * Resolution: fresh cache → bundled copy (default, zero network) → jsDelivr
+ * CDN (for --refresh or a profile not in the bundle). `_shared/` is populated
+ * alongside so the bridge scripts can import it.
  *
  * @param {string} name
  * @param {{refresh?: boolean, onLog?: function(string): void}} [opts]
@@ -394,7 +433,6 @@ const PROFILE_FILE_CANDIDATES = [
 async function fetchProfile(name, opts = {}) {
   const { refresh = false, onLog = null } = opts;
 
-  // On refresh, clear the tree cache so we see newly-added profiles.
   if (refresh) clearTreeCache();
 
   const age = cacheAgeSecs(name);
@@ -406,74 +444,100 @@ async function fetchProfile(name, opts = {}) {
     return dir;
   }
 
-  if (onLog) {
-    if (refresh) {
-      onLog(`refreshing profile '${name}' from ${HUB_REPO}:${HUB_REF}...`);
-    } else {
-      onLog(`fetching profile '${name}' from ${HUB_REPO}:${HUB_REF}...`);
-    }
+  // 1) Bundled fast path — zero network, the default for most users.
+  if (!refresh && bundledHas(name)) {
+    if (onLog) onLog(`using bundled profile: ${name}`);
+    copyBundledDir(name, dir);
+    writeCacheMeta(name);
+    await ensureSharedCached({ refresh, onLog });
+    return dir;
   }
 
-  // Probe profile.yaml via raw URL. raw.githubusercontent.com is CDN-backed
-  // and not subject to the 60/hr anonymous API limit, so this does not burn
-  // rate-limit budget.
-  const probe = await httpGetTextOptional(GITHUB_RAW(`hub/${name}/profile.yaml`));
+  if (onLog) {
+    if (refresh) onLog(`refreshing profile '${name}' from jsDelivr CDN...`);
+    else onLog(`fetching profile '${name}' from jsDelivr CDN...`);
+  }
+
+  // 2) Remote via jsDelivr. Probe profile.yaml first.
+  const probe = await httpGetTextOptional(JSDELIVR_RAW(`hub/${name}/profile.yaml`));
   if (probe === null) {
-    // profile.yaml 404 → the name is wrong. Fall back to the (disk-cached)
-    // tree to produce a "did you mean" suggestion. This is the only path
-    // that may call the Trees API for `hub run`, and it's cached for 24h.
+    // profile.yaml 404 → wrong name. Produce a "did you mean" hint from the
+    // bundled listing (no network) or the disk-cached remote tree.
     const known = await listProfileNames();
     const suggestion = suggestCloseName(name, known);
     const hint = suggestion
       ? [`Did you mean \`${suggestion}\`?`, '', 'Available profiles:', ...known.map(n => `  - ${n}`)].join('\n')
       : ['Available profiles:', ...known.map(n => `  - ${n}`)].join('\n');
-    throw new HubError(`profile '${name}' not found in hub`, {
-      status: 404,
-      hint,
-    });
+    throw new HubError(`profile '${name}' not found in hub`, { status: 404, hint });
   }
 
-  // Clear cache, then download the candidate file set via raw URLs.
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-  fs.mkdirSync(dir, { recursive: true });
-
-  // profile.yaml already fetched via the probe.
+  clearDir(dir);
   fs.writeFileSync(path.join(dir, 'profile.yaml'), probe, 'utf8');
   if (onLog) onLog(`  - profile.yaml`);
 
   for (const fname of PROFILE_FILE_CANDIDATES) {
     if (fname === 'profile.yaml') continue;
-    const text = await httpGetTextOptional(GITHUB_RAW(`hub/${name}/${fname}`));
-    if (text === null) continue;  // optional file not present for this profile
+    const text = await httpGetTextOptional(JSDELIVR_RAW(`hub/${name}/${fname}`));
+    if (text === null) continue;
     fs.writeFileSync(path.join(dir, fname), text, 'utf8');
     if (onLog) onLog(`  - ${fname}`);
   }
 
   writeCacheMeta(name);
+  await ensureSharedCached({ refresh, onLog });
   return dir;
 }
 
 /**
  * List profiles in the official hub.
  *
+ * Reads from the bundled copy by default (zero network). With refresh=true
+ * (or no bundle) it queries jsDelivr's data API and fetches each profile.yaml
+ * for metadata.
+ *
  * @param {{refresh?: boolean, onLog?: function(string): void}} [opts]
  * @returns {Promise<Array<{name: string, description: string, cli: string, tested: string}>>}
  */
 async function listProfiles(opts = {}) {
-  const { onLog = null } = opts;
+  const { refresh = false, onLog = null } = opts;
+  const { parseYaml } = require('./yaml.js');
+
+  if (!refresh && fs.existsSync(_bundledHubDir)) {
+    const entries = fs.readdirSync(_bundledHubDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith('_'));
+    const profiles = [];
+    for (const entry of entries) {
+      const yamlPath = path.join(_bundledHubDir, entry.name, 'profile.yaml');
+      if (!fs.existsSync(yamlPath)) continue;
+      try {
+        const data = parseYaml(fs.readFileSync(yamlPath, 'utf8'));
+        profiles.push({
+          name: String(data.name || entry.name),
+          description: String(data.description || ''),
+          cli: String(data.cli || ''),
+          tested: String(data.tested || 'unverified'),
+        });
+      } catch (e) {
+        if (onLog) onLog(`warning: could not read metadata for ${entry.name}: ${e.message}`);
+        profiles.push({
+          name: entry.name,
+          description: '(failed to read metadata)',
+          cli: '',
+          tested: 'unverified',
+        });
+      }
+    }
+    return profiles;
+  }
+
   const entries = await listRemoteFiles('hub');
   const profiles = [];
   for (const entry of entries) {
     if (entry.type !== 'dir') continue;
     const name = entry.name;
-    // Skip utility directories like `_shared/` — they hold shared bridge
-    // helpers, not a runnable profile (no profile.yaml).
     if (name.startsWith('_')) continue;
     try {
-      const yamlText = await httpGetText(GITHUB_RAW(`hub/${name}/profile.yaml`));
-      const { parseYaml } = require('./cli.js');
+      const yamlText = await httpGetText(JSDELIVR_RAW(`hub/${name}/profile.yaml`));
       const data = parseYaml(yamlText);
       profiles.push({
         name: String(data.name || name),
@@ -511,7 +575,8 @@ async function showReadme(name, opts = {}) {
 }
 
 /**
- * Copy a cached profile into targetDir/<name>/.
+ * Copy a profile into targetDir/<name>/, along with `_shared/` (the bridge
+ * scripts import from it via a sibling path).
  *
  * @param {string} name
  * @param {string} targetDir
@@ -524,10 +589,17 @@ async function installProfile(name, targetDir, opts = {}) {
   if (fs.existsSync(dest)) {
     throw new Error(`target already exists: ${dest}`);
   }
-  fs.cpSync(cached, dest, { recursive: true });
+  fs.cpSync(cached, dest, { recursive: true, filter: COPY_FILTER });
   // Drop our cache meta file from the installed copy.
   const meta = path.join(dest, '.cache-meta.json');
   if (fs.existsSync(meta)) fs.unlinkSync(meta);
+  // Also install `_shared/` so the bridge's `from _shared.stream_utils import`
+  // resolves against targetDir.
+  const sharedSrc = cacheDir('_shared');
+  const sharedDest = path.join(targetDir, '_shared');
+  if (fs.existsSync(sharedSrc) && !fs.existsSync(sharedDest)) {
+    fs.cpSync(sharedSrc, sharedDest, { recursive: true, filter: COPY_FILTER });
+  }
   if (opts.onLog) opts.onLog(`installed to: ${dest}`);
   return dest;
 }
@@ -541,6 +613,7 @@ module.exports = {
   cacheDir,
   cacheAgeSecs,
   clearTreeCache,
+  setBundledHubDir,
   fetchProfile,
   listProfiles,
   showReadme,
