@@ -92,6 +92,8 @@ class RunOptions:
     from_user: str = ""
     streaming: Optional[bool] = None
     extra_env: Dict[str, str] = field(default_factory=dict)
+    image_url: str = ""
+    file_url: str = ""
     cwd: Optional[str] = None
     profile_dir: Optional[str] = None
     timeout_secs: Optional[int] = None
@@ -426,6 +428,13 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     env["AGENT_FROM_USER"] = options.from_user
     env["AGENT_STREAMING"] = "1" if streaming else "0"
     env["AGENT_PROTOCOL_VERSION"] = PROTOCOL_VERSION
+    # Single-attachment passthrough. Only inject when non-empty so that an
+    # unset variable stays unset (matches the spec's "set when present" rule;
+    # an agent can distinguish "no image" from "image URL is empty string").
+    if options.image_url:
+        env["AGENT_IMAGE_URL"] = options.image_url
+    if options.file_url:
+        env["AGENT_FILE_URL"] = options.file_url
 
     # forward_stdin overrides profile.stdin: when True, always write the
     # message to stdin (used by the CLI's --stdin flag). When None/False,

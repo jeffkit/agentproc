@@ -17,6 +17,8 @@
  *   --session <id>            Previous session id for multi-turn
  *   --session-name <name>     Human-readable session name
  *   --from <user>             Sender identifier
+ *   --image-url <url>         Image attachment URL (sets AGENT_IMAGE_URL)
+ *   --file-url <url>          File attachment URL (sets AGENT_FILE_URL)
  *   --cwd <path>              Override profile.cwd
  *   --env KEY=VALUE           Extra env var (repeatable)
  *   --timeout <secs>          Override profile.timeout_secs
@@ -88,6 +90,8 @@ function parseArgs(argv) {
       case '--session': opts.session = next(); break;
       case '--session-name': opts.sessionName = next(); break;
       case '--from': opts.from = next(); break;
+      case '--image-url': opts.imageUrl = next(); break;
+      case '--file-url': opts.fileUrl = next(); break;
       case '--cwd': opts.cwd = next(); break;
       case '--env':
         opts.env.push(next());
@@ -148,6 +152,7 @@ async function runHubSubcommand(args) {
     const takesValue =
       a === '--prompt' || a === '-p' ||
       a === '--session' || a === '--session-name' || a === '--from' ||
+      a === '--image-url' || a === '--file-url' ||
       a === '--cwd' || a === '--env' || a === '--timeout';
     if (takesValue) {
       runnerArgs.push(a === '-p' ? '--prompt' : a);
@@ -266,6 +271,9 @@ Hub run options (same as the regular --profile runner):
   --cwd <path>                 Override profile.cwd (default: current dir)
   --env KEY=VALUE              Extra env var (repeatable)
   --session <id>               Previous session id for multi-turn
+  --from <user>                Sender identifier
+  --image-url <url>            Image attachment URL (sets AGENT_IMAGE_URL)
+  --file-url <url>             File attachment URL (sets AGENT_FILE_URL)
   --timeout <secs>             Override profile.timeout_secs
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
@@ -334,6 +342,8 @@ async function runAgent(profilePath, opts) {
       cwd: opts.cwd,
       profileDir,
       extraEnv,
+      imageUrl: opts.imageUrl || '',
+      fileUrl: opts.fileUrl || '',
       timeoutSecs: opts.timeout,
     });
     process.stdout.write(r.reply);
@@ -353,6 +363,8 @@ async function runAgent(profilePath, opts) {
     cwd: opts.cwd,
     profileDir,
     extraEnv,
+    imageUrl: opts.imageUrl || '',
+    fileUrl: opts.fileUrl || '',
     timeoutSecs: opts.timeout,
     onPartial: (t) => { if (verbose) process.stderr.write(`AGENT_PARTIAL:${JSON.stringify(t)}\n`); },
     onSession: (id) => { if (verbose) process.stderr.write(`AGENT_SESSION:${id}\n`); },
@@ -404,6 +416,10 @@ Session:
   --session <id>            Previous session id (multi-turn)
   --session-name <name>     Human-readable session name (default: "default")
   --from <user>             Sender identifier
+
+Attachments:
+  --image-url <url>         Image attachment URL (sets AGENT_IMAGE_URL)
+  --file-url <url>          File attachment URL (sets AGENT_FILE_URL)
 
 Execution:
   --cwd <path>              Override profile.cwd (relative paths resolve

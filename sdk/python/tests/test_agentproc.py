@@ -5,8 +5,8 @@ Run with: `pytest -q`
 Strategy: the SDK calls sys.exit() at the end of create_profile, which is
 awkward to test in-process. So we split into two groups:
 
-  1. Pure-function tests (session_file_path, load_history, append_history,
-     _parse_attachments) — call in-process, assert on return values.
+  1. Pure-function tests (session_file_path, load_history, append_history) —
+     call in-process, assert on return values.
 
   2. create_profile end-to-end tests — drive create_profile in a subprocess
      with AGENT_* env vars set, capture stdout / exit code.
@@ -26,10 +26,8 @@ import pytest
 import agentproc
 from agentproc import (
     AgentResult,
-    Attachment,
     HistoryEntry,
     ProtocolError,
-    _parse_attachments,
     append_history,
     create_profile,
     load_history,
@@ -109,41 +107,12 @@ class TestLoadAppendHistory:
 
 
 class TestParseAttachments:
-    def test_empty(self):
-        assert _parse_attachments("") == []
-
-    def test_malformed_json(self):
-        assert _parse_attachments("not json") == []
-    def test_non_array(self):
-        assert _parse_attachments('{"type":"image"}') == []
-
-    def test_valid_array(self):
-        raw = json.dumps([
-            {"type": "image", "url": "https://x/a.png", "name": "a.png"},
-            {"type": "file", "url": "https://y/b.pdf"},
-        ])
-        out = _parse_attachments(raw)
-        assert len(out) == 2
-        assert out[0].type == "image"
-        assert out[0].url == "https://x/a.png"
-        assert out[0].name == "a.png"
-        assert out[1].type == "file"
-        assert out[1].name == ""
-
-    def test_skips_entries_missing_fields(self):
-        raw = json.dumps([
-            {"type": "image"},               # missing url
-            {"url": "https://x"},            # missing type
-            {"type": "file", "url": "https://y"},  # ok
-        ])
-        out = _parse_attachments(raw)
-        assert len(out) == 1
-        assert out[0].type == "file"
-
-    def test_skips_non_dict_entries(self):
-        raw = json.dumps(["not a dict", 42, {"type": "image", "url": "https://z"}])
-        out = _parse_attachments(raw)
-        assert len(out) == 1
+    def test_removed_from_sdk(self):
+        # AGENT_ATTACHMENTS was removed in SDK 0.5.0; ensure the public surface
+        # no longer exposes Attachment / _parse_attachments.
+        assert not hasattr(agentproc, "Attachment")
+        assert not hasattr(agentproc, "_parse_attachments")
+        assert not hasattr(agentproc, "parseAttachments")
 
 
 def test_protocol_version_is_0_1():
@@ -253,10 +222,6 @@ class TestCreateProfileE2E:
                 "AGENT_STREAMING": "0",
                 "AGENT_IMAGE_URL": "https://x/img.png",
                 "AGENT_FILE_URL": "https://y/file.pdf",
-                "AGENT_ATTACHMENTS": json.dumps([
-                    {"type": "image", "url": "https://z/1.png"},
-                    {"type": "file", "url": "https://z/2.pdf", "name": "2.pdf"},
-                ]),
             },
             """
             import json
@@ -268,7 +233,6 @@ class TestCreateProfileE2E:
                 "stream": ctx.streaming,
                 "img": ctx.image_url,
                 "file": ctx.file_url,
-                "atts": [{"type": a.type, "url": a.url, "name": a.name} for a in ctx.attachments],
             })
             """,
         )
@@ -281,24 +245,6 @@ class TestCreateProfileE2E:
         assert parsed["stream"] is False
         assert parsed["img"] == "https://x/img.png"
         assert parsed["file"] == "https://y/file.pdf"
-        assert len(parsed["atts"]) == 2
-        assert parsed["atts"][0]["type"] == "image"
-        assert parsed["atts"][1]["name"] == "2.pdf"
-
-    def test_malformed_attachments(self):
-        out, err, code = _run_agent(
-            {
-                "AGENT_MESSAGE": "hi",
-                "AGENT_STREAMING": "0",
-                "AGENT_ATTACHMENTS": "not json",
-            },
-            """
-            import json
-            return json.dumps({"atts": [a.type for a in ctx.attachments]})
-            """,
-        )
-        assert code == 0
-        assert json.loads(out.strip())["atts"] == []
 
     def test_default_protocol_version(self):
         out, err, code = _run_agent(

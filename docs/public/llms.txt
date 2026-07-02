@@ -17,7 +17,6 @@ AgentProc defines how a **bridge** (the platform adapter for WeChat / Slack / Te
 | `AGENT_STREAMING` | `"1"` = streaming mode, `"0"` = one-shot |
 | `AGENT_PROTOCOL_VERSION` | Protocol version string (currently `"0.1"`) |
 | `AGENT_IMAGE_URL` / `AGENT_FILE_URL` | Single-attachment URLs (P0) |
-| `AGENT_ATTACHMENTS` | JSON array of `{type,url,name}` (draft, multi-attachment) |
 
 **Output (stdout, sentinel-prefixed lines):**
 

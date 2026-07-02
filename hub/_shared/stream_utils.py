@@ -52,15 +52,11 @@ def _has_any_attachment(env) -> bool:
     """True if the bridge signalled any attachment on this turn.
 
     AGENT_MESSAGE may legitimately be empty when the user sent an image-only
-    or file-only message. We accept any of the three attachment signals.
-    AGENT_ATTACHMENTS "[]" counts as no attachment (empty array per spec).
+    or file-only message. We accept either single-attachment signal.
     """
     if env.get("AGENT_IMAGE_URL", "").strip():
         return True
     if env.get("AGENT_FILE_URL", "").strip():
-        return True
-    raw = env.get("AGENT_ATTACHMENTS", "").strip()
-    if raw and raw != "[]":
         return True
     return False
 
@@ -99,7 +95,7 @@ def run_bridge(
     # (e.g. an image-only message). Only reject when there is truly nothing
     # to do — no text AND no attachment of any kind.
     if not message and not _has_any_attachment(env):
-        emit_error("AGENT_MESSAGE env var is required (or set AGENT_ATTACHMENTS / AGENT_IMAGE_URL / AGENT_FILE_URL)")
+        emit_error("AGENT_MESSAGE env var is required (or set AGENT_IMAGE_URL / AGENT_FILE_URL)")
         return 1
 
     args = build_args(message, session_id, env)

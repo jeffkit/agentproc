@@ -153,9 +153,7 @@ function buildResumeArgs(sessionDir, message) {
 }
 
 function hasAttachment() {
-  if (env('AGENT_IMAGE_URL') || env('AGENT_FILE_URL')) return true;
-  const raw = env('AGENT_ATTACHMENTS');
-  return !!raw && raw !== '[]';
+  return !!(env('AGENT_IMAGE_URL') || env('AGENT_FILE_URL'));
 }
 
 // ---------------------------------------------------------------------------
@@ -166,7 +164,7 @@ function main() {
   const message = process.env.AGENT_MESSAGE || '';
   if (!message && !hasAttachment()) {
     emitError(
-      'AGENT_MESSAGE env var is required (or set AGENT_ATTACHMENTS / ' +
+      'AGENT_MESSAGE env var is required (or set ' +
         'AGENT_IMAGE_URL / AGENT_FILE_URL)'
     );
     return 1;

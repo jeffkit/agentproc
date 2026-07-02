@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.1` (the string injected as `AGENT_PROTOCOL_VERSION`)
-**Document revision:** `0.5`
+**Document revision:** `0.6`
 **Status:** Draft
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `AGENT_PROTOCOL_VERSION`.
@@ -14,7 +14,7 @@ The wire protocol and this document are versioned **independently**. The wire ve
 
 - If a bridge injects a version string the agent does not recognise, the agent SHOULD behave as if the variable were unset (best-effort, fail-soft).
 - If an agent expects a version string the bridge does not inject, the agent MUST fall back to its built-in default.
-- The string is not a feature-detection mechanism: there is no negotiation, no capability advertisement, and no ordering. Agents that need to know whether a specific feature (e.g. multi-attachment) is present MUST inspect the relevant env var directly (e.g. `AGENT_ATTACHMENTS` non-empty), not the version string.
+- The string is not a feature-detection mechanism: there is no negotiation, no capability advertisement, and no ordering. Agents that need to know whether a specific feature (e.g. an image attachment) is present MUST inspect the relevant env var directly (e.g. `AGENT_IMAGE_URL` non-empty), not the version string.
 
 The rationale is that any comparable version invites implementers to gate behaviour on `>= 0.2`, which breaks the moment a bridge ships without bumping the number. Treating the string as opaque keeps the contract honest: presence of a feature is signalled by presence of the env var that carries it.
 
@@ -191,32 +191,19 @@ The bridge injects the following variables before spawning the process. The agen
 - `AGENT_MESSAGE` is non-empty
 - `AGENT_IMAGE_URL` is non-empty
 - `AGENT_FILE_URL` is non-empty
-- `AGENT_ATTACHMENTS` is set and is not `[]`
 
 If none of the above holds, the turn is empty and the bridge / agent SHOULD surface an error rather than proceed. This rule accommodates the common "image-only message" case where a user posts a screenshot with no accompanying text.
 
 ### Attachment variables (P0)
 
-Attachments are conveyed by two layers of variables. Bridges MUST set the layer that matches the message; agents SHOULD read the richer layer when present and fall back to the simpler one when not.
-
-**Single-attachment convenience variables.**
+Attachments are conveyed by single-attachment convenience variables. Bridges set the variable that matches the message; agents read whichever is non-empty.
 
 | Variable | Description |
 |----------|-------------|
 | `AGENT_IMAGE_URL` | Image attachment URL. Set when the message contains exactly one image. |
 | `AGENT_FILE_URL` | File attachment URL. Set when the message contains exactly one file. |
 
-**Multi-attachment variable.**
-
-| Variable | Description |
-|------|-------------|
-| `AGENT_ATTACHMENTS` | JSON array of `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`. Set when the message carries zero or more attachments. An empty array is equivalent to "no attachments". |
-
-**Agent reading order.** When `AGENT_ATTACHMENTS` is non-empty, agents SHOULD consume it and ignore the single-attachment vars. When `AGENT_ATTACHMENTS` is unset (empty string), agents SHOULD fall back to `AGENT_IMAGE_URL` / `AGENT_FILE_URL`.
-
-**Bridge consistency requirement.** When a bridge sets `AGENT_ATTACHMENTS` **and** one of the single-attachment vars in the same turn, the two MUST agree: the URL in the single-attachment var MUST equal the `url` of the corresponding entry in `AGENT_ATTACHMENTS`. A bridge that cannot keep them consistent MUST set only one layer.
-
-**Type taxonomy.** The `type` field is one of `image`, `file`, `audio`, `video`. Bridges MAY emit additional types; agents that do not recognise a type SHOULD ignore that entry rather than fail.
+A multi-attachment variable (`AGENT_ATTACHMENTS`, a JSON array) was drafted but never wired through the runner — no conformant bridge emitted it, and JSON-in-env broke the bash `echo` agent promise. It has been removed. When real bridges need to carry several attachments, the spec will reintroduce a delivery mechanism that a hand-written shell agent can still consume.
 
 Custom variables declared in the profile's `env` block are also injected.
 

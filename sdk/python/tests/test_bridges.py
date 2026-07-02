@@ -491,14 +491,19 @@ class TestEmptyMessageHandling:
         assert rc == 0
         assert not any(l.startswith("AGENT_ERROR:") for l in captured)
 
-    def test_empty_message_with_attachments_array_is_accepted(self):
+    def test_empty_message_with_attachments_array_is_rejected(self):
+        # AGENT_ATTACHMENTS was removed in 0.5.0; the bridge no longer treats it
+        # as an attachment signal, so an empty message with only AGENT_ATTACHMENTS
+        # set is now rejected (would-be image-only messages must use
+        # AGENT_IMAGE_URL / AGENT_FILE_URL).
         rc, captured = self._run_with_env({
             "AGENT_MESSAGE": "",
             "AGENT_SESSION_ID": "",
             "AGENT_STREAMING": "1",
             "AGENT_ATTACHMENTS": '[{"type":"image","url":"https://example.com/x.png"}]',
         })
-        assert rc == 0
+        assert rc == 1
+        assert any(l.startswith("AGENT_ERROR:") for l in captured)
 
     def test_empty_message_with_empty_attachments_array_is_rejected(self):
         rc, captured = self._run_with_env({

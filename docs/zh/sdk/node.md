@@ -22,7 +22,6 @@ createProfile(async (ctx) => {
   // ctx.protocolVersion  — bridge 实现的协议版本（如 "0.1"）
   // ctx.imageUrl         — 图片附件 URL（无则为空）
   // ctx.fileUrl          — 文件附件 URL（无则为空）
-  // ctx.attachments      — 多附件数组（草案，见下文）
   const reply = await myLLM(ctx.message);
   return { response: reply };
 });
@@ -99,31 +98,6 @@ createProfile(async (ctx) => {
 
 两种方式都会让 bridge 视本次进程为失败（即使后续退出码为 0 也会被覆盖）。
 
-## 多附件（草案）
-
-如果 bridge 注入了 `AGENT_ATTACHMENTS`（一个 JSON 数组），SDK 会解析为 `Attachment` 数组：
-
-```js
-createProfile(async (ctx) => {
-  for (const att of ctx.attachments) {
-    // att.type — "image" | "file" | "audio" | "video"
-    // att.url  — bridge 提供的可获取 URL
-    // att.name — 可选的文件名或显示名
-    console.error(`收到 ${att.type}: ${att.url}`);
-  }
-
-  if (ctx.attachments.length > 0) {
-    const first = ctx.attachments[0];
-    return { response: `收到 ${first.type}：${first.name || first.url}` };
-  }
-  return { response: '（无附件）' };
-});
-```
-
-::: warning 草案状态
-`AGENT_ATTACHMENTS` 当前是草案。bridge 可能同时设置单附件变量（`AGENT_IMAGE_URL` / `AGENT_FILE_URL`）和此项。agent 应优先使用 `ctx.attachments`，为空时再回退到 `ctx.imageUrl` / `ctx.fileUrl`。
-:::
-
 ## 协议版本
 
 `ctx.protocolVersion` 反映 bridge 实现的协议版本（来自 `AGENT_PROTOCOL_VERSION`）。当 bridge 未注入时，SDK 回退到自身的 `PROTOCOL_VERSION`（当前 `"0.1"`）。
@@ -175,10 +149,10 @@ AGENT_PROTOCOL_VERSION="0.1" \
 node ./agent.js
 ```
 
-要模拟多附件场景：
+要模拟单附件场景：
 
 ```bash
 AGENT_MESSAGE="看看这张图" \
-AGENT_ATTACHMENTS='[{"type":"image","url":"https://example.com/a.png","name":"a.png"}]' \
+AGENT_IMAGE_URL="https://example.com/a.png" \
 node ./agent.js
 ```

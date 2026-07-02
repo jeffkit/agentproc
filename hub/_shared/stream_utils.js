@@ -45,8 +45,6 @@ function emitSession(sessionId) {
 function hasAnyAttachment(env) {
   if ((env.AGENT_IMAGE_URL || '').trim()) return true;
   if ((env.AGENT_FILE_URL || '').trim()) return true;
-  const raw = (env.AGENT_ATTACHMENTS || '').trim();
-  if (raw && raw !== '[]') return true;
   return false;
 }
 
@@ -60,7 +58,7 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
   // (e.g. an image-only message). Only reject when there is truly nothing
   // to do — no text AND no attachment of any kind.
   if (!message && !hasAnyAttachment(env)) {
-    emitError('AGENT_MESSAGE env var is required (or set AGENT_ATTACHMENTS / AGENT_IMAGE_URL / AGENT_FILE_URL)');
+    emitError('AGENT_MESSAGE env var is required (or set AGENT_IMAGE_URL / AGENT_FILE_URL)');
     process.exit(1);
   }
 

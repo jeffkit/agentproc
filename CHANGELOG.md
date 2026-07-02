@@ -3,10 +3,25 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.1`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.4`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.4.0`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.6`. Does not change the wire contract.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.5.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec: protocol document 0.6 — remove `AGENT_ATTACHMENTS` (wire protocol unchanged)
+
+The multi-attachment variable `AGENT_ATTACHMENTS` (a JSON array in an env var) is **removed** from the spec and the SDKs. The single-attachment convenience variables `AGENT_IMAGE_URL` / `AGENT_FILE_URL` stay (P0).
+
+- **Why removed.** No conformant bridge ever emitted `AGENT_ATTACHMENTS` — the runner/CLI had no code path to inject it, so it never reached an agent end-to-end. It was spec-only plus an SDK parse helper. Worse, putting JSON in an env var broke the bash `echo "You said: $AGENT_MESSAGE"` promise that is central to the protocol's design. Keeping a P0 field that nothing exercises, and that contradicts the no-shell-agent premise, was worse than cutting it.
+- **What stays.** `AGENT_IMAGE_URL` / `AGENT_FILE_URL` are plain strings, bash-friendly, and cover the realistic single-image / single-file case for a messaging bridge. They are also now wired through the runner (see SDK 0.5.0 below), so they actually work end-to-end via `agentproc` / `agentproc hub run`.
+- **When it comes back.** Real bridges that need to carry several attachments will reintroduce a delivery mechanism a hand-written shell agent can still consume — not JSON-in-env.
+- **Wire protocol stays `0.1`.** The runner never emitted `AGENT_ATTACHMENTS`, so removing it changes no bytes on the wire. No conformant agent or bridge that relied on the runner needs to change; only code that read `ctx.attachments` / `parseAttachments` (SDK consumers parsing the draft var themselves) is affected — see breaking SDK changes below.
+
+### SDK 0.5.0
+
+- **Removed** `Attachment` / `parseAttachments` / `_parse_attachments` and the `ctx.attachments` field from both SDKs. `ctx.image_url` / `ctx.file_url` (`ctx.imageUrl` / `ctx.fileUrl` on Node) remain. This is a breaking API change for SDK consumers who read `ctx.attachments`; migrate to `ctx.image_url` / `ctx.file_url`.
+- **Added runner passthrough for single-attachment vars.** `RunOptions` gains `image_url` / `file_url` (Node: `options.imageUrl` / `options.fileUrl`); the runner injects them as `AGENT_IMAGE_URL` / `AGENT_FILE_URL` on the spawned agent's environment when non-empty. The CLI gains `--image-url` / `--file-url`. This closes the gap that made attachments "not actually supported" via the runner/CLI.
+- Hub `stream_utils` (both languages) and the `recursive` bridge no longer look at `AGENT_ATTACHMENTS`; the "empty `AGENT_MESSAGE` is legal when an attachment is present" rule now keys only off `AGENT_IMAGE_URL` / `AGENT_FILE_URL`.
 
 ### Spec: protocol document 0.5 (wire protocol unchanged)
 

@@ -70,9 +70,8 @@ Two layers. Bridges set the layer matching the message; agents prefer the richer
 |----------|-------------|
 | `AGENT_IMAGE_URL` | Image URL (single-attachment convenience var) |
 | `AGENT_FILE_URL` | File URL (single-attachment convenience var) |
-| `AGENT_ATTACHMENTS` | JSON array of `{type, url, name}` (`type` = `image\|file\|audio\|video`). Set for zero or more attachments. Empty array = no attachments. |
 
-When a bridge sets `AGENT_ATTACHMENTS` **and** a single-attachment var, the two MUST agree (same URL). Agents consume `AGENT_ATTACHMENTS` when non-empty, else fall back to the single-attachment vars.
+Agents read whichever single-attachment var is non-empty. (A multi-attachment `AGENT_ATTACHMENTS` JSON var was drafted but removed in doc 0.6 — it was never wired through the runner and JSON-in-env broke the bash `echo` agent promise.)
 
 ### stdin
 

@@ -213,6 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--session", default="")
     p.add_argument("--session-name", default="default")
     p.add_argument("--from", dest="from_user", default="")
+    p.add_argument("--image-url", dest="image_url", default="")
+    p.add_argument("--file-url", dest="file_url", default="")
     p.add_argument("--cwd")
     p.add_argument("--env", action="append", default=[])
     p.add_argument("--timeout", type=int)
@@ -259,6 +261,10 @@ Session:
   --session <id>            Previous session id (multi-turn)
   --session-name <name>     Human-readable session name (default: "default")
   --from <user>             Sender identifier
+
+Attachments:
+  --image-url <url>         Image attachment URL (sets AGENT_IMAGE_URL)
+  --file-url <url>          File attachment URL (sets AGENT_FILE_URL)
 
 Execution:
   --cwd <path>              Override profile.cwd (relative paths resolve
@@ -331,7 +337,7 @@ def _run_hub_subcommand(args: List[str]) -> int:
     positional: List[str] = []
     runner_args: List[str] = []
     takes_value = {"--prompt", "-p", "--session", "--session-name", "--from",
-                   "--cwd", "--env", "--timeout"}
+                   "--image-url", "--file-url", "--cwd", "--env", "--timeout"}
     boolean_flags = {"--no-stream", "--verbose", "--quiet", "--raw", "--stdin"}
     i = 0
     while i < len(rest):
@@ -438,6 +444,9 @@ Hub run options (same as the regular --profile runner):
   --cwd <path>                 Override profile.cwd (default: current dir)
   --env KEY=VALUE              Extra env var (repeatable)
   --session <id>               Previous session id for multi-turn
+  --from <user>                Sender identifier
+  --image-url <url>            Image attachment URL (sets AGENT_IMAGE_URL)
+  --file-url <url>             File attachment URL (sets AGENT_FILE_URL)
   --timeout <secs>             Override profile.timeout_secs
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
@@ -504,6 +513,8 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
                 cwd=opts.cwd,
                 profile_dir=profile_dir,
                 extra_env=extra_env,
+                image_url=opts.image_url,
+                file_url=opts.file_url,
                 timeout_secs=opts.timeout,
             ),
         )
@@ -525,6 +536,8 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
             cwd=opts.cwd,
             profile_dir=profile_dir,
             extra_env=extra_env,
+            image_url=opts.image_url,
+            file_url=opts.file_url,
             timeout_secs=opts.timeout,
             on_partial=lambda t: verbose and sys.stderr.write(
                 f"AGENT_PARTIAL:{json.dumps(t, ensure_ascii=False)}\n"

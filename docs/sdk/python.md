@@ -20,7 +20,6 @@ async def handler(ctx):
     # ctx.protocol_version  — protocol version string (e.g. "0.1")
     # ctx.image_url         — image attachment URL (empty if none)
     # ctx.file_url          — file attachment URL (empty if none)
-    # ctx.attachments       — parsed AGENT_ATTACHMENTS (draft, [] if unset)
     reply = await my_llm(ctx.message)
     return reply
 
@@ -87,26 +86,6 @@ create_profile(handler)
 ```
 
 `ProtocolError` is the exception form; the SDK serializes its message as an `AGENT_ERROR:` line and exits non-zero. Any other uncaught exception is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
-
-## Multi-attachment input (draft)
-
-When the bridge sets `AGENT_ATTACHMENTS`, the SDK parses it into `ctx.attachments`:
-
-```python
-from agentproc import create_profile, Attachment
-
-async def handler(ctx):
-    # Prefer the multi-attachment list when present, fall back to single vars
-    images = [a for a in ctx.attachments if a.type == "image"] or (
-        [Attachment(type="image", url=ctx.image_url)] if ctx.image_url else []
-    )
-    reply = await my_vision_llm(ctx.message, [a.url for a in images])
-    return reply
-
-create_profile(handler)
-```
-
-`ctx.attachments` is empty when `AGENT_ATTACHMENTS` is unset or unparseable. The single-attachment vars (`ctx.image_url`, `ctx.file_url`) remain the P0 path.
 
 ## Conversation history
 

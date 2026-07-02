@@ -177,17 +177,14 @@ def build_resume_args(session_dir: str, message: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _has_attachment() -> bool:
-    if _env("AGENT_IMAGE_URL") or _env("AGENT_FILE_URL"):
-        return True
-    raw = _env("AGENT_ATTACHMENTS")
-    return bool(raw) and raw != "[]"
+    return bool(_env("AGENT_IMAGE_URL") or _env("AGENT_FILE_URL"))
 
 
 def main() -> int:
     message = os.environ.get("AGENT_MESSAGE", "")
     if not message and not _has_attachment():
         emit_error(
-            "AGENT_MESSAGE env var is required (or set AGENT_ATTACHMENTS / "
+            "AGENT_MESSAGE env var is required (or set "
             "AGENT_IMAGE_URL / AGENT_FILE_URL)"
         )
         return 1

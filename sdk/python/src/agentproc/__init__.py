@@ -7,7 +7,7 @@ instead of manually reading env vars and formatting stdout.
 Protocol contract (spec/protocol.md, wire protocol 0.1):
   Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,
                      AGENT_FROM_USER, AGENT_STREAMING, AGENT_PROTOCOL_VERSION,
-                     AGENT_IMAGE_URL, AGENT_FILE_URL, AGENT_ATTACHMENTS (draft)
+                     AGENT_IMAGE_URL, AGENT_FILE_URL
   Output — stdout (sentinel-prefixed lines):
              AGENT_SESSION:<opaque-id>     — declare session id (last wins)
              AGENT_PARTIAL:<json-string>   — streaming chunk
@@ -40,7 +40,6 @@ from typing import Awaitable, Callable, List, Optional, Sequence, Union
 __all__ = [
     "AgentContext",
     "AgentResult",
-    "Attachment",
     "HistoryEntry",
     "ProtocolError",
     "create_profile",
@@ -90,20 +89,6 @@ class ProtocolError(Exception):
 
 
 @dataclass
-class Attachment:
-    """A single attachment on the user message (draft, multi-attachment)."""
-
-    type: str
-    """Kind of attachment: ``image`` | ``file`` | ``audio`` | ``video``."""
-
-    url: str
-    """URL the bridge has made available for fetching the attachment."""
-
-    name: str = ""
-    """Optional filename or display name."""
-
-
-@dataclass
 class AgentContext:
     """Input context passed to the agent handler."""
 
@@ -130,9 +115,6 @@ class AgentContext:
 
     file_url: str
     """File attachment URL (AGENT_FILE_URL). Empty if no file."""
-
-    attachments: List[Attachment]
-    """Parsed attachments from AGENT_ATTACHMENTS (draft). Empty list when unset."""
 
     async def send_partial(self, text: str) -> None:
         """Send a streaming chunk to the user immediately.
@@ -248,28 +230,6 @@ def append_history(
 # Env parsing helpers
 # ---------------------------------------------------------------------------
 
-def _parse_attachments(raw: str) -> List[Attachment]:
-    """Parse AGENT_ATTACHMENTS JSON. Returns [] on parse failure."""
-    if not raw:
-        return []
-    try:
-        items = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(items, list):
-        return []
-    out: List[Attachment] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        t = str(it.get("type", ""))
-        u = str(it.get("url", ""))
-        if not t or not u:
-            continue
-        out.append(Attachment(type=t, url=u, name=str(it.get("name", "") or "")))
-    return out
-
-
 def _context_from_env() -> AgentContext:
     return AgentContext(
         message=os.environ.get("AGENT_MESSAGE", ""),
@@ -280,7 +240,6 @@ def _context_from_env() -> AgentContext:
         protocol_version=os.environ.get("AGENT_PROTOCOL_VERSION", PROTOCOL_VERSION),
         image_url=os.environ.get("AGENT_IMAGE_URL", ""),
         file_url=os.environ.get("AGENT_FILE_URL", ""),
-        attachments=_parse_attachments(os.environ.get("AGENT_ATTACHMENTS", "")),
     )
 
 

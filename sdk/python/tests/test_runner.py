@@ -522,6 +522,36 @@ class TestRunEndToEnd:
         # Bridge logged a warning about the blocked reference.
         assert any("SECRET_KEY" in w and "allowlist" in w for w in warnings)
 
+    def test_attachment_passthrough_reaches_agent(self, agent_script):
+        """RunOptions.image_url / file_url are injected as AGENT_IMAGE_URL /
+        AGENT_FILE_URL on the spawned agent's environment."""
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "IMG=$AGENT_IMAGE_URL"\n'
+            'echo "FILE=$AGENT_FILE_URL"\n'
+        )
+        r = run(
+            {"command": str(agent)},
+            RunOptions(
+                message="hi",
+                image_url="https://example.com/a.png",
+                file_url="https://example.com/b.pdf",
+            ),
+        )
+        assert "IMG=https://example.com/a.png" in r.reply
+        assert "FILE=https://example.com/b.pdf" in r.reply
+
+    def test_attachment_unset_when_options_empty(self, agent_script):
+        """When image_url/file_url are empty, the runner must NOT inject the
+        env vars at all — an agent can then distinguish "no image" from
+        "image URL is the empty string"."""
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "IMG=<${AGENT_IMAGE_URL:-unset}>"\n'
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert "IMG=<unset>" in r.reply
+
     def test_invalid_session_id_ignored_preserves_previous(self, agent_script):
         """A malformed AGENT_SESSION line is ignored; the previous valid id wins."""
         agent = agent_script(textwrap.dedent("""\

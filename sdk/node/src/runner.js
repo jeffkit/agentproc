@@ -429,6 +429,11 @@ async function run(profileRaw, options) {
   env.AGENT_FROM_USER = options.fromUser || '';
   env.AGENT_STREAMING = streaming ? '1' : '0';
   env.AGENT_PROTOCOL_VERSION = PROTOCOL_VERSION;
+  // Single-attachment passthrough. Only inject when non-empty so an unset
+  // variable stays unset (spec: "set when present"); an agent can tell
+  // "no image" apart from "image URL is the empty string".
+  if (options.imageUrl) env.AGENT_IMAGE_URL = options.imageUrl;
+  if (options.fileUrl) env.AGENT_FILE_URL = options.fileUrl;
 
   // Spawn — no shell. Cwd optional.
   const child = spawn(argv[0], argv.slice(1), {

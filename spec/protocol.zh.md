@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.1`（注入为 `AGENT_PROTOCOL_VERSION` 的字符串）
-**文档修订：** `0.5`
+**文档修订：** `0.6`
 **状态：** 草案
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `AGENT_PROTOCOL_VERSION` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -14,7 +14,7 @@
 
 - 如果 bridge 注入了一个 agent 不识别的版本字符串，agent **SHOULD** 按变量未设置处理（best-effort，fail-soft）。
 - 如果 agent 期望某个 bridge 未注入的版本字符串，agent **MUST** 回退到其内置默认值。
-- 该字符串**不是**能力发现机制：不存在协商、不存在能力声明、也不存在排序。agent 若需要知道某项具体能力（例如多附件）是否存在，**MUST** 直接检查对应的 env 变量（例如 `AGENT_ATTACHMENTS` 非空），而不是检查版本字符串。
+- 该字符串**不是**能力发现机制：不存在协商、不存在能力声明、也不存在排序。agent 若需要知道某项具体能力（例如图片附件）是否存在，**MUST** 直接检查对应的 env 变量（例如 `AGENT_IMAGE_URL` 非空），而不是检查版本字符串。
 
 理由：任何可比较的版本号都会诱导实现者用 `>= 0.2` 来 gate 行为，而一旦某个 bridge 没有同步 bump 数字，这种判断就会失效。把字符串视为不透明，能让契约保持诚实：某项能力的存在由承载它的 env 变量来表示。
 
@@ -180,32 +180,19 @@ bridge 在启动进程前注入以下变量，agent process 直接读取。
 - `AGENT_MESSAGE` 非空
 - `AGENT_IMAGE_URL` 非空
 - `AGENT_FILE_URL` 非空
-- `AGENT_ATTACHMENTS` 已设置且不等于 `[]`
 
 若以上都不成立，则该轮为空，bridge / agent **SHOULD** 上报错误而非继续。这条规则适配常见的「仅图片消息」场景：用户发了一张截图但没附文字。
 
 ### 附件变量（P0）
 
-附件通过两层变量传递。bridge **MUST** 设置与消息匹配的那一层；agent **SHOULD** 在更丰富的一层存在时优先消费它，否则回退到更简单的一层。
-
-**单附件便捷变量。**
+附件通过单附件便捷变量传递。bridge 设置与消息匹配的变量；agent 读取非空的那一个。
 
 | 变量名 | 说明 |
 |--------|------|
 | `AGENT_IMAGE_URL` | 图片附件 URL。当消息恰好含一张图片时设置。 |
 | `AGENT_FILE_URL` | 文件附件 URL。当消息恰好含一个文件时设置。 |
 
-**多附件变量。**
-
-| 变量名 | 说明 |
-|------|------|
-| `AGENT_ATTACHMENTS` | JSON 数组，元素为 `{"type":"image\|file\|audio\|video", "url":"...", "name":"..."}`。当消息携带零个或多个附件时设置。空数组等价于「无附件」。 |
-
-**agent 读取顺序。** 当 `AGENT_ATTACHMENTS` 非空时，agent **SHOULD** 消费它并忽略单附件变量。当 `AGENT_ATTACHMENTS` 未设置（空字符串）时，agent **SHOULD** 回退到 `AGENT_IMAGE_URL` / `AGENT_FILE_URL`。
-
-**bridge 一致性要求。** 当 bridge 在同一对话同时设置 `AGENT_ATTACHMENTS` **和**某个单附件变量时，两者**MUST** 一致：单附件变量中的 URL **MUST** 等于 `AGENT_ATTACHMENTS` 中对应条目的 `url`。无法保持一致的 bridge **MUST** 只设置一层。
-
-**类型分类。** `type` 字段取值为 `image`、`file`、`audio`、`video` 之一。bridge **MAY** 输出额外的类型；不识别某类型的 agent **SHOULD** 忽略该条目而不是失败。
+多附件变量（`AGENT_ATTACHMENTS`，一个 JSON 数组）曾作为草案，但从未接入 runner——没有任何符合规范的 bridge 真的发送过它，而且「JSON 塞进 env」破坏了 bash `echo` agent 的合法承诺，因此已移除。等真实 bridge 确实需要携带多个附件时，spec 会重新引入一种手写 shell agent 仍能消费的投递机制。
 
 profile `env` 块中声明的自定义变量也会一并注入。
 

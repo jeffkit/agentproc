@@ -5,16 +5,6 @@ declare module 'agentproc' {
 
   export const PROTOCOL_VERSION: string;
 
-  /** A single attachment on the user message (draft, multi-attachment). */
-  export interface Attachment {
-    /** Kind of attachment: 'image' | 'file' | 'audio' | 'video'. */
-    type: string;
-    /** URL the bridge has made available for fetching. */
-    url: string;
-    /** Optional filename or display name. */
-    name?: string;
-  }
-
   /** Input context passed to the agent handler. */
   export interface AgentContext {
     /** User message text (AGENT_MESSAGE). */
@@ -33,8 +23,6 @@ declare module 'agentproc' {
     imageUrl: string;
     /** File attachment URL. Empty if no file. */
     fileUrl: string;
-    /** Parsed attachments from AGENT_ATTACHMENTS (draft). Empty array when unset. */
-    attachments: Attachment[];
 
     /** Send a streaming chunk to the user immediately. */
     sendPartial(text: string): void;
@@ -74,9 +62,6 @@ declare module 'agentproc' {
 
   /** Resolve the JSONL history file path for a session. Throws if sessionId is empty. */
   export function sessionFilePath(sessionId: string, sessionDir?: string): string;
-
-  /** Parse AGENT_ATTACHMENTS JSON. Returns [] on parse failure. */
-  export function parseAttachments(raw: string): Attachment[];
 
   /** Reject with a user-readable error; surfaced via AGENT_ERROR.
    *  Throw the returned instance (or a `ProtocolError`) from a handler. */

@@ -7,7 +7,7 @@
  * Protocol contract:
  *   Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,
  *                      AGENT_FROM_USER, AGENT_STREAMING, AGENT_PROTOCOL_VERSION,
- *                      AGENT_IMAGE_URL, AGENT_FILE_URL, AGENT_ATTACHMENTS (draft)
+ *                      AGENT_IMAGE_URL, AGENT_FILE_URL
  *   Output — stdout (sentinel-prefixed lines):
  *              AGENT_SESSION:<opaque-id>     — declare session id (last wins)
  *              AGENT_PARTIAL:<json-string>   — streaming chunk
@@ -109,32 +109,6 @@ function appendHistory(sessionId, entries, sessionDir) {
 // Env parsing helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Parse AGENT_ATTACHMENTS JSON. Returns [] on parse failure.
- * @param {string} raw
- * @returns {Attachment[]}
- */
-function parseAttachments(raw) {
-  if (!raw) return [];
-  let items;
-  try {
-    items = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-  if (!Array.isArray(items)) return [];
-  /** @type {Attachment[]} */
-  const out = [];
-  for (const it of items) {
-    if (!it || typeof it !== 'object') continue;
-    const t = String(it.type || '');
-    const u = String(it.url || '');
-    if (!t || !u) continue;
-    out.push({ type: t, url: u, name: String(it.name || '') });
-  }
-  return out;
-}
-
 function contextFromEnv() {
   return {
     message: process.env.AGENT_MESSAGE || '',
@@ -145,7 +119,6 @@ function contextFromEnv() {
     protocolVersion: process.env.AGENT_PROTOCOL_VERSION || PROTOCOL_VERSION,
     imageUrl: process.env.AGENT_IMAGE_URL || '',
     fileUrl: process.env.AGENT_FILE_URL || '',
-    attachments: parseAttachments(process.env.AGENT_ATTACHMENTS || ''),
 
     /** Send a streaming chunk to the user immediately. */
     sendPartial(text) {
@@ -235,7 +208,6 @@ module.exports = {
   loadHistory,
   appendHistory,
   sessionFilePath,
-  parseAttachments,
   protocolError,
   PROTOCOL_VERSION,
 };

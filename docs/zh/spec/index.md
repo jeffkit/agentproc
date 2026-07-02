@@ -50,9 +50,8 @@ streaming: true               # 实时转发 AGENT_PARTIAL: 行
 |--------|------|
 | `AGENT_IMAGE_URL` | 图片附件 URL（单附件便捷变量） |
 | `AGENT_FILE_URL` | 文件附件 URL（单附件便捷变量） |
-| `AGENT_ATTACHMENTS` | JSON 数组，元素为 `{type, url, name}`，`type` 取值 `image` / `file` / `audio` / `video`。零个或多个附件时设置。空数组 = 无附件。 |
 
-当 bridge 同时设置 `AGENT_ATTACHMENTS` 与某个单附件变量时，两者 MUST 一致（URL 相同）。agent 在 `AGENT_ATTACHMENTS` 非空时消费它，否则回退到单附件变量。
+agent 读取非空的那个单附件变量。（多附件的 `AGENT_ATTACHMENTS` JSON 变量曾作为草案，但在 doc 0.6 已移除——它从未接入 runner，且「JSON 塞进 env」破坏了 bash `echo` agent 的合法承诺。）
 
 ---
 

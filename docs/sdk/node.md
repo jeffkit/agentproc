@@ -20,7 +20,6 @@ createProfile(async (ctx) => {
   // ctx.protocolVersion   — protocol version string (e.g. "0.1")
   // ctx.imageUrl          — image attachment URL (empty if none)
   // ctx.fileUrl           — file attachment URL (empty if none)
-  // ctx.attachments       — parsed AGENT_ATTACHMENTS (draft, [] if unset)
   const reply = await myLLM(ctx.message);
   return { response: reply };
 });
@@ -79,25 +78,6 @@ createProfile(async (ctx) => {
 ```
 
 `protocolError(msg)` returns a rejected promise whose error is tagged `isProtocolError`; the SDK serializes its message as an `AGENT_ERROR:` line and exits 1. Any other uncaught error is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
-
-## Multi-attachment input (draft)
-
-When the bridge sets `AGENT_ATTACHMENTS`, the SDK parses it into `ctx.attachments`:
-
-```js
-const { createProfile } = require('agentproc');
-
-createProfile(async (ctx) => {
-  // Prefer the multi-attachment list when present, fall back to single vars
-  const images = (ctx.attachments.filter(a => a.type === 'image').length
-    ? ctx.attachments.filter(a => a.type === 'image')
-    : (ctx.imageUrl ? [{ type: 'image', url: ctx.imageUrl }] : []));
-  const reply = await myVisionLLM(ctx.message, images.map(a => a.url));
-  return { response: reply };
-});
-```
-
-`ctx.attachments` is empty when `AGENT_ATTACHMENTS` is unset or unparseable. The single-attachment vars (`ctx.imageUrl`, `ctx.fileUrl`) remain the P0 path.
 
 ## Conversation history
 

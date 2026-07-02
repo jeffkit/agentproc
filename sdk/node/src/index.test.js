@@ -96,41 +96,10 @@ describe('loadHistory / appendHistory', () => {
   });
 });
 
-describe('parseAttachments', () => {
-  test('returns [] for empty string', () => {
-    assert.deepStrictEqual(SDK.parseAttachments(''), []);
-  });
-
-  test('returns [] for malformed JSON', () => {
-    assert.deepStrictEqual(SDK.parseAttachments('not json'), []);
-  });
-
-  test('returns [] for non-array JSON', () => {
-    assert.deepStrictEqual(SDK.parseAttachments('{"type":"image"}'), []);
-  });
-
-  test('parses a valid array', () => {
-    const raw = JSON.stringify([
-      { type: 'image', url: 'https://x/a.png', name: 'a.png' },
-      { type: 'file', url: 'https://y/b.pdf' },
-    ]);
-    const out = SDK.parseAttachments(raw);
-    assert.strictEqual(out.length, 2);
-    assert.strictEqual(out[0].type, 'image');
-    assert.strictEqual(out[0].name, 'a.png');
-    assert.strictEqual(out[1].type, 'file');
-    assert.strictEqual(out[1].name, '');
-  });
-
-  test('skips entries missing type or url', () => {
-    const raw = JSON.stringify([
-      { type: 'image' }, // missing url
-      { url: 'https://x' }, // missing type
-      { type: 'file', url: 'https://y' }, // ok
-    ]);
-    const out = SDK.parseAttachments(raw);
-    assert.strictEqual(out.length, 1);
-    assert.strictEqual(out[0].type, 'file');
+describe('attachments removed in 0.5.0', () => {
+  test('parseAttachments and Attachment are no longer exported', () => {
+    assert.strictEqual(SDK.parseAttachments, undefined);
+    assert.strictEqual(SDK.Attachment, undefined);
   });
 });
 
@@ -290,10 +259,6 @@ describe('createProfile end-to-end', () => {
         AGENT_STREAMING: '0',
         AGENT_IMAGE_URL: 'https://x/img.png',
         AGENT_FILE_URL: 'https://y/file.pdf',
-        AGENT_ATTACHMENTS: JSON.stringify([
-          { type: 'image', url: 'https://z/1.png' },
-          { type: 'file', url: 'https://z/2.pdf', name: '2.pdf' },
-        ]),
       },
       `(async (sdk) => {
         sdk.createProfile(async (ctx) => {
@@ -305,7 +270,6 @@ describe('createProfile end-to-end', () => {
             stream: ctx.streaming,
             img: ctx.imageUrl,
             file: ctx.fileUrl,
-            atts: ctx.attachments,
           });
         });
       })`
@@ -319,26 +283,6 @@ describe('createProfile end-to-end', () => {
     assert.strictEqual(parsed.stream, false);
     assert.strictEqual(parsed.img, 'https://x/img.png');
     assert.strictEqual(parsed.file, 'https://y/file.pdf');
-    assert.strictEqual(parsed.atts.length, 2);
-    assert.strictEqual(parsed.atts[0].type, 'image');
-    assert.strictEqual(parsed.atts[1].name, '2.pdf');
-  });
-
-  test('malformed AGENT_ATTACHMENTS → attachments = []', async () => {
-    const r = await runAgent(
-      {
-        AGENT_MESSAGE: 'hi',
-        AGENT_STREAMING: '0',
-        AGENT_ATTACHMENTS: 'not json',
-      },
-      `(async (sdk) => {
-        sdk.createProfile(async (ctx) => {
-          return JSON.stringify({ atts: ctx.attachments });
-        });
-      })`
-    );
-    assert.strictEqual(r.code, 0);
-    assert.deepStrictEqual(JSON.parse(r.stdout.trim()).atts, []);
   });
 
   test('handler can return undefined (signaled everything via partials)', async () => {

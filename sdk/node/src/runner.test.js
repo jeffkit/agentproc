@@ -572,6 +572,35 @@ describe('run() — end-to-end', () => {
     }
   });
 
+  test('attachment passthrough reaches agent env', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "IMG=$AGENT_IMAGE_URL"\n' +
+      'echo "FILE=$AGENT_FILE_URL"\n',
+    );
+    const r = await run(
+      { command: agent },
+      {
+        message: 'hi',
+        imageUrl: 'https://example.com/a.png',
+        fileUrl: 'https://example.com/b.pdf',
+      },
+    );
+    assert.ok(r.reply.includes('IMG=https://example.com/a.png'), `reply: ${r.reply}`);
+    assert.ok(r.reply.includes('FILE=https://example.com/b.pdf'), `reply: ${r.reply}`);
+  });
+
+  test('attachment vars unset when options empty', async () => {
+    // When imageUrl/fileUrl are empty, the runner must NOT inject the env vars
+    // at all — an agent can then distinguish "no image" from "empty URL".
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "IMG=<${AGENT_IMAGE_URL:-unset}>"\n',
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.ok(r.reply.includes('IMG=<unset>'), `reply: ${r.reply}`);
+  });
+
   test('invalid AGENT_SESSION ignored, preserves previous valid id', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
