@@ -49,11 +49,13 @@ agentproc/
 
 ## Hub profiles
 
-`hub/<name>/` directories each contain a pure-P0 AgentProc profile for a real AI CLI. Both bridge scripts (Python and Node) MUST stay at parity — if you fix a bug in one, fix it in the other. See `hub/README.md` for the schema.
+`hub/<name>/` directories each contain a pure-P0 AgentProc profile for a real AI CLI. Each profile ships a Python bridge (`bridge.py`) and a Node bridge (`bridge.js`) that wrap the same underlying CLI, plus the shared `profile.yaml` and `README.md`. The two bridges SHOULD stay at parity at the **observable** level (same NDJSON event → same AgentProc output for the same CLI), not the code level — they are free to differ in implementation detail (stderr buffering, error-message wording, control flow). If you fix a *spec-relevant* bug in one, fix it in the other; if you change a friendly-hint string in one, the other does not have to match. See `hub/README.md` for the schema.
 
-## The two SDKs MUST stay at parity
+## The two SDKs aim to mirror, not to stay in lockstep
 
-If you add a feature to one SDK, add the equivalent to the other and update both test suites. Naming convention:
+The Python and Node SDKs are independent implementations of the same spec. They SHOULD agree on **observable behaviour** (same profile + message → same `reply` / `sessionId` / `error` / `exitCode`; same env injection; same timeout/SIGTERM semantics), verified by the shared `spec/conformance/` suite. They are NOT required to mirror at the code level — implementation details (how stderr is buffered, what friendly error-hint regexes a runner uses, threading vs event-loop) are each SDK's own business.
+
+Naming convention (kept as a convenience for users who switch between the two, not a hard contract):
 
 | Python | Node.js |
 |--------|---------|
@@ -68,6 +70,8 @@ If you add a feature to one SDK, add the equivalent to the other and update both
 | `ctx.protocol_version` | `ctx.protocolVersion` |
 | `load_history` / `append_history` / `session_file_path` | `loadHistory` / `appendHistory` / `sessionFilePath` |
 | `raise ProtocolError(msg)` | `throw await sdk.protocolError(msg)` |
+
+If you add a *spec-relevant* feature to one SDK, add the equivalent observable behaviour to the other and extend the conformance suite. A change that only affects one SDK's implementation detail (e.g. a better friendly-error regex) does not require touching the other.
 
 ## The Node SDK also ships the CLI
 
@@ -106,17 +110,17 @@ The VitePress `base` is `/` because we serve from `agentproc.dev` root. Don't ch
 
 ## Spec changes require a version bump
 
-The protocol, the Python package, and the Node package are versioned in lockstep at `0.x.y`. Changes that add new env vars, new protocol lines, or change the meaning of existing ones require a version bump and a CHANGELOG entry.
+The spec document, the Python package, and the Node package each carry their own version (see `CHANGELOG.md` for the three tracks). Changes that add new env vars, new protocol lines, or change the meaning of existing ones require an SDK version bump and a CHANGELOG entry.
 
-Files that MUST be updated together when bumping:
+Files that MUST be updated together when bumping the SDK package version:
 
-- `spec/protocol.md` — `**Version:**` field at the top
-- `spec/protocol.zh.md` — `**版本：**` field at the top
+- `spec/protocol.md` — `**Version:**` field at the top (only if the wire protocol itself changes; the wire version is `0.1` and is separate from the doc revision)
+- `spec/protocol.zh.md` — `**版本：**` field at the top (same)
 - `sdk/python/pyproject.toml` — `version`
 - `sdk/node/package.json` — `version`
 - `CHANGELOG.md` — new section
-- `sdk/python/src/agentproc/__init__.py` — `PROTOCOL_VERSION` constant (only on minor bumps, e.g. `0.1` → `0.2`)
-- `sdk/node/src/index.js` — `PROTOCOL_VERSION` constant (same)
+
+The `PROTOCOL_VERSION` constant (the wire string `0.1`) has a single source of truth per SDK: `sdk/python/src/agentproc/runner.py` and `sdk/node/src/runner.js`. The package entry points (`__init__.py` / `index.js`) **re-export** it from the runner — do not copy the literal into the entry point. The wire version only bumps on a minor (e.g. `0.1` → `0.2`) when the bytes on stdin/stdout actually change; most SDK releases keep `0.1`.
 
 Editorial changes (clarifications, rewording, new examples) don't require a version bump.
 
@@ -135,6 +139,7 @@ Conventional Commits: `feat:`, `fix:`, `docs:`, `test:`, `ci:`, `refactor:`, `ch
 - **Don't change `docs/.vitepress/config.ts` `base` from `/`.** The site is served at `agentproc.dev` root.
 - **Don't add a scoped package name** (`@agentproc/...`). The npm package name is `agentproc` (flat), matching the PyPI name.
 - **Don't rewrite the spec's Design Rationale or Comparison sections casually.** Those reflect deliberate decisions documented after research.
+- **Don't hand-roll a YAML parser.** The Node SDK depends on `js-yaml`; profile YAML parsing goes through it. (The Python SDK uses the standard library where it can and ships a bundled hub copy.) A "zero-dependency" profile parser was retired after it silently broke `streaming: false  # comment` by not stripping inline comments — don't bring it back.
 
 ## LLM-friendly entry points
 
