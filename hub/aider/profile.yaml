@@ -1,0 +1,34 @@
+name: aider
+description: Connect aider AI pair programming tool as an AgentProc agent (one-shot, git-backed context)
+cli: aider
+cli_install: |
+  pip install aider-chat
+  # or: brew install aider
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
+  # aider reads and edits files in the working directory and makes git commits.
+  timeout_secs: 600
+  streaming: false              # aider's --no-stream returns full text only
+  env:
+    AIDER_MODEL: "${AIDER_MODEL}"
+    ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    OPENAI_API_KEY: "${OPENAI_API_KEY}"
+  env_allowlist: [AIDER_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
+tested: community
+maintainer: jeffkit
+tags: [coding, ai, pair-programming]
+notes: |
+  Uses `aider --message <msg> --yes-always --no-show-release-notes --no-stream`.
+  `--yes-always` bypasses all confirmation prompts (equivalent of
+  --dangerously-skip-permissions for other CLIs). `--no-stream` collects the
+  full response before exiting.
+
+  aider uses the git history and a repo map for context continuity — there is
+  no explicit session id. Each turn spawns a fresh aider process that reads the
+  current repo state. Multi-turn context is therefore automatic when aider runs
+  against a git repository.
+
+  The bridge does NOT pass specific files to aider; it relies on aider's own
+  repo-map heuristic to infer which files are relevant. If the working directory
+  is not a git repo, aider will still work but without git commit tracking.

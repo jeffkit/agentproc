@@ -1,0 +1,35 @@
+name: deepseek
+description: Connect the DeepSeek TUI CLI as an AgentProc agent (one-shot, plain text)
+cli: deepseek
+cli_install: |
+  # Install from https://deepseek.com/downloads or via Homebrew:
+  #   brew install deepseek
+  # Authenticate with your DeepSeek API key:
+  #   deepseek login
+  # Or set DEEPSEEK_API_KEY environment variable.
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
+  timeout_secs: 300
+  streaming: false        # deepseek exec returns plain text after completion
+  env:
+    DEEPSEEK_MODEL: "${DEEPSEEK_MODEL}"
+    DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
+  env_allowlist: [DEEPSEEK_MODEL, DEEPSEEK_API_KEY]
+tested: community
+maintainer: jeffkit
+tags: [coding, ai, deepseek]
+notes: |
+  Uses `deepseek exec -p <message> [--model <model>]` for non-interactive mode.
+
+  `deepseek exec` is stateless — context is NOT persisted between separate exec
+  invocations (regardless of --session). No AGENT_SESSION: line is emitted.
+  Multi-turn continuity must be maintained externally via the AgentProc SDK's
+  load_history / append_history helpers.
+
+  Available models (default: deepseek-v4-pro):
+    deepseek-v4-pro   — best quality
+    deepseek-v4-flash — faster, lighter
+
+  If deepseek later adds native session persistence in exec mode, this bridge
+  can be upgraded to emit AGENT_SESSION:.

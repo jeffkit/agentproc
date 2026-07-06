@@ -14,6 +14,12 @@ Ready-to-use [AgentProc](https://agentproc.dev) profiles for popular AI agent CL
 | [qwen-code](./qwen-code/) | `qwen` (Alibaba) | community | Python · Node |
 | [recursive](./recursive/) | `recursive` (self-improving Rust agent) | community | Python · Node |
 | [agy](./agy/) | `agy` | community | Python · Node |
+| [pi](./pi/) | `pi` (earendil-works) | community | Python · Node |
+| [opencode](./opencode/) | `opencode` | community | Python · Node |
+| [aider](./aider/) | `aider` | community | Python · Node |
+| [kimi-code](./kimi-code/) | `kimi` (Moonshot AI) | community | Python · Node |
+| [deepseek](./deepseek/) | `deepseek` (DeepSeek TUI) | community | Python · Node |
+| [glm-code](./glm-code/) | `claude` + GLM API (Zhipu AI / Z.AI) | community | Python · Node |
 | [echo-agent](./echo-agent/) | (no CLI — hello world) | official | Python · Node · Bash |
 
 ## Coverage vs ACP Registry

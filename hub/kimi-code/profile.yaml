@@ -1,0 +1,39 @@
+name: kimi-code
+description: Connect the kimi CLI (Kimi Code CLI) as an AgentProc agent with streaming and session continuity
+cli: kimi
+cli_install: |
+  # See https://moonshotai.github.io/kimi-cli for installation instructions.
+  # Quick install:
+  #   curl -fsSL https://moonshotai.github.io/kimi-cli/install.sh | sh
+  # Then authenticate:
+  #   kimi login
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd is intentionally left unset. `agentproc hub run` defaults it to your
+  # current directory (so `kimi` runs against your project).
+  timeout_secs: 600
+  streaming: true
+  env:
+    KIMI_MODEL: "${KIMI_MODEL}"
+    # API key is stored via `kimi login` (OAuth). For programmatic use:
+    # MOONSHOT_API_KEY: "${MOONSHOT_API_KEY}"
+  env_allowlist: [KIMI_MODEL, MOONSHOT_API_KEY]
+tested: community
+maintainer: jeffkit
+tags: [coding, ai, kimi, moonshot]
+notes: |
+  Uses `kimi --print -p <message> --output-format=stream-json --session <id>`
+  for non-interactive mode with streaming output and session continuity.
+
+  Session management: on the first turn the bridge generates a UUID and uses it
+  as the kimi session ID (creating a new session). The same UUID is forwarded as
+  AGENT_SESSION: so the SDK can pass it back on the next turn as AGENT_SESSION_ID,
+  enabling kimi's native --session <id> resume mechanism.
+
+  The bridge parses kimi's role-based NDJSON events:
+    role=assistant  → AGENT_PARTIAL: (streaming) or reply body (one-shot)
+    role=tool       → ignored (tool results not shown to user)
+
+  Intermediate assistant messages (those with tool_calls) ARE streamed so the
+  user can see kimi's reasoning; the final assistant message (without tool_calls)
+  is also the reply body in non-streaming mode.

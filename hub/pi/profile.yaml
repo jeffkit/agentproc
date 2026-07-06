@@ -1,0 +1,26 @@
+name: pi
+description: Connect the pi coding agent CLI as an AgentProc agent (one-shot, no built-in session continuity)
+cli: pi
+cli_install: |
+  npm install -g @earendil-works/pi-coding-agent
+agentproc:
+  command: python3 {{PROFILE_DIR}}/bridge.py
+  # cwd defaults to your current directory under `agentproc hub run`.
+  timeout_secs: 600
+  streaming: false              # pi's --print mode returns full text only
+  env:
+    PI_MODEL: "${PI_MODEL}"
+  env_allowlist: [PI_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
+tested: community
+maintainer: jeffkit
+tags: [coding, ai]
+notes: |
+  Uses pi's `-p` (print) mode with `--approve --no-extensions` for reliable
+  non-interactive operation. The `--no-extensions` flag is required to prevent
+  pi from hanging after completion when extensions are loaded (known upstream
+  issue earendil-works/pi#4617). Set PI_NO_EXTENSIONS=0 to omit the flag.
+
+  No AGENT_SESSION: line is emitted (pi's -p mode does not expose a session id
+  on stdout). Each turn is a fresh pi process; multi-turn continuity must be
+  maintained by the messaging bridge via the AgentProc SDK's load_history /
+  append_history helpers.
