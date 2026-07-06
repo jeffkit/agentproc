@@ -523,3 +523,300 @@ class TestEmptyMessageHandling:
             "AGENT_STREAMING": "1",
         })
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# opencode bridge
+# ---------------------------------------------------------------------------
+
+class TestOpencodeBridge:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("opencode")
+
+    def test_build_args_basic(self):
+        args = self.mod.build_args("hello", "", {})
+        assert args == ["opencode", "run", "hello", "--auto", "--format", "json"]
+
+    def test_build_args_no_session_on_first_turn(self):
+        args = self.mod.build_args("hi", "", {})
+        assert "--session" not in args
+
+    def test_build_args_with_session(self):
+        args = self.mod.build_args("hi", "ses_123", {})
+        assert "--session" in args and "ses_123" in args
+
+    def test_build_args_with_model(self):
+        args = self.mod.build_args("hi", "", {"OPENCODE_MODEL": "anthropic/claude-opus-4-5"})
+        assert "--model" in args and "anthropic/claude-opus-4-5" in args
+
+    def test_streaming_turn_emits_partial_and_session(self):
+        step_start = {"type": "step_start", "sessionID": "ses_abc"}
+        text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "hello world"}}
+        step_finish = {"type": "step_finish", "sessionID": "ses_abc", "part": {"reason": "stop"}}
+        rc, out = _run_bridge(self.mod, [step_start, text_event, step_finish], streaming=True)
+        parsed = _classify_output(out)
+        assert rc == 0
+        assert parsed["partials"] == ["hello world"]
+        assert parsed["session"] == "ses_abc"
+
+    def test_error_preserves_session(self):
+        """Spec: session id must survive even when the turn errors."""
+        step_start = {"type": "step_start", "sessionID": "ses_abc"}
+        error_event = {
+            "type": "error",
+            "sessionID": "ses_abc",
+            "part": {"message": "rate limited"},
+        }
+        rc, out = _run_bridge(self.mod, [step_start, error_event], streaming=True)
+        parsed = _classify_output(out)
+        assert rc == 1
+        assert parsed["error"] == "rate limited"
+        assert parsed["session"] == "ses_abc"
+
+    def test_non_streaming_suppresses_partials_but_forwards_session(self):
+        # opencode is designed for streaming (profile: streaming: true).
+        # In non-streaming mode partial_text is suppressed; the session id
+        # is still forwarded so multi-turn continuity isn't broken.
+        text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "full reply"}}
+        step_finish = {"type": "step_finish", "sessionID": "ses_abc"}
+        rc, out = _run_bridge(self.mod, [text_event, step_finish], streaming=False)
+        parsed = _classify_output(out)
+        assert rc == 0
+        assert parsed["partials"] == [], "no partials in non-streaming mode"
+        assert parsed["session"] == "ses_abc"
+
+    def test_tool_use_events_only_forward_session(self):
+        step_start = {"type": "step_start", "sessionID": "ses_abc"}
+        tool = {"type": "tool_use", "sessionID": "ses_abc", "part": {"tool": "bash"}}
+        text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "done"}}
+        rc, out = _run_bridge(self.mod, [step_start, tool, text_event], streaming=True)
+        parsed = _classify_output(out)
+        assert rc == 0
+        assert parsed["partials"] == ["done"]
+        assert parsed["session"] == "ses_abc"
+
+
+# ---------------------------------------------------------------------------
+# kimi-code bridge
+# ---------------------------------------------------------------------------
+
+class TestKimiCodeBridge:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("kimi-code")
+
+    def test_build_args_first_turn_generates_uuid_session(self):
+        args = self.mod.build_args("hello", "", {})
+        assert args[0] == "kimi"
+        assert "--print" in args
+        assert "-p" in args
+        assert "--output-format=stream-json" in args
+        # --session must be present with a non-empty value
+        assert "--session" in args
+        idx = args.index("--session")
+        assert len(args[idx + 1]) > 0, "session id must not be empty on first turn"
+
+    def test_build_args_resume_uses_provided_session(self):
+        args = self.mod.build_args("hi", "my-sess-99", {})
+        idx = args.index("--session")
+        assert args[idx + 1] == "my-sess-99"
+
+    def test_build_args_with_model(self):
+        args = self.mod.build_args("hi", "", {"KIMI_MODEL": "kimi-latest"})
+        assert "--model" in args and "kimi-latest" in args
+
+    def test_streaming_assistant_message(self):
+        # kimi emits {"role": "assistant", "content": "..."} on each chunk.
+        assistant = {"role": "assistant", "content": "hello world"}
+        rc, out = _run_bridge(
+            self.mod, [assistant], streaming=True, session_id="kimi-sess-1"
+        )
+        parsed = _classify_output(out)
+        assert rc == 0
+        assert parsed["partials"] == ["hello world"]
+        assert parsed["session"] == "kimi-sess-1"
+
+    def test_tool_role_is_ignored(self):
+        tool_event = {"role": "tool", "content": "some tool result"}
+        rc, out = _run_bridge(
+            self.mod, [tool_event], streaming=True, session_id="kimi-sess-2"
+        )
+        parsed = _classify_output(out)
+        assert parsed["partials"] == []
+        assert parsed["error"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Plain-text bridges: build_args tests (no subprocess mocking needed)
+# ---------------------------------------------------------------------------
+
+class TestPiBridgeArgs:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("pi")
+
+    def test_build_args_default_includes_no_extensions(self, monkeypatch):
+        monkeypatch.delenv("PI_NO_EXTENSIONS", raising=False)  # default is "1"
+        monkeypatch.delenv("PI_MODEL", raising=False)
+        monkeypatch.setenv("PI_NO_EXTENSIONS", "1")
+        args = self.mod.build_args("hello")
+        assert args[:4] == ["pi", "-p", "hello", "--approve"]
+        assert "--no-extensions" in args
+
+    def test_build_args_no_extensions_disabled(self, monkeypatch):
+        monkeypatch.setenv("PI_NO_EXTENSIONS", "0")
+        monkeypatch.delenv("PI_MODEL", raising=False)
+        args = self.mod.build_args("hello")
+        assert "--no-extensions" not in args
+
+    def test_build_args_with_model(self, monkeypatch):
+        monkeypatch.setenv("PI_NO_EXTENSIONS", "1")
+        monkeypatch.setenv("PI_MODEL", "anthropic/claude-opus-4-5")
+        args = self.mod.build_args("hello")
+        assert "--model" in args and "anthropic/claude-opus-4-5" in args
+
+
+class TestAiderBridgeArgs:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("aider")
+
+    def test_build_args_basic(self, monkeypatch):
+        monkeypatch.delenv("AIDER_MODEL", raising=False)
+        args = self.mod.build_args("fix this bug")
+        assert args == [
+            "aider",
+            "--message", "fix this bug",
+            "--yes-always",
+            "--no-show-release-notes",
+            "--no-stream",
+        ]
+
+    def test_build_args_with_model(self, monkeypatch):
+        monkeypatch.setenv("AIDER_MODEL", "claude-opus-4-5")
+        args = self.mod.build_args("fix this")
+        assert "--model" in args and "claude-opus-4-5" in args
+
+
+class TestDeepseekBridgeArgs:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("deepseek")
+
+    def test_build_args_basic(self, monkeypatch):
+        monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+        args = self.mod.build_args("hello")
+        assert args == ["deepseek", "exec", "-p", "hello"]
+
+    def test_build_args_with_model(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        args = self.mod.build_args("hello")
+        assert "--model" in args and "deepseek-v4-flash" in args
+
+
+# ---------------------------------------------------------------------------
+# agy bridge (plain-text one-shot, no streaming, no session)
+# ---------------------------------------------------------------------------
+
+def _run_agy_bridge(mod, *, message="hi", env_extra=None, fake_proc_result=None):
+    """Run agy bridge with subprocess.run mocked; return (exit_code, stdout_lines)."""
+    import subprocess
+
+    captured: list[str] = []
+    orig_environ = os.environ.copy()
+    env = {"AGENT_MESSAGE": message, "AGENT_SESSION_ID": "", "AGENT_STREAMING": "0"}
+    if env_extra:
+        env.update(env_extra)
+
+    class _FakeCompletedProcess:
+        def __init__(self, stdout, returncode, stderr=""):
+            self.stdout = stdout
+            self.returncode = returncode
+            self.stderr = stderr
+
+    real_run = subprocess.run
+    real_environ = os.environ
+
+    def fake_run(args, **kwargs):
+        return _FakeCompletedProcess(**fake_proc_result)
+
+    real_emit = mod.emit
+
+    def capture_emit(line):
+        captured.append(line)
+
+    os.environ = env  # type: ignore[assignment]
+    mod.emit = capture_emit
+    subprocess.run = fake_run
+    try:
+        rc = mod.main()
+    finally:
+        os.environ = real_environ  # type: ignore[assignment]
+        mod.emit = real_emit
+        subprocess.run = real_run
+
+    return rc, captured
+
+
+class TestAgyBridge:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("agy")
+
+    # ── build_args ───────────────────────────────────────────────────────────
+
+    def test_build_args_basic(self, monkeypatch):
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        monkeypatch.setenv("AGY_DANGEROUSLY_SKIP_PERMISSIONS", "1")
+        args = self.mod.build_args("hello")
+        assert args[:3] == ["agy", "--print", "hello"]
+        assert "--dangerously-skip-permissions" in args
+
+    def test_build_args_skip_permissions_disabled(self, monkeypatch):
+        monkeypatch.setenv("AGY_DANGEROUSLY_SKIP_PERMISSIONS", "0")
+        monkeypatch.delenv("AGY_MODEL", raising=False)
+        args = self.mod.build_args("hello")
+        assert "--dangerously-skip-permissions" not in args
+
+    def test_build_args_with_model(self, monkeypatch):
+        monkeypatch.setenv("AGY_DANGEROUSLY_SKIP_PERMISSIONS", "0")
+        monkeypatch.setenv("AGY_MODEL", "gpt-4o")
+        args = self.mod.build_args("hello")
+        assert "--model" in args and "gpt-4o" in args
+
+    # ── full bridge (subprocess.run mocked) ──────────────────────────────────
+
+    def test_success_emits_reply_body(self):
+        rc, out = _run_agy_bridge(
+            self.mod,
+            fake_proc_result={"stdout": "agy ok\n", "returncode": 0},
+        )
+        assert rc == 0
+        assert out == ["agy ok"]
+
+    def test_empty_message_emits_error(self):
+        rc, out = _run_agy_bridge(
+            self.mod, message="",
+            fake_proc_result={"stdout": "", "returncode": 0},
+        )
+        assert rc == 1
+        assert any("AGENT_ERROR:" in line for line in out)
+
+    def test_nonzero_exit_emits_agent_error(self):
+        rc, out = _run_agy_bridge(
+            self.mod,
+            fake_proc_result={"stdout": "", "returncode": 1, "stderr": "auth failed"},
+        )
+        assert rc == 1
+        assert any("AGENT_ERROR:" in line for line in out)
+        body = json.loads(out[0].split("AGENT_ERROR:", 1)[1])
+        assert "auth failed" in body
+
+    def test_empty_stdout_emits_agent_error(self):
+        rc, out = _run_agy_bridge(
+            self.mod,
+            fake_proc_result={"stdout": "", "returncode": 0},
+        )
+        assert rc == 1
+        assert any("AGENT_ERROR:" in line for line in out)
