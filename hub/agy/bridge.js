@@ -41,16 +41,16 @@ async function main() {
   }
 
   const args = buildArgs(message);
-  let child;
-  try {
-    child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) {
-    emit(`AGENT_ERROR:${JSON.stringify('agy CLI not found. See the agy project for installation instructions.')}`);
-    process.exit(1);
-  }
+  const child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
 
   let stdout = '';
   let stderr = '';
+  let spawnError = null;
+
+  child.on('error', err => {
+    // spawn-side ENOENT surfaces here, not as a synchronous throw.
+    spawnError = err;
+  });
   child.stdout.on('data', d => { stdout += d.toString(); });
   child.stderr.on('data', d => { stderr += d.toString(); });
 
@@ -63,6 +63,15 @@ async function main() {
 
   const code = await new Promise(resolve => child.on('close', resolve));
   clearTimeout(timer);
+
+  if (spawnError) {
+    const notFound = spawnError.code === 'ENOENT';
+    const msg = notFound
+      ? 'agy CLI not found. See the agy project for installation instructions.'
+      : spawnError.message;
+    emit(`AGENT_ERROR:${JSON.stringify(msg)}`);
+    process.exit(1);
+  }
 
   if (code !== 0) {
     let msg = `agy exited with ${code}`;

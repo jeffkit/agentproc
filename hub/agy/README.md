@@ -44,8 +44,8 @@ command: python3 {{PROFILE_DIR}}/bridge.py    # or: node {{PROFILE_DIR}}/bridge.
 timeout_secs: 300
 streaming: false                      # agy doesn't stream
 env:
-  AGY_MODEL: "${AGY_MODEL:-}"          # optional model override
-  AGY_DANGEROUSLY_SKIP_PERMISSIONS: "1"
+  AGY_MODEL: "${AGY_MODEL}"           # optional model override
+env_allowlist: [AGY_MODEL]
 ```
 
 ## Local test
