@@ -507,6 +507,11 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     result = RunResult()
     body_lines: List[str] = []
+    # Streaming partial truncation tracking — see matching comment in runner.js.
+    _cumulative_partial_chars = 0
+    _partials_truncated = False
+    _max_chars = profile["max_reply_chars"]
+    _trunc_suffix = "\n\n…(truncated)" if _max_chars == DEFAULT_MAX_REPLY_CHARS else ""
     # Two views on stderr:
     #   - stderr_window: bounded sliding window (8 KB) for the on_stderr UI
     #     callback, so a noisy agent cannot exhaust memory.
@@ -592,6 +597,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     assert proc.stdout is not None
 
     def _handle_line(raw_line: str) -> None:
+        nonlocal _cumulative_partial_chars, _partials_truncated
         line = raw_line.rstrip("\r")
         c = classify_line(line)
         if c["kind"] == "session":
@@ -611,8 +617,17 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 if options.on_protocol_line:
                     options.on_protocol_line(line)
         elif c["kind"] == "partial":
-            if streaming and options.on_partial:
-                options.on_partial(c["value"])
+            if streaming and options.on_partial and not _partials_truncated:
+                remaining = _max_chars - _cumulative_partial_chars
+                if len(c["value"]) >= remaining:
+                    if remaining > 0:
+                        options.on_partial(c["value"][:remaining])
+                    if _trunc_suffix:
+                        options.on_partial(_trunc_suffix)
+                    _partials_truncated = True
+                else:
+                    options.on_partial(c["value"])
+                    _cumulative_partial_chars += len(c["value"])
             if options.on_protocol_line:
                 options.on_protocol_line(line)
         elif c["kind"] == "error":

@@ -8,6 +8,28 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Unreleased
 
+### fix: runner SIGKILL timer leak + streaming `max_reply_chars` now enforced
+
+Two correctness fixes to the bridge-side runner (both Node and Python, where applicable):
+
+**1. runner.js — SIGKILL timer handle saved and cleared on process exit**
+
+The SIGKILL follow-up `setTimeout` (fired `kill_grace_secs` after the initial SIGTERM) was a fire-and-forget: its handle was never saved, so it could not be cancelled. If the agent exited during the grace period (e.g. it responded cleanly to SIGTERM), the timer fired against an already-dead process — suppressed by `try/catch` but leaving a dangling handle that prevented Node from exiting cleanly in test/script contexts. `killTimer` is now declared in the outer scope alongside `timer`, and both are cleared in the `close` handler.
+
+**2. `max_reply_chars` now enforced in streaming mode**
+
+Previously `max_reply_chars` (default 8000) only truncated the final reply body in non-streaming mode. A streaming agent that forwarded everything via `AGENT_PARTIAL:` could deliver an unlimited amount of text to the platform. The two runners now track the cumulative length of forwarded partial chunks; once the total reaches `max_reply_chars`, a truncation notice (`truncation_suffix`) is emitted and further partials from the same turn are suppressed. Non-streaming truncation is unchanged.
+
+- **Spec.** `spec/protocol.md` (EN + ZH) adds a `max_reply_chars` section under Reply body describing both-mode semantics. Table comment updated to "truncate at this length (body + streaming partials)".
+- **Conformance.** Three new `scenarios.json` scenarios cover non-streaming truncation, mid-chunk streaming truncation, and first-chunk-exceeds-cap; `scenarios.test.js` and `test_scenarios.py` both support the new `profile_overrides` field so scenarios can set per-test `max_reply_chars`.
+- **Wire protocol stays `0.1`.** Both fixes are bridge-side only; no change to the stdout line format.
+
+**3. `AGENT_PROTOCOL_VERSION` clarified as diagnostics-only**
+
+The env-var table comment now states that the variable's only practical use is logging and diagnostics — it carries no negotiation or feature-detection semantics. Both spec mirrors (EN + ZH) updated.
+
+---
+
 ### SDK 0.5.2 — security: `env_allowlist` is now a real trust boundary
 
 When a profile declares `env_allowlist`, the agent process **no longer inherits the bridge's full environment**. Its environment is now built from: a minimal infra set (`PATH`/`HOME`/`USER`/`SHELL`/`LANG`/`TERM`/`TMPDIR`/`PWD`/…, plus Windows `SystemRoot`/`TEMP`/`USERPROFILE`/…) + the profile `env` block (allowlist-filtered) + the injected `AGENT_*` vars + CLI `--env` extras.

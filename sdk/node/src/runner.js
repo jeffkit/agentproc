@@ -507,6 +507,19 @@ async function run(profileRaw, options) {
   const bodyLines = [];
   let killed = false;
 
+  // ---- streaming partial truncation tracking ----
+  // max_reply_chars is applied to the reply body in non-streaming mode and to
+  // the cumulative partial length in streaming mode.  Without this second
+  // check, streaming mode silently bypasses the cap — forwarding many KB of
+  // AGENT_PARTIAL: chunks to the platform while a non-streaming caller at the
+  // same limit would get a truncated reply.  The two paths now agree: once the
+  // combined partial text exceeds max_reply_chars, we emit a truncation notice
+  // and drop further partials.
+  let cumulativePartialChars = 0;
+  let partialsTruncated = false;
+  const maxChars = profile.max_reply_chars;
+  const truncSuffix = maxChars === DEFAULT_MAX_REPLY_CHARS ? '\n\n…(truncated)' : '';
+
   // ---- stdout: line-by-line classification ----
   let stdoutBuf = '';
   child.stdout.on('data', chunk => {
@@ -535,7 +548,18 @@ async function run(profileRaw, options) {
         if (options.onProtocolLine) options.onProtocolLine(line);
       }
     } else if (c.kind === 'partial') {
-      if (streaming && options.onPartial) options.onPartial(c.value);
+      if (streaming && options.onPartial && !partialsTruncated) {
+        const remaining = maxChars - cumulativePartialChars;
+        if (c.value.length >= remaining) {
+          // Emit whatever fits, then the truncation notice, then stop.
+          if (remaining > 0) options.onPartial(c.value.slice(0, remaining));
+          if (truncSuffix) options.onPartial(truncSuffix);
+          partialsTruncated = true;
+        } else {
+          options.onPartial(c.value);
+          cumulativePartialChars += c.value.length;
+        }
+      }
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'error') {
       result.error = c.value;
@@ -595,13 +619,22 @@ async function run(profileRaw, options) {
   // so the grace period is effectively a no-op there. The two-step shape is
   // preserved so POSIX behaviour is correct; Windows callers get a hard kill
   // at the deadline (acceptable per the spec's Windows caveat).
+  //
+  // killTimer is the SIGKILL follow-up fired after the grace period. It is
+  // declared here (outer scope) so the close-handler below can clearTimeout
+  // it when the process exits on its own during the grace period — without
+  // this, the timer fires against an already-dead process. The try/catch in
+  // the callback prevents a crash but the timer itself is a wasted resource
+  // and leaves a dangling handle that can prevent Node from exiting cleanly
+  // in test/script contexts.
   let timer = null;
+  let killTimer = null;
   if (timeoutSecs > 0) {
     timer = setTimeout(() => {
       killed = true;
       result.timedOut = true;
       try { child.kill('SIGTERM'); } catch {}
-      setTimeout(() => {
+      killTimer = setTimeout(() => {
         try {
           if (!child.exitCode && child.signalCode === null) {
             child.kill('SIGKILL');
@@ -634,6 +667,7 @@ async function run(profileRaw, options) {
   });
 
   if (timer) clearTimeout(timer);
+  if (killTimer) clearTimeout(killTimer);
 
   // Flush any remaining stdout buffer as a final line (without trailing \n).
   if (stdoutBuf.length > 0) {

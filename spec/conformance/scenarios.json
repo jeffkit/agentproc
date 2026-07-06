@@ -60,6 +60,27 @@
       "lines": ["AGENT_SESSION:valid-1", "AGENT_SESSION:bad:id", "done"],
       "streaming": true,
       "expect": {"reply": "done", "session_id": "valid-1", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "non-streaming reply body truncated at max_reply_chars",
+      "profile_overrides": {"max_reply_chars": 10},
+      "lines": ["0123456789ABCDEF"],
+      "streaming": false,
+      "expect": {"reply": "0123456789", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "streaming partials truncated at max_reply_chars",
+      "profile_overrides": {"max_reply_chars": 10},
+      "lines": ["AGENT_PARTIAL:\"hello \"", "AGENT_PARTIAL:\"world!!\"", "AGENT_SESSION:sess-1"],
+      "streaming": true,
+      "expect": {"reply": "", "session_id": "sess-1", "error": "", "exit_code": 0, "partials": ["hello ", "worl"]}
+    },
+    {
+      "name": "streaming partials: first chunk already exceeds cap",
+      "profile_overrides": {"max_reply_chars": 3},
+      "lines": ["AGENT_PARTIAL:\"hello\"", "AGENT_PARTIAL:\"world\""],
+      "streaming": true,
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": ["hel"]}
     }
   ]
 }

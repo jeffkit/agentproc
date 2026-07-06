@@ -65,7 +65,7 @@ env_allowlist: [MY_API_KEY]   # optional: restrict which ${VAR} the env block ma
 # Output control
 timeout_secs: 600             # stdout read timeout, default 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
-max_reply_chars: 8000         # truncate reply at this length, default 8000
+max_reply_chars: 8000         # truncate at this length (body + streaming partials), default 8000
 truncation_suffix: "\n\n…(truncated)"
 include_stderr_in_reply: false
 send_error_reply: true        # tell the user when the agent errors
@@ -185,7 +185,7 @@ The bridge injects the following variables before spawning the process. The agen
 | `AGENT_SESSION_NAME` | Human-readable session name (default: `"default"`) |
 | `AGENT_FROM_USER` | Sender identifier (platform-specific: user ID, handle, etc.) |
 | `AGENT_STREAMING` | `"1"` = streaming mode, `"0"` = one-shot mode |
-| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. **Opaque and non-comparable** — see [Versioning](#versioning). Agents MUST NOT order or range-check this value. |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. **Opaque and non-comparable** — see [Versioning](#versioning). Agents MUST NOT order or range-check this value. Its only practical use is logging and diagnostics; it carries no negotiation or feature-detection semantics. |
 
 #### Empty messages
 
@@ -300,6 +300,15 @@ All stdout lines that are **not** protocol lines form the final reply body, sent
 If all content was already delivered via `AGENT_PARTIAL:` lines, the reply body may be empty — the bridge will skip the final send in that case.
 
 A turn that produces no reply body and exits `0` is a **successful** turn (e.g. an agent that forwards everything via `AGENT_PARTIAL:` and then exits). An empty reply body is only a failure when paired with a non-zero exit code or an `AGENT_ERROR:` line.
+
+### `max_reply_chars` — length cap (applies to both modes)
+
+`max_reply_chars` (default 8000) caps the total character length of the user-visible output:
+
+- **Non-streaming:** the assembled reply body is truncated to `max_reply_chars` characters before delivery.
+- **Streaming:** the cumulative length of all forwarded `AGENT_PARTIAL:` chunks is tracked. Once it reaches `max_reply_chars`, the bridge appends a truncation notice (the profile's `truncation_suffix`) and stops forwarding further partials from the current turn.
+
+The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profile has the same effect whether the agent streams or returns a single body. Agents that buffer all output and emit it as reply body — or agents that forward everything as `AGENT_PARTIAL:` — both hit the same wall.
 
 ### Complete examples
 
