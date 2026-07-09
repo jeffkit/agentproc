@@ -15,14 +15,17 @@
  *   - Forward AGENT_PARTIAL: in real time (via onPartial callback)
  *   - Capture the last AGENT_SESSION: line (last-wins rule)
  *   - Honor AGENT_ERROR: lines
+ *   - Optional tool permission (profile.permission): keep stdin open, honor
+ *     AGENT_PERMISSION_REQUEST: / write AGENT_PERMISSION_RESPONSE:
  *   - Enforce timeout_secs with SIGTERM → kill_grace_secs → SIGKILL
- *   - Write message to stdin and close (when profile.stdin === 'message')
+ *   - Write message to stdin and close (when profile.stdin === 'message'
+ *     and permission is off)
  *   - Return { reply, sessionId, error, exitCode }
  *
  * Exports:
  *   run(profile, options) -> Promise<RunResult>
  *   parseProfileYaml(yamlString) -> Profile
- *   classifyLine(line) -> { kind: 'session'|'partial'|'error'|'body', value }
+ *   classifyLine(line) -> { kind: 'session'|'partial'|'error'|'permission_request'|'body', value }
  */
 
 const { spawn } = require('node:child_process');
@@ -43,6 +46,8 @@ const DEFAULT_MAX_REPLY_CHARS = 8000;
 const PREFIX_SESSION = 'AGENT_SESSION:';
 const PREFIX_PARTIAL = 'AGENT_PARTIAL:';
 const PREFIX_ERROR = 'AGENT_ERROR:';
+const PREFIX_PERMISSION_REQUEST = 'AGENT_PERMISSION_REQUEST:';
+const PREFIX_PERMISSION_RESPONSE = 'AGENT_PERMISSION_RESPONSE:';
 
 // Exit codes per spec
 const EXIT_SUCCESS = 0;
@@ -148,6 +153,9 @@ function normalizeProfile(raw) {
     env: p.env && typeof p.env === 'object' ? p.env : {},
     env_allowlist: envAllowlist,
     stdin: p.stdin === 'message' ? 'message' : 'none',
+    // Opt-in tool-authorization channel (wire 0.2). Default false — profiles
+    // without mid-turn approval keep using CLI auto-approve / skip-permissions.
+    permission: p.permission === true,
     timeout_secs: Number.isFinite(p.timeout_secs) ? p.timeout_secs : DEFAULT_TIMEOUT_SECS,
     kill_grace_secs: Number.isFinite(p.kill_grace_secs) ? p.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
     max_reply_chars: Number.isFinite(p.max_reply_chars) ? p.max_reply_chars : DEFAULT_MAX_REPLY_CHARS,
@@ -342,6 +350,49 @@ function decodeJsonValue(raw) {
   return typeof v === 'string' ? v : text;
 }
 
+/**
+ * Parse a JSON object payload (permission frames). Returns null on failure
+ * or when the value is not a plain object.
+ */
+function decodeJsonObject(raw) {
+  const text = String(raw).trim();
+  if (text === '') return null;
+  try {
+    const v = JSON.parse(text);
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+/**
+ * Format an AGENT_PERMISSION_RESPONSE: line for stdin.
+ * @param {{ request_id: string, behavior: 'allow'|'deny', updated_input?: object, message?: string }} decision
+ */
+function formatPermissionResponse(decision) {
+  const payload = {
+    request_id: String(decision.request_id),
+    behavior: decision.behavior === 'allow' ? 'allow' : 'deny',
+  };
+  if (decision.updated_input != null && typeof decision.updated_input === 'object') {
+    payload.updated_input = decision.updated_input;
+  }
+  if (decision.message != null && decision.message !== '') {
+    payload.message = String(decision.message);
+  }
+  return PREFIX_PERMISSION_RESPONSE + JSON.stringify(payload);
+}
+
+function isValidPermissionRequest(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (typeof obj.request_id !== 'string' || obj.request_id.trim() === '') return false;
+  if (/[\s\r\n\x00-\x1f]/.test(obj.request_id)) return false;
+  if (typeof obj.tool_name !== 'string' || obj.tool_name === '') return false;
+  if (obj.input == null || typeof obj.input !== 'object' || Array.isArray(obj.input)) return false;
+  return true;
+}
+
 // Per spec: session id is opaque but MUST NOT contain whitespace, control
 // characters, or colons. Valid: base64url alphabet (A-Z a-z 0-9 - _) plus
 // . ~ = ; non-empty. `/` and `+` are deliberately excluded — `/` makes the id
@@ -356,8 +407,9 @@ function isValidSessionId(value) {
 /**
  * Classify one stdout line.
  * @param {string} line - Raw line, without trailing newline.
- * @returns {{ kind: string, value: string }}
- *   kind is 'session' | 'partial' | 'error' | 'body'.
+ * @returns {{ kind: string, value: string|object|null }}
+ *   kind is 'session' | 'partial' | 'error' | 'permission_request' | 'body'.
+ *   For permission_request, value is the parsed object or null if malformed.
  */
 function classifyLine(line) {
   // Per spec: bridges MAY match against the stripped line to be tolerant
@@ -371,6 +423,12 @@ function classifyLine(line) {
   }
   if (line.startsWith(PREFIX_ERROR)) {
     return { kind: 'error', value: decodeJsonValue(line.slice(PREFIX_ERROR.length)) };
+  }
+  if (line.startsWith(PREFIX_PERMISSION_REQUEST)) {
+    return {
+      kind: 'permission_request',
+      value: decodeJsonObject(line.slice(PREFIX_PERMISSION_REQUEST.length)),
+    };
   }
   return { kind: 'body', value: line };
 }
@@ -392,6 +450,12 @@ function classifyLine(line) {
  * @property {function(string): void} [onPartial] - Streaming callback.
  * @property {function(string): void} [onSession] - Called when session id captured.
  * @property {function(string): void} [onError] - Called on AGENT_ERROR:.
+ * @property {function(object): (object|Promise<object>|void)} [onPermission] -
+ *   Called on AGENT_PERMISSION_REQUEST: when profile.permission is true.
+ *   Return (or resolve to) { behavior: 'allow'|'deny', updated_input?, message? }
+ *   to write AGENT_PERMISSION_RESPONSE:; omit / return nothing to leave the
+ *   agent blocked until timeout (or call writePermissionResponse later via
+ *   the handle returned from a sync decision — prefer returning the decision).
  * @property {function(string): void} [onProtocolLine] - Raw protocol line (verbose/debug).
  * @property {function(string): void} [onStderr] - Agent's stderr line.
  * @property {boolean} [forwardStdin] - If true, write message to stdin (override profile.stdin).
@@ -483,13 +547,21 @@ async function run(profileRaw, options) {
   // "no image" apart from "image URL is the empty string".
   if (options.imageUrl) env.AGENT_IMAGE_URL = options.imageUrl;
   if (options.fileUrl) env.AGENT_FILE_URL = options.fileUrl;
+  if (profile.permission) env.AGENT_PERMISSION = '1';
+
+  // Stdin is a pipe when we need to write the message and/or keep the channel
+  // open for mid-turn AGENT_PERMISSION_RESPONSE: lines.
+  const needStdinPipe =
+    profile.permission ||
+    profile.stdin === 'message' ||
+    !!options.forwardStdin;
 
   // Spawn — no shell. Cwd optional.
   const child = spawn(argv[0], argv.slice(1), {
     cwd,
     env,
     stdio: [
-      profile.stdin === 'message' || options.forwardStdin ? 'pipe' : 'ignore',
+      needStdinPipe ? 'pipe' : 'ignore',
       'pipe',
       'pipe',
     ],
@@ -506,6 +578,29 @@ async function run(profileRaw, options) {
 
   const bodyLines = [];
   let killed = false;
+  /** @type {Set<string>} */
+  const pendingPermissionIds = new Set();
+  let stdinClosed = !needStdinPipe;
+
+  function writePermissionResponse(decision) {
+    if (stdinClosed || !child.stdin || child.stdin.destroyed) return false;
+    const line = formatPermissionResponse(decision);
+    try {
+      child.stdin.write(line + '\n');
+      if (decision && decision.request_id != null) {
+        pendingPermissionIds.delete(String(decision.request_id));
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function closeStdin() {
+    if (stdinClosed || !child.stdin) return;
+    stdinClosed = true;
+    try { child.stdin.end(); } catch {}
+  }
 
   // ---- streaming partial truncation tracking ----
   // max_reply_chars is applied to the reply body in non-streaming mode and to
@@ -565,6 +660,65 @@ async function run(profileRaw, options) {
       result.error = c.value;
       if (options.onError) options.onError(c.value);
       if (options.onProtocolLine) options.onProtocolLine(line);
+      // Pending permission requests become moot; stop waiting for UI approval.
+      pendingPermissionIds.clear();
+    } else if (c.kind === 'permission_request') {
+      if (!profile.permission) {
+        if (options.onStderr) {
+          options.onStderr(
+            '[agentproc runner] ignoring AGENT_PERMISSION_REQUEST: (profile.permission is not true)'
+          );
+        }
+        if (options.onProtocolLine) options.onProtocolLine(line);
+      } else if (!isValidPermissionRequest(c.value)) {
+        if (options.onStderr) {
+          options.onStderr(
+            `[agentproc runner] malformed AGENT_PERMISSION_REQUEST: ${JSON.stringify(line.slice(0, 200))}`
+          );
+        }
+        // Spec: if we can still parse a request_id, SHOULD deny; else ignore.
+        const rid = c.value && typeof c.value.request_id === 'string' ? c.value.request_id.trim() : '';
+        if (rid && !/[\s\r\n\x00-\x1f]/.test(rid)) {
+          writePermissionResponse({
+            request_id: rid,
+            behavior: 'deny',
+            message: 'malformed permission request',
+          });
+        }
+        if (options.onProtocolLine) options.onProtocolLine(line);
+      } else {
+        const req = c.value;
+        pendingPermissionIds.add(req.request_id);
+        if (options.onProtocolLine) options.onProtocolLine(line);
+        if (typeof options.onPermission === 'function') {
+          Promise.resolve()
+            .then(() => options.onPermission(req))
+            .then(decision => {
+              if (!decision || typeof decision !== 'object') return;
+              writePermissionResponse({
+                request_id: req.request_id,
+                behavior: decision.behavior === 'allow' ? 'allow' : 'deny',
+                updated_input: decision.updated_input !== undefined
+                  ? decision.updated_input
+                  : (decision.updatedInput !== undefined ? decision.updatedInput : req.input),
+                message: decision.message,
+              });
+            })
+            .catch(err => {
+              if (options.onStderr) {
+                options.onStderr(
+                  `[agentproc runner] onPermission failed: ${err && err.message ? err.message : err}`
+                );
+              }
+              writePermissionResponse({
+                request_id: req.request_id,
+                behavior: 'deny',
+                message: 'permission handler error',
+              });
+            });
+        }
+        // No onPermission: leave the agent blocked until turn timeout (spec).
+      }
     } else {
       bodyLines.push(line);
     }
@@ -607,10 +761,16 @@ async function run(profileRaw, options) {
     }
   });
 
-  // ---- stdin (if requested) ----
-  if (profile.stdin === 'message' || options.forwardStdin) {
-    child.stdin.write(options.message);
-    child.stdin.end();
+  // ---- stdin ----
+  // permission: true → keep open for AGENT_PERMISSION_RESPONSE: (close on exit/timeout).
+  // stdin: message / forwardStdin → write message first; EOF only when permission is off.
+  if (needStdinPipe) {
+    if (profile.stdin === 'message' || options.forwardStdin) {
+      try { child.stdin.write(options.message); } catch {}
+    }
+    if (!profile.permission) {
+      closeStdin();
+    }
   }
 
   // ---- timeout handling per spec: SIGTERM → grace → SIGKILL ----
@@ -633,6 +793,18 @@ async function run(profileRaw, options) {
     timer = setTimeout(() => {
       killed = true;
       result.timedOut = true;
+      // Spec: when timing out with a pending permission request, prefer deny
+      // with a timeout message if stdin is still writable, then kill.
+      if (pendingPermissionIds.size > 0) {
+        for (const rid of [...pendingPermissionIds]) {
+          writePermissionResponse({
+            request_id: rid,
+            behavior: 'deny',
+            message: 'permission timed out',
+          });
+        }
+      }
+      closeStdin();
       try { child.kill('SIGTERM'); } catch {}
       killTimer = setTimeout(() => {
         try {
@@ -668,6 +840,7 @@ async function run(profileRaw, options) {
 
   if (timer) clearTimeout(timer);
   if (killTimer) clearTimeout(killTimer);
+  closeStdin();
 
   // Flush any remaining stdout buffer as a final line (without trailing \n).
   if (stdoutBuf.length > 0) {
@@ -718,6 +891,9 @@ module.exports = {
   classifyLine,
   isValidSessionId,
   decodeJsonValue,
+  decodeJsonObject,
+  formatPermissionResponse,
+  isValidPermissionRequest,
   substitute,
   expandEnvRef,
   expandPath,

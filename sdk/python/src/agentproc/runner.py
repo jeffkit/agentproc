@@ -13,8 +13,11 @@ Responsibilities:
   - Forward AGENT_PARTIAL: in real time (via on_partial callback)
   - Capture the last AGENT_SESSION: line (last-wins rule)
   - Honor AGENT_ERROR: lines
+  - Optional tool permission (profile.permission): keep stdin open, honor
+    AGENT_PERMISSION_REQUEST: / write AGENT_PERMISSION_RESPONSE:
   - Enforce timeout_secs with SIGTERM → kill_grace_secs → SIGKILL
-  - Write message to stdin and close (when profile.stdin == 'message')
+  - Write message to stdin and close (when profile.stdin == 'message'
+    and permission is off)
   - Return RunResult(reply, session_id, error, exit_code, timed_out)
 """
 
@@ -51,6 +54,9 @@ __all__ = [
     "classify_line",
     "is_valid_session_id",
     "decode_json_value",
+    "decode_json_object",
+    "format_permission_response",
+    "is_valid_permission_request",
     "substitute",
     "expand_env_ref",
     "expand_path",
@@ -67,6 +73,8 @@ DEFAULT_MAX_REPLY_CHARS = 8000
 PREFIX_SESSION = "AGENT_SESSION:"
 PREFIX_PARTIAL = "AGENT_PARTIAL:"
 PREFIX_ERROR = "AGENT_ERROR:"
+PREFIX_PERMISSION_REQUEST = "AGENT_PERMISSION_REQUEST:"
+PREFIX_PERMISSION_RESPONSE = "AGENT_PERMISSION_RESPONSE:"
 
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
@@ -147,6 +155,7 @@ class RunOptions:
     on_error: Optional[Callable[[str], None]] = None
     on_protocol_line: Optional[Callable[[str], None]] = None
     on_stderr: Optional[Callable[[str], None]] = None
+    on_permission: Optional[Callable[[Dict[str, Any]], Any]] = None
     forward_stdin: Optional[bool] = None
 
 
@@ -212,6 +221,8 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
         "env": env_value,
         "env_allowlist": env_allowlist,
         "stdin": "message" if src.get("stdin") == "message" else "none",
+        # Opt-in tool-authorization channel (wire 0.2). Default False.
+        "permission": src.get("permission") is True,
         "timeout_secs": (
             int(src["timeout_secs"]) if _is_int_like(src.get("timeout_secs"))
             else DEFAULT_TIMEOUT_SECS
@@ -409,13 +420,64 @@ def decode_json_value(raw: str) -> str:
     return v if isinstance(v, str) else text
 
 
-def classify_line(line: str) -> Dict[str, str]:
+def decode_json_object(raw: str) -> Optional[Dict[str, Any]]:
+    """Parse a JSON object payload (permission frames). None on failure."""
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        v = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(v, dict):
+        return v
+    return None
+
+
+def format_permission_response(decision: Dict[str, Any]) -> str:
+    """Format an AGENT_PERMISSION_RESPONSE: line for stdin."""
+    payload: Dict[str, Any] = {
+        "request_id": str(decision["request_id"]),
+        "behavior": "allow" if decision.get("behavior") == "allow" else "deny",
+    }
+    updated = decision.get("updated_input")
+    if updated is not None and isinstance(updated, dict):
+        payload["updated_input"] = updated
+    message = decision.get("message")
+    if message is not None and message != "":
+        payload["message"] = str(message)
+    return PREFIX_PERMISSION_RESPONSE + json.dumps(payload, ensure_ascii=False)
+
+
+def is_valid_permission_request(obj: Any) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    rid = obj.get("request_id")
+    if not isinstance(rid, str) or not rid.strip():
+        return False
+    if re.search(r"[\s\r\n\x00-\x1f]", rid):
+        return False
+    tool = obj.get("tool_name")
+    if not isinstance(tool, str) or tool == "":
+        return False
+    inp = obj.get("input")
+    if not isinstance(inp, dict):
+        return False
+    return True
+
+
+def classify_line(line: str) -> Dict[str, Any]:
     if line.startswith(PREFIX_SESSION):
         return {"kind": "session", "value": line[len(PREFIX_SESSION):].strip()}
     if line.startswith(PREFIX_PARTIAL):
         return {"kind": "partial", "value": decode_json_value(line[len(PREFIX_PARTIAL):])}
     if line.startswith(PREFIX_ERROR):
         return {"kind": "error", "value": decode_json_value(line[len(PREFIX_ERROR):])}
+    if line.startswith(PREFIX_PERMISSION_REQUEST):
+        return {
+            "kind": "permission_request",
+            "value": decode_json_object(line[len(PREFIX_PERMISSION_REQUEST):]),
+        }
     return {"kind": "body", "value": line}
 
 
@@ -498,15 +560,20 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         env["AGENT_IMAGE_URL"] = options.image_url
     if options.file_url:
         env["AGENT_FILE_URL"] = options.file_url
+    if profile["permission"]:
+        env["AGENT_PERMISSION"] = "1"
 
-    # forward_stdin overrides profile.stdin: when True, always write the
-    # message to stdin (used by the CLI's --stdin flag). When None/False,
-    # fall back to the profile's stdin setting.
-    use_stdin = profile["stdin"] == "message" or bool(options.forward_stdin)
-    stdin_payload = options.message if use_stdin else None
+    # Stdin is a pipe when we need to write the message and/or keep the
+    # channel open for mid-turn AGENT_PERMISSION_RESPONSE: lines.
+    write_message = profile["stdin"] == "message" or bool(options.forward_stdin)
+    need_stdin_pipe = profile["permission"] or write_message
+    stdin_payload = options.message if write_message else None
 
     result = RunResult()
     body_lines: List[str] = []
+    pending_permission_ids: set = set()
+    stdin_lock = threading.Lock()
+    stdin_closed = not need_stdin_pipe
     # Streaming partial truncation tracking — see matching comment in runner.js.
     _cumulative_partial_chars = 0
     _partials_truncated = False
@@ -548,7 +615,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             argv,
             cwd=cwd,
             env=env,
-            stdin=subprocess.PIPE if stdin_payload is not None else subprocess.DEVNULL,
+            stdin=subprocess.PIPE if need_stdin_pipe else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -576,12 +643,43 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         result.exit_code = EXIT_ERROR
         return result
 
-    if stdin_payload is not None:
-        try:
-            proc.stdin.write(stdin_payload)
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
+    def _write_permission_response(decision: Dict[str, Any]) -> bool:
+        nonlocal stdin_closed
+        with stdin_lock:
+            if stdin_closed or proc.stdin is None or proc.stdin.closed:
+                return False
+            try:
+                proc.stdin.write(format_permission_response(decision) + "\n")
+                proc.stdin.flush()
+                rid = decision.get("request_id")
+                if rid is not None:
+                    pending_permission_ids.discard(str(rid))
+                return True
+            except (BrokenPipeError, ValueError, OSError):
+                return False
+
+    def _close_stdin() -> None:
+        nonlocal stdin_closed
+        with stdin_lock:
+            if stdin_closed or proc.stdin is None:
+                return
+            stdin_closed = True
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, ValueError, OSError):
+                pass
+
+    if need_stdin_pipe:
+        if stdin_payload is not None:
+            try:
+                with stdin_lock:
+                    if proc.stdin is not None and not proc.stdin.closed:
+                        proc.stdin.write(stdin_payload)
+                        proc.stdin.flush()
+            except (BrokenPipeError, ValueError, OSError):
+                pass
+        if not profile["permission"]:
+            _close_stdin()
 
     def _drain_stderr() -> None:
         assert proc.stderr is not None
@@ -636,6 +734,70 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 options.on_error(c["value"])
             if options.on_protocol_line:
                 options.on_protocol_line(line)
+            pending_permission_ids.clear()
+        elif c["kind"] == "permission_request":
+            if not profile["permission"]:
+                if options.on_stderr:
+                    options.on_stderr(
+                        "[agentproc runner] ignoring AGENT_PERMISSION_REQUEST: "
+                        "(profile.permission is not true)"
+                    )
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
+            elif not is_valid_permission_request(c["value"]):
+                if options.on_stderr:
+                    options.on_stderr(
+                        "[agentproc runner] malformed AGENT_PERMISSION_REQUEST: "
+                        f"{line[:200]!r}"
+                    )
+                rid = ""
+                if isinstance(c["value"], dict):
+                    raw_rid = c["value"].get("request_id")
+                    if isinstance(raw_rid, str):
+                        rid = raw_rid.strip()
+                if rid and not re.search(r"[\s\r\n\x00-\x1f]", rid):
+                    _write_permission_response({
+                        "request_id": rid,
+                        "behavior": "deny",
+                        "message": "malformed permission request",
+                    })
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
+            else:
+                req = c["value"]
+                assert isinstance(req, dict)
+                pending_permission_ids.add(req["request_id"])
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
+                if options.on_permission is not None:
+                    try:
+                        decision = options.on_permission(req)
+                        if isinstance(decision, dict):
+                            updated = decision.get("updated_input")
+                            if updated is None and "updatedInput" in decision:
+                                updated = decision.get("updatedInput")
+                            if updated is None:
+                                updated = req.get("input")
+                            _write_permission_response({
+                                "request_id": req["request_id"],
+                                "behavior": (
+                                    "allow" if decision.get("behavior") == "allow"
+                                    else "deny"
+                                ),
+                                "updated_input": updated if isinstance(updated, dict) else req.get("input"),
+                                "message": decision.get("message"),
+                            })
+                    except Exception as exc:  # noqa: BLE001 — surface to agent as deny
+                        if options.on_stderr:
+                            options.on_stderr(
+                                f"[agentproc runner] on_permission failed: {exc}"
+                            )
+                        _write_permission_response({
+                            "request_id": req["request_id"],
+                            "behavior": "deny",
+                            "message": "permission handler error",
+                        })
+                # No on_permission: leave the agent blocked until turn timeout.
         else:
             body_lines.append(line)
 
@@ -659,6 +821,15 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 except subprocess.TimeoutExpired:
                     if time.monotonic() >= deadline:
                         timed_out = True
+                        # Spec: prefer deny with timeout message for pending
+                        # permission requests, then kill.
+                        for rid in list(pending_permission_ids):
+                            _write_permission_response({
+                                "request_id": rid,
+                                "behavior": "deny",
+                                "message": "permission timed out",
+                            })
+                        _close_stdin()
                         # terminate() is SIGTERM on POSIX, TerminateProcess on
                         # Windows — both are the "polite shutdown" the spec's
                         # SIGTERM→SIGKILL contract refers to.
@@ -694,6 +865,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 pass
         exit_code = proc.wait()
 
+    _close_stdin()
     stdout_thread.join(timeout=5)
     # Drain stderr fully before running post-mortem diagnosis. The diagnosis
     # reads the full capture, so we need the drain thread to have caught up.

@@ -17,7 +17,8 @@ Adds an **opt-in** mid-turn tool-authorization channel so IM bridges can replace
 - **Wire.** stdout `AGENT_PERMISSION_REQUEST:<json-object>`; stdin `AGENT_PERMISSION_RESPONSE:<json-object>` (`request_id`, `behavior: allow|deny`, optional `updated_input` / `message`).
 - **Opt-in only.** Agents/CLIs without a control-request style prompt keep using auto-approve flags. Bridges that do not implement the channel ignore it.
 - **Versions.** Wire protocol `0.1` → `0.2` (new line prefixes + mid-turn stdin frames). Spec document revision `0.8`. SDK packages `0.6.0` (Python + Node) so `PROTOCOL_VERSION` matches the wire string.
-- **This PR scope.** Spec (EN + ZH), docs quickref, `PROTOCOL_VERSION` constant + tests. Runner recognition / Hub claude-code translation land in follow-ups.
+- **Runner (Node + Python).** `normalizeProfile` / `normalize_profile` accept `permission`; `classifyLine` / `classify_line` recognize `AGENT_PERMISSION_REQUEST:`; `run()` injects `AGENT_PERMISSION=1`, keeps stdin open when enabled, calls `onPermission` / `on_permission`, writes `AGENT_PERMISSION_RESPONSE:`, and denies pending requests on turn timeout. Default profiles unchanged.
+- **Follow-up.** Hub `claude-code` translation of CLI `control_request` ↔ these frames (opt-in profile switch).
 
 ---
 

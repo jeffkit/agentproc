@@ -21,6 +21,9 @@ const {
   run,
   classifyLine,
   decodeJsonValue,
+  decodeJsonObject,
+  formatPermissionResponse,
+  isValidPermissionRequest,
   substitute,
   normalizeProfile,
   expandEnvRef,
@@ -64,6 +67,18 @@ describe('classifyLine', () => {
 
   test('AGENT_ERROR: lenient on bad JSON', () => {
     assert.deepStrictEqual(classifyLine('AGENT_ERROR:boom'), { kind: 'error', value: 'boom' });
+  });
+
+  test('identifies AGENT_PERMISSION_REQUEST:', () => {
+    const c = classifyLine('AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{}}');
+    assert.strictEqual(c.kind, 'permission_request');
+    assert.deepStrictEqual(c.value, { request_id: '1', tool_name: 'Bash', input: {} });
+  });
+
+  test('AGENT_PERMISSION_REQUEST: malformed JSON → null value', () => {
+    const c = classifyLine('AGENT_PERMISSION_REQUEST:not-json');
+    assert.strictEqual(c.kind, 'permission_request');
+    assert.strictEqual(c.value, null);
   });
 
   test('body line: anything else', () => {
@@ -322,6 +337,13 @@ describe('normalizeProfile', () => {
     assert.strictEqual(normalizeProfile({ command: 'x', stdin: 'none' }).stdin, 'none');
     assert.strictEqual(normalizeProfile({ command: 'x', stdin: 'bogus' }).stdin, 'none');
     assert.strictEqual(normalizeProfile({ command: 'x' }).stdin, 'none');
+  });
+
+  test('permission defaults false; true only when boolean true', () => {
+    assert.strictEqual(normalizeProfile({ command: 'x' }).permission, false);
+    assert.strictEqual(normalizeProfile({ command: 'x', permission: true }).permission, true);
+    assert.strictEqual(normalizeProfile({ command: 'x', permission: false }).permission, false);
+    assert.strictEqual(normalizeProfile({ command: 'x', permission: 'true' }).permission, false);
   });
 
   test('streaming: false is honored, anything else true', () => {
@@ -711,6 +733,91 @@ describe('run() — end-to-end', () => {
       `diagnosis lost in noise; r.error=${JSON.stringify(r.error)}`,
     );
   });
+
+  test('permission:true injects AGENT_PERMISSION=1 and allows via onPermission', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "perm=$AGENT_PERMISSION"\n' +
+      'echo \'AGENT_PERMISSION_REQUEST:{"request_id":"r1","tool_name":"Bash","input":{"command":"true"}}\'\n' +
+      'IFS= read -r resp\n' +
+      'echo "got:$resp"\n' +
+      'echo "AGENT_SESSION:sess-perm-1"\n'
+    );
+    const seen = [];
+    const r = await run(
+      { command: agent, permission: true },
+      {
+        message: 'hi',
+        onPermission: (req) => {
+          seen.push(req);
+          return { behavior: 'allow', updated_input: req.input };
+        },
+      },
+    );
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].request_id, 'r1');
+    assert.ok(r.reply.includes('perm=1'));
+    assert.ok(r.reply.includes('got:AGENT_PERMISSION_RESPONSE:'));
+    assert.ok(r.reply.includes('"behavior":"allow"'));
+    assert.strictEqual(r.sessionId, 'sess-perm-1');
+    assert.strictEqual(r.exitCode, 0);
+  });
+
+  test('permission:false ignores AGENT_PERMISSION_REQUEST (no AGENT_PERMISSION env)', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "perm=<${AGENT_PERMISSION-unset}>"\n' +
+      'echo \'AGENT_PERMISSION_REQUEST:{"request_id":"r1","tool_name":"Bash","input":{}}\'\n' +
+      'echo "done"\n'
+    );
+    const stderr = [];
+    let called = false;
+    const r = await run(
+      { command: agent },
+      {
+        message: 'hi',
+        onPermission: () => { called = true; return { behavior: 'allow' }; },
+        onStderr: (l) => stderr.push(l),
+      },
+    );
+    assert.strictEqual(called, false);
+    assert.ok(r.reply.includes('perm=<unset>'));
+    assert.ok(r.reply.includes('done'));
+    assert.ok(stderr.some((l) => /ignoring AGENT_PERMISSION_REQUEST/.test(l)));
+  });
+
+  test('permission deny is written when onPermission returns deny', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'AGENT_PERMISSION_REQUEST:{"request_id":"r2","tool_name":"Bash","input":{}}\'\n' +
+      'IFS= read -r resp\n' +
+      'echo "got:$resp"\n'
+    );
+    const r = await run(
+      { command: agent, permission: true },
+      {
+        message: 'hi',
+        onPermission: () => ({ behavior: 'deny', message: 'not allowed' }),
+      },
+    );
+    assert.ok(r.reply.includes('"behavior":"deny"'));
+    assert.ok(r.reply.includes('not allowed'));
+  });
+});
+
+test('formatPermissionResponse / isValidPermissionRequest', () => {
+  assert.strictEqual(
+    formatPermissionResponse({ request_id: '1', behavior: 'allow', updated_input: { c: 'x' } }),
+    'AGENT_PERMISSION_RESPONSE:{"request_id":"1","behavior":"allow","updated_input":{"c":"x"}}',
+  );
+  assert.strictEqual(
+    formatPermissionResponse({ request_id: '2', behavior: 'deny', message: 'nope' }),
+    'AGENT_PERMISSION_RESPONSE:{"request_id":"2","behavior":"deny","message":"nope"}',
+  );
+  assert.ok(isValidPermissionRequest({ request_id: '1', tool_name: 'Bash', input: {} }));
+  assert.ok(!isValidPermissionRequest({ request_id: '1', tool_name: 'Bash' }));
+  assert.ok(!isValidPermissionRequest({ request_id: 'a b', tool_name: 'Bash', input: {} }));
+  assert.ok(!isValidPermissionRequest(null));
 });
 
 test('PROTOCOL_VERSION is "0.2"', () => {

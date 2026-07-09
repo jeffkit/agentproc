@@ -17,6 +17,9 @@ from agentproc.runner import (
     classify_line,
     is_valid_session_id,
     decode_json_value,
+    decode_json_object,
+    format_permission_response,
+    is_valid_permission_request,
     expand_env_ref,
     expand_path,
     normalize_profile,
@@ -54,6 +57,18 @@ class TestClassifyLine:
     def test_error_lenient_on_bad_json(self):
         assert classify_line("AGENT_ERROR:boom") == {"kind": "error", "value": "boom"}
 
+    def test_permission_request(self):
+        c = classify_line(
+            'AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{}}'
+        )
+        assert c["kind"] == "permission_request"
+        assert c["value"] == {"request_id": "1", "tool_name": "Bash", "input": {}}
+
+    def test_permission_request_malformed(self):
+        c = classify_line("AGENT_PERMISSION_REQUEST:not-json")
+        assert c["kind"] == "permission_request"
+        assert c["value"] is None
+
     def test_body_line(self):
         assert classify_line("hello world") == {"kind": "body", "value": "hello world"}
 
@@ -62,6 +77,32 @@ class TestClassifyLine:
 
     def test_prefix_like_but_not_exact(self):
         assert classify_line("AGENT_SESSION") == {"kind": "body", "value": "AGENT_SESSION"}
+
+
+class TestPermissionHelpers:
+    def test_format_allow(self):
+        assert format_permission_response(
+            {"request_id": "1", "behavior": "allow", "updated_input": {"c": "x"}}
+        ) == 'AGENT_PERMISSION_RESPONSE:{"request_id": "1", "behavior": "allow", "updated_input": {"c": "x"}}'
+
+    def test_format_deny(self):
+        assert format_permission_response(
+            {"request_id": "2", "behavior": "deny", "message": "nope"}
+        ) == 'AGENT_PERMISSION_RESPONSE:{"request_id": "2", "behavior": "deny", "message": "nope"}'
+
+    def test_is_valid(self):
+        assert is_valid_permission_request(
+            {"request_id": "1", "tool_name": "Bash", "input": {}}
+        )
+        assert not is_valid_permission_request(
+            {"request_id": "1", "tool_name": "Bash"}
+        )
+        assert not is_valid_permission_request(
+            {"request_id": "a b", "tool_name": "Bash", "input": {}}
+        )
+        assert not is_valid_permission_request(None)
+        assert decode_json_object('{"a":1}') == {"a": 1}
+        assert decode_json_object("[]") is None
 
 
 class TestIsValidSessionId:
@@ -238,6 +279,12 @@ class TestNormalizeProfile:
         assert normalize_profile({"command": "x", "stdin": "none"})["stdin"] == "none"
         assert normalize_profile({"command": "x", "stdin": "bogus"})["stdin"] == "none"
         assert normalize_profile({"command": "x"})["stdin"] == "none"
+
+    def test_permission_defaults_false(self):
+        assert normalize_profile({"command": "x"})["permission"] is False
+        assert normalize_profile({"command": "x", "permission": True})["permission"] is True
+        assert normalize_profile({"command": "x", "permission": False})["permission"] is False
+        assert normalize_profile({"command": "x", "permission": "true"})["permission"] is False
 
     def test_streaming_false_honored(self):
         assert normalize_profile({"command": "x", "streaming": False})["streaming"] is False
@@ -650,3 +697,81 @@ class TestRunEndToEnd:
             "agent script not found: /tmp/missing.py. Check the profile's "
             "command path (likely a {{PROFILE_DIR}} issue or a typo)."
         )
+
+    def test_permission_allow_via_on_permission(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "perm=$AGENT_PERMISSION"\n'
+            "echo 'AGENT_PERMISSION_REQUEST:"
+            '{"request_id":"r1","tool_name":"Bash","input":{"command":"true"}}\'\n'
+            "IFS= read -r resp\n"
+            'echo "got:$resp"\n'
+            'echo "AGENT_SESSION:sess-perm-1"\n'
+        )
+        seen: List[dict] = []
+
+        def on_permission(req):
+            seen.append(req)
+            return {"behavior": "allow", "updated_input": req["input"]}
+
+        r = run(
+            {"command": str(agent), "permission": True},
+            RunOptions(message="hi", on_permission=on_permission),
+        )
+        assert len(seen) == 1
+        assert seen[0]["request_id"] == "r1"
+        assert "perm=1" in r.reply
+        assert "got:AGENT_PERMISSION_RESPONSE:" in r.reply
+        assert '"behavior": "allow"' in r.reply or '"behavior":"allow"' in r.reply
+        assert r.session_id == "sess-perm-1"
+        assert r.exit_code == 0
+
+    def test_permission_false_ignores_request(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "perm=<${AGENT_PERMISSION-unset}>"\n'
+            "echo 'AGENT_PERMISSION_REQUEST:"
+            '{"request_id":"r1","tool_name":"Bash","input":{}}\'\n'
+            'echo "done"\n'
+        )
+        stderr: List[str] = []
+        called = False
+
+        def on_permission(_req):
+            nonlocal called
+            called = True
+            return {"behavior": "allow"}
+
+        r = run(
+            {"command": str(agent)},
+            RunOptions(
+                message="hi",
+                on_permission=on_permission,
+                on_stderr=stderr.append,
+            ),
+        )
+        assert called is False
+        assert "perm=<unset>" in r.reply
+        assert "done" in r.reply
+        assert any("ignoring AGENT_PERMISSION_REQUEST" in s for s in stderr)
+
+    def test_permission_deny(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            "echo 'AGENT_PERMISSION_REQUEST:"
+            '{"request_id":"r2","tool_name":"Bash","input":{}}\'\n'
+            "IFS= read -r resp\n"
+            'echo "got:$resp"\n'
+        )
+        r = run(
+            {"command": str(agent), "permission": True},
+            RunOptions(
+                message="hi",
+                on_permission=lambda _r: {
+                    "behavior": "deny",
+                    "message": "not allowed",
+                },
+            ),
+        )
+        assert '"behavior": "deny"' in r.reply or '"behavior":"deny"' in r.reply
+        assert "not allowed" in r.reply
