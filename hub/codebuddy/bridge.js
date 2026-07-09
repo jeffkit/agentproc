@@ -5,14 +5,29 @@
  *
  * CodeBuddy's stream-json output schema is compatible with claude's.
  * Differences: command name `codebuddy`, resume flag `-r`, env prefix CODEBUDDY_*.
+ *
+ * Mid-turn AgentProc permission is NOT supported: CodeBuddy documents
+ * `--permission-prompt-tool` as unsupported. If AGENT_PERMISSION=1, exit with
+ * AGENT_ERROR rather than silently falling back to skip-permissions.
  */
 
 const path = require('node:path');
 const HUB_DIR = path.resolve(__dirname, '..');
-const { runBridge } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
+const {
+  runBridge,
+  emitError,
+} = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
 const CLI_NAME = 'codebuddy';
 const INSTALL_HINT = 'See your internal CodeBuddy installation docs.';
+const PERMISSION_UNSUPPORTED =
+  'codebuddy does not support mid-turn AgentProc permission ' +
+  '(--permission-prompt-tool is documented as unsupported). ' +
+  'Remove permission: true from the profile, or use hub/claude-code.';
+
+function permissionEnabled(env) {
+  return (env.AGENT_PERMISSION || '').trim() === '1';
+}
 
 function buildArgs(message, sessionId, env) {
   const args = [
@@ -54,7 +69,24 @@ function parseEvent(event) {
   return null;
 }
 
-runBridge({ cliName: CLI_NAME, cliInstallHint: INSTALL_HINT, buildArgs, parseEvent }).catch(e => {
-  process.stderr.write(`[codebuddy bridge] unhandled error: ${e && (e.stack || e)}\n`);
-  process.exit(1);
-});
+module.exports = { permissionEnabled, buildArgs, parseEvent, PERMISSION_UNSUPPORTED };
+
+async function main() {
+  if (permissionEnabled(process.env)) {
+    emitError(PERMISSION_UNSUPPORTED);
+    process.exit(1);
+  }
+  await runBridge({
+    cliName: CLI_NAME,
+    cliInstallHint: INSTALL_HINT,
+    buildArgs,
+    parseEvent,
+  });
+}
+
+if (require.main === module) {
+  main().catch(e => {
+    process.stderr.write(`[codebuddy bridge] unhandled error: ${e && (e.stack || e)}\n`);
+    process.exit(1);
+  });
+}

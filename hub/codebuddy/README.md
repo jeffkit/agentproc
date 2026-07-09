@@ -98,6 +98,12 @@ Same shape as [claude-code](../claude-code/#how-it-works), with these deltas:
 | `CODEBUDDY_MODEL` | no | Model override. |
 | `CODEBUDDY_DISALLOW_TOOLS` | no | Comma-separated disallowed tools (default: `AskUserQuestion`). |
 
+## Optional tool permission
+
+**Not supported.** CodeBuddy's headless docs mark `--permission-prompt-tool` as unsupported. If you set `permission: true` (or inject `AGENT_PERMISSION=1`), this bridge exits with `AGENT_ERROR` instead of silently falling back to `--dangerously-skip-permissions`.
+
+For mid-turn IM tool authorization, use [claude-code](../claude-code/) (`permission: true`) or [codex](../codex/) (`permission: true` via Codex `PermissionRequest` hooks). See [PERMISSIONS.md](../PERMISSIONS.md).
+
 ## Caveats
 
 - Same `--dangerously-skip-permissions` trade-off as claude-code; sandbox if concerned.

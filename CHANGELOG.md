@@ -19,8 +19,9 @@ Adds an **opt-in** mid-turn tool-authorization channel so IM bridges can replace
 - **Versions.** Wire protocol `0.1` → `0.2` (new line prefixes + mid-turn stdin frames). Spec document revision `0.8`. SDK packages `0.6.0` (Python + Node) so `PROTOCOL_VERSION` matches the wire string.
 - **Runner (Node + Python).** `normalizeProfile` / `normalize_profile` accept `permission`; `classifyLine` / `classify_line` recognize `AGENT_PERMISSION_REQUEST:`; `run()` injects `AGENT_PERMISSION=1`, keeps stdin open when enabled, calls `onPermission` / `on_permission`, writes `AGENT_PERMISSION_RESPONSE:`, and denies pending requests on turn timeout. Default profiles unchanged.
 - **Hub `claude-code`.** Opt-in `permission: true` switches the bridge to `--permission-prompt-tool stdio` and translates Claude `control_request`/`control_response` ↔ AgentProc permission frames. Default path still uses `--dangerously-skip-permissions`. `agentproc` CLI prompts on a TTY when the profile enables permission.
-- **Survey.** `hub/PERMISSIONS.md` records which other hub CLIs have a mid-turn stdio approval channel (codex = different protocol; gemini/others = keep yolo).
-- **Follow-up.** codebuddy parity (likely); codex dedicated translator.
+- **Hub `codex`.** Opt-in `permission: true` injects a one-shot `CODEX_HOME` with a `PermissionRequest` hook (`permission_hook.py`) that relays ↔ `AGENT_PERMISSION_*` over a Unix socket; sets `approval_policy=on-request` and `--dangerously-bypass-hook-trust`. Default path unchanged (no approval bypass).
+- **Hub `codebuddy`.** Mid-turn permission is **not** available (`--permission-prompt-tool` unsupported upstream). Bridge fails closed with `AGENT_ERROR` if `AGENT_PERMISSION=1` — no silent skip-permissions fallback.
+- **Survey.** `hub/PERMISSIONS.md` records which hub CLIs have a mid-turn approval channel.
 
 ---
 

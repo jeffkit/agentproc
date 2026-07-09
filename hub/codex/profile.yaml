@@ -9,6 +9,10 @@ agentproc:
   # Override with --cwd if you want codex to run elsewhere.
   timeout_secs: 600
   streaming: true
+  # Opt-in mid-turn tool authorization (wire 0.2). Uses a one-shot CODEX_HOME
+  # PermissionRequest hook that relays ↔ AGENT_PERMISSION_*. Default false
+  # keeps the existing policy / sandbox behaviour (no bypass flag).
+  # permission: true
   env:
     OPENAI_API_KEY: "${OPENAI_API_KEY}"
     # Optional override (uncomment to use):
@@ -26,3 +30,7 @@ notes: |
   Session continuity uses `codex exec resume --json <thread_id> <prompt>` on
   subsequent turns. `--json` MUST be present on both first-turn and resume paths;
   without it codex emits non-NDJSON output that the bridge cannot parse.
+
+  With `permission: true`, the bridge injects a temporary CODEX_HOME with a
+  PermissionRequest hook (`permission_hook.py`) that talks to the bridge over a
+  Unix socket, and sets `approval_policy=on-request` so approvals actually fire.

@@ -6,6 +6,10 @@ CodeBuddy's stream-json output schema is compatible with claude's. Differences:
     - command name: codebuddy
     - resume flag: -r <sessionId>  (instead of --resume)
     - env var prefix: CODEBUDDY_*  (instead of CLAUDE_*)
+
+Mid-turn AgentProc permission is NOT supported: CodeBuddy documents
+``--permission-prompt-tool`` as unsupported. If AGENT_PERMISSION=1, exit with
+AGENT_ERROR rather than silently falling back to skip-permissions.
 """
 
 from __future__ import annotations
@@ -18,11 +22,20 @@ _HUB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HUB_DIR not in sys.path:
     sys.path.insert(0, _HUB_DIR)
 
-from _shared.stream_utils import EventResult, main_entry  # noqa: E402
+from _shared.stream_utils import EventResult, emit_error, main_entry  # noqa: E402
 
 
 CLI_NAME = "codebuddy"
 INSTALL_HINT = "See your internal CodeBuddy installation docs."
+PERMISSION_UNSUPPORTED = (
+    "codebuddy does not support mid-turn AgentProc permission "
+    "(--permission-prompt-tool is documented as unsupported). "
+    "Remove permission: true from the profile, or use hub/claude-code."
+)
+
+
+def _permission_enabled(env) -> bool:
+    return env.get("AGENT_PERMISSION", "").strip() == "1"
 
 
 def build_args(message: str, session_id: str, env) -> list[str]:
@@ -67,4 +80,7 @@ def parse_event(event: dict) -> Optional[EventResult]:
 
 
 if __name__ == "__main__":
+    if _permission_enabled(os.environ):
+        emit_error(PERMISSION_UNSUPPORTED)
+        sys.exit(1)
     sys.exit(main_entry(CLI_NAME, INSTALL_HINT, build_args, parse_event))
