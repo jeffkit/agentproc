@@ -60,19 +60,16 @@ const EXIT_SIGTERM = 143;
 // Environment inheritance policy
 // ---------------------------------------------------------------------------
 
-// When a profile declares `env_allowlist`, the child process does NOT inherit
-// the bridge's environment wholesale — doing so would let any secret the
-// bridge happens to hold (cloud tokens, API keys) reach the agent even though
-// the profile never declared it, making `env_allowlist` a cosmetic filter
-// rather than a trust boundary. Instead the child env is built from:
-//   (1) this minimal INFRA set (copied from process.env when present) so the
-//       agent can still find its interpreter / temp dir / locale, ...
-//   (2) the profile `env` block (with ${VAR} expanded, allowlist-filtered),
+// Default: the child does NOT inherit the bridge's environment wholesale.
+// Undeclared secrets (cloud tokens, API keys) must not reach the agent just
+// because the bridge process happens to hold them. The child env is built from:
+//   (1) this minimal INFRA set (copied from process.env when present),
+//   (2) the profile `env` block (${VAR} expanded; optionally allowlist-filtered),
 //   (3) the AGENT_* vars the bridge injects,
 //   (4) extraEnv from the CLI --env flag.
-// Secrets not declared by the profile never reach the agent. When
-// `env_allowlist` is absent, the bridge inherits process.env wholesale
-// (back-compat) — the trust-the-profile behaviour.
+// Escape hatch: `env_inherit: all` restores full process.env inheritance
+// (legacy trust-the-profile behaviour). `env_allowlist` only gates ${VAR}
+// expansion — it no longer doubles as the inheritance switch.
 const ENV_INFRA_VARS = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE',
   'LC_MESSAGES', 'TERM', 'TMPDIR', 'TZ', 'PWD',
@@ -82,8 +79,8 @@ const ENV_INFRA_VARS = [
   'PROCESSOR_ARCHITECTURE', 'OS',
 ];
 
-function buildBaseEnv(allowlist) {
-  if (allowlist === null) return { ...process.env };
+function buildBaseEnv(envInherit) {
+  if (envInherit === 'all') return { ...process.env };
   const base = {};
   for (const name of ENV_INFRA_VARS) {
     if (process.env[name] !== undefined) base[name] = process.env[name];
@@ -136,8 +133,8 @@ function normalizeProfile(raw) {
 
   // env_allowlist (optional): when present, ${VAR} references in the env
   // block whose name is NOT in the list expand to empty + a stderr warning.
-  // Absent ⇒ current behaviour (expand against the full bridge environment).
-  // Opt-in: existing profiles keep working unchanged.
+  // Absent ⇒ expand against the full bridge environment (inheritance is
+  // controlled separately by env_inherit).
   let envAllowlist = null;
   if (p.env_allowlist !== undefined && p.env_allowlist !== null) {
     if (!Array.isArray(p.env_allowlist)) {
@@ -146,12 +143,24 @@ function normalizeProfile(raw) {
     envAllowlist = new Set(p.env_allowlist.map(String));
   }
 
+  // env_inherit: 'minimal' (default) | 'all'. Controls child base-env
+  // inheritance only — not ${VAR} expansion.
+  let envInherit = 'minimal';
+  if (p.env_inherit !== undefined && p.env_inherit !== null) {
+    const v = String(p.env_inherit);
+    if (v !== 'minimal' && v !== 'all') {
+      throw new Error("profile.env_inherit must be 'minimal' or 'all'");
+    }
+    envInherit = v;
+  }
+
   return {
     argv,
     args: Array.isArray(p.args) ? p.args.map(String) : [],
     cwd: p.cwd ? expandPath(String(p.cwd)) : undefined,
     env: p.env && typeof p.env === 'object' ? p.env : {},
     env_allowlist: envAllowlist,
+    env_inherit: envInherit,
     stdin: p.stdin === 'message' ? 'message' : 'none',
     // Opt-in tool-authorization channel (wire 0.2). Default false — profiles
     // without mid-turn approval keep using CLI auto-approve / skip-permissions.
@@ -516,12 +525,11 @@ async function run(profileRaw, options) {
     argv.push(substitute(a, substCtx));
   }
 
-  // Build env per the inheritance policy (see buildBaseEnv). When an
-  // allowlist is set, the child does NOT inherit process.env wholesale — only
-  // the infra vars + profile.env + AGENT_* + extraEnv. This makes env_allowlist
-  // a real trust boundary instead of a cosmetic ${VAR} filter.
+  // Build env per the inheritance policy (see buildBaseEnv). Default is
+  // minimal infra; `env_inherit: all` restores full process.env inheritance.
+  // `env_allowlist` only filters ${VAR} expansion in the profile env block.
   const allowlist = profile.env_allowlist;
-  const env = buildBaseEnv(allowlist);
+  const env = buildBaseEnv(profile.env_inherit);
   for (const [k, v] of Object.entries(profile.env)) {
     env[k] = expandEnvRef(substitute(v, substCtx), process.env, allowlist, (name) => {
       if (options.onStderr) {

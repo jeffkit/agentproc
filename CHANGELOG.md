@@ -3,10 +3,19 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.2`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.8`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.6.0`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.9`. Does not change the wire contract.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.6.1`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec / SDK 0.6.1 — secure-by-default env inheritance (doc `0.9`)
+
+Flips child-process environment inheritance from "full bridge env unless allowlist" to **minimal infra by default**.
+
+- **Profile.** New `env_inherit: minimal|all` (default `minimal`). Escape hatch `env_inherit: all` restores legacy full inheritance.
+- **Decoupled knobs.** `env_allowlist` now only gates `${VAR}` expansion. Inheritance is controlled solely by `env_inherit`.
+- **Breaking for ambient-env profiles.** Profiles that relied on undeclared shell variables without an allowlist must declare them in `env:` or set `env_inherit: all`. Hub profiles already using `env_allowlist` are unaffected (they were already on minimal inheritance).
+- **Versions.** Spec document revision `0.8` → `0.9`. SDK packages `0.6.0` → `0.6.1`. Wire protocol stays `0.2`.
 
 ### Spec / SDK 0.6.0 — wire `0.2`: optional tool permission channel
 

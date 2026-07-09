@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.2` (the string injected as `AGENT_PROTOCOL_VERSION`)
-**Document revision:** `0.8`
+**Document revision:** `0.9`
 **Status:** Draft
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `AGENT_PROTOCOL_VERSION`.
@@ -60,6 +60,7 @@ stdin: none                   # none | message
 cwd: /path/to/workspace       # working directory (~ and placeholders supported)
 env:                          # extra environment variables
   MY_API_KEY: "${MY_API_KEY}" # reference existing env vars with ${VAR}
+# env_inherit: minimal        # default — infra only; set `all` for full inheritance
 env_allowlist: [MY_API_KEY]   # optional: restrict which ${VAR} the env block may read
 
 # Output control
@@ -92,15 +93,36 @@ Placeholders in `command`, `args`, `cwd`, and `env` values are replaced before t
 
 Values in the profile `env` block may reference the bridge's own environment variables with `${VAR}` syntax (e.g. `MY_API_KEY: "${MY_API_KEY}"`). This is **substitution against the bridge process's full environment**, not against the profile or the agent.
 
-**Security implication.** A profile is **trusted input** — anyone who can write the profile can read every environment variable the bridge has access to (cloud credentials, tokens, secrets). This is by design (profiles are configuration, not user input), but it has one practical consequence worth calling out:
+**Security implication.** A profile is **trusted input** — anyone who can write the profile can read every environment variable the bridge has access to via `${VAR}` expansion (cloud credentials, tokens, secrets), even when child inheritance is minimal. This is by design (profiles are configuration, not user input), but it has one practical consequence worth calling out:
 
-> **Do not run profiles from untrusted sources.** `agentproc hub run <name>` fetches a profile from a GitHub repo and runs it. If you would not trust that repo's maintainer with the entire contents of your shell environment, do not run their profile. A profile that sets `env_allowlist` (see below) shrinks this boundary to the variables it declares — but the default, with no allowlist, is still full-environment access, so the trust decision still rests with the user running the profile.
+> **Do not run profiles from untrusted sources.** `agentproc hub run <name>` fetches a profile from a GitHub repo and runs it. If you would not trust that repo's maintainer to *read* your shell environment through `${VAR}` references, do not run their profile. `env_allowlist` (below) shrinks what `${VAR}` may expand; default child inheritance is already minimal (see `env_inherit`). The trust decision still rests with the user running the profile.
 
 Bridges expand `${VAR}` using POSIX-shell semantics: unknown variables expand to the empty string, not to the literal `${VAR}`.
 
-### `env_allowlist` — shrinking the trust boundary
+### `env_inherit` — child environment inheritance
 
-By default, every `${VAR}` in the `env` block expands against the bridge's full environment, **and the agent process inherits the bridge's full environment**. `env_allowlist` lets a profile shrink that boundary to exactly the variables it needs — both for `${VAR}` expansion *and* for what the child process sees at all:
+Controls what the agent process inherits as its **base** environment before the profile `env` block, `AGENT_*` injections, and CLI `--env` extras are layered on.
+
+| Value | Behaviour |
+|-------|-----------|
+| `minimal` / absent (default) | Child base env is only the **infra** set (below). Undeclared bridge secrets do **not** reach the agent via inheritance. |
+| `all` | Child inherits the bridge's full environment (legacy trust-the-profile behaviour). Escape hatch for profiles that intentionally rely on ambient shell variables. |
+
+```yaml
+# Secure default (equivalent to omitting the field):
+# env_inherit: minimal
+
+# Legacy full inheritance:
+env_inherit: all
+```
+
+- **Secure by default.** SDK 0.6.1+ defaults to `minimal`. Profiles that previously relied on undeclared ambient env vars must either declare them in the `env` block or set `env_inherit: all`.
+- **Orthogonal to `env_allowlist`.** Inheritance and `${VAR}` filtering are independent knobs. `env_allowlist` does **not** change inheritance; `env_inherit` does **not** change `${VAR}` expansion.
+- **Infra set.** Under `minimal`, the bridge copies these names from its own environment into the child (when set): `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `TERM`, `TMPDIR`, `TZ`, `PWD`, and on Windows `SystemRoot`, `TEMP`, `TMP`, `USERPROFILE`, `USERNAME`, `PATHEXT`, `COMSPEC`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`. These are operational variables an agent needs to find its interpreter, temp directory, and locale — none of them are credential-bearing. A profile that needs an additional non-secret variable the bridge has (e.g. a custom `WORKSPACE_DIR`) must declare it in the `env` block (and list it in `env_allowlist` if one is set).
+
+### `env_allowlist` — shrinking `${VAR}` expansion
+
+By default, every `${VAR}` in the `env` block expands against the bridge's full environment (so a profile author can pull credentials they declare). `env_allowlist` lets a profile shrink that expansion surface to exactly the variables it needs:
 
 ```yaml
 env:
@@ -108,14 +130,11 @@ env:
 env_allowlist: [ANTHROPIC_API_KEY]
 ```
 
-- **Optional and opt-in.** When `env_allowlist` is absent (the default), all `${VAR}` references expand normally and the child inherits the bridge's full environment — the existing trust-the-profile behaviour. Existing profiles keep working unchanged.
-- **When present, two things change:**
-  1. A `${VAR}` whose name is **not** in the list expands to the empty string, and the bridge logs a warning to stderr (e.g. `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`). The process still starts — a typo in either the value or the list surfaces as an empty variable and a warning, not a hard failure.
-  2. **The child process no longer inherits the bridge's environment wholesale.** Its environment is built from: a minimal **infra** set (see below) + the profile `env` block (allowlist-filtered) + the injected `AGENT_*` vars + any CLI `--env` extras. A secret the bridge happens to hold but the profile never declared cannot reach the agent. Without this second rule, `env_allowlist` would be a cosmetic filter on `${VAR}` expansion while every other env var still leaked through inheritance — so the rule is load-bearing for the "trust boundary" claim.
-- **Infra set.** When `env_allowlist` is present, the bridge copies these names from its own environment into the child (when set): `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LC_MESSAGES`, `TERM`, `TMPDIR`, `TZ`, `PWD`, and on Windows `SystemRoot`, `TEMP`, `TMP`, `USERPROFILE`, `USERNAME`, `PATHEXT`, `COMSPEC`, `APPDATA`, `LOCALAPPDATA`, `PROGRAMDATA`, `NUMBER_OF_PROCESSORS`, `PROCESSOR_ARCHITECTURE`, `OS`. These are operational variables an agent needs to find its interpreter, temp directory, and locale — none of them are credential-bearing. A profile that needs an additional non-secret variable the bridge has (e.g. a custom `WORKSPACE_DIR`) must declare it in the `env` block and list it in `env_allowlist`.
-- **Scope.** `env_allowlist` governs both `${VAR}` expansion inside the profile `env` block **and** the child's base environment inheritance (when present). It does not affect `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, the bridge-injected `AGENT_*` vars, or `env` values that contain no `${VAR}` at all.
-- **No globbing.** Names must match exactly. `["ANTHROPIC_*"]` does not match `ANTHROPIC_API_KEY` — list each name in full. This keeps the allowlist an explicit declaration rather than a pattern that can quietly broaden.
-- **Recommendation.** Hub profiles SHOULD set `env_allowlist` so that `agentproc hub run <name>` exposes only the credentials the profile actually needs, not the user's entire shell environment. A profile fetched from a third-party repo that omits `env_allowlist` is not malicious by that fact alone, but the user has no way to tell what it reads — setting the list is how a profile author proves they only touch what they declare. With the inheritance rule above, "what they declare" is now actually what the agent sees.
+- **Optional.** When `env_allowlist` is absent, all `${VAR}` references expand against the bridge's full environment. Child inheritance is still governed by `env_inherit` (default `minimal`).
+- **When present:** a `${VAR}` whose name is **not** in the list expands to the empty string, and the bridge logs a warning to stderr (e.g. `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`). The process still starts — a typo in either the value or the list surfaces as an empty variable and a warning, not a hard failure.
+- **Scope.** `env_allowlist` governs `${VAR}` expansion inside the profile `env` block only. It does not affect inheritance (`env_inherit`), `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, the bridge-injected `AGENT_*` vars, or `env` values that contain no `${VAR}` at all.
+- **No globbing.** Names must match exactly. `["ANTHROPIC_*"]` does not match `ANTHROPIC_API_KEY` — list each name in full.
+- **Recommendation.** Hub profiles SHOULD set `env_allowlist` so that `${VAR}` expansion is an explicit declaration of which credentials the profile reads. Combined with the default `env_inherit: minimal`, "what they declare" is what the agent sees.
 
 ### `cwd` semantics
 
@@ -637,6 +656,7 @@ The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on suc
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **wire 0.2 / doc 0.9** — Secure-by-default child environment inheritance. New profile field `env_inherit: minimal|all` (default `minimal`). Inheritance is decoupled from `env_allowlist`: the allowlist only gates `${VAR}` expansion; full `process.env` / `os.environ` inheritance requires explicit `env_inherit: all`. SDK packages bumped to 0.6.1; wire protocol stays `0.2`.
 - **wire 0.2 / doc 0.8** — Optional tool permission channel: profile `permission: true`, env `AGENT_PERMISSION`, stdout `AGENT_PERMISSION_REQUEST:<json>`, stdin `AGENT_PERMISSION_RESPONSE:<json>`, and the keep-stdin-open turn rule. Opt-in only; default profiles and auto-approve / skip-permissions deployments are unchanged. Clarifies that this is tool authorization, not general HIL / AskUserQuestion. Wire protocol string becomes `0.2` because new protocol line prefixes and mid-turn stdin frames are on the wire.
 - **doc 0.7** — `env_allowlist` is now a real trust boundary, not a cosmetic `${VAR}` filter. When `env_allowlist` is present, the agent process no longer inherits the bridge's full environment; its env is built from a minimal infra set (`PATH`/`HOME`/`TERM`/…, enumerated in the spec) + the profile `env` block + `AGENT_*` + CLI `--env` extras. Previously the child inherited the bridge env wholesale, so any secret the bridge held leaked to the agent regardless of the allowlist — contradicting the "shrinking the trust boundary" claim. The `${VAR}`-blocking and warning behaviour is unchanged. Absent `env_allowlist` keeps the back-compat full-inheritance behaviour. SDK version bumped to 0.5.2 (both Python and Node); wire protocol stays `0.1`. Cross-implementation conformance coverage extended to the SDK entry points (`create_profile` / `createProfile`) via a new `spec/conformance/sdk.json` fixture: both SDKs now run the same return-type / `send_partial` / `send_error` / `ProtocolError` scenarios as subprocesses and assert identical stdout + exit codes.
 - **doc 0.5** — Defined empty-`AGENT_MESSAGE` semantics (legal when attachments are present). Disambiguated `command`/`args`: `args: []` (explicit empty) now means "do not split", distinct from `args` absent. Added `${VAR}` security warning for profile `env` blocks. Added optional `env_allowlist` profile field: when present, `${VAR}` references not in the list expand to empty + a stderr warning, shrinking the trust boundary from the full environment to the declared variables. Codified `AGENT_ERROR:` interaction with already-delivered partials (not retracted), and that the bridge MAY stop reading stdout after the error. Restated the session-id format constraint (no whitespace/control/colon) and defined bridge behaviour on violation (ignore the line, preserve previous id, warn). Codified exit-code precedence (timeout > `AGENT_ERROR:` > exit code). Documented SDK `send_error` terminality. Removed the unused `session_line_prefix` profile field — bridges hardcode `AGENT_SESSION:` and the field was never read.

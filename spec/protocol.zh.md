@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.2`（注入为 `AGENT_PROTOCOL_VERSION` 的字符串）
-**文档修订：** `0.8`
+**文档修订：** `0.9`
 **状态：** 草案
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `AGENT_PROTOCOL_VERSION` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -60,6 +60,7 @@ stdin: none                   # none | message
 cwd: /path/to/workspace       # 工作目录（支持 ~ 和占位符）
 env:                          # 额外注入的环境变量
   MY_API_KEY: "${MY_API_KEY}" # 用 ${VAR} 引用已有环境变量
+# env_inherit: minimal        # 默认 — 仅 infra；设为 `all` 则整包继承
 env_allowlist: [MY_API_KEY]   # 可选：限制 env 块能通过 ${VAR} 读取哪些变量
 
 # 输出控制
@@ -92,15 +93,36 @@ permission: false             # true → 保持 stdin 打开；处理 AGENT_PERM
 
 profile `env` 块中的值可以用 `${VAR}` 语法引用 bridge 自身的环境变量（例如 `MY_API_KEY: "${MY_API_KEY}"`）。这是**对 bridge 进程的完整环境进行替换**，而不是对 profile 或 agent。
 
-**安全含义。** profile 是**可信输入**——能写 profile 的人就能读取 bridge 能访问到的每一个环境变量（云凭证、token、密钥）。这是设计使然（profile 是配置，不是用户输入），但有一条实操后果值得点明：
+**安全含义。** profile 是**可信输入**——能写 profile 的人就能通过 `${VAR}` 展开读取 bridge 能访问到的每一个环境变量（云凭证、token、密钥），即便子进程继承已是最小集。这是设计使然（profile 是配置，不是用户输入），但有一条实操后果值得点明：
 
-> **不要运行来源不受信任的 profile。** `agentproc hub run <name>` 会从 GitHub 仓库拉取 profile 并运行。如果你不信任该仓库维护者拿到你 shell 环境的全部内容，就不要运行他们的 profile。设置了 `env_allowlist`（见下文）的 profile 能把这个边界缩小到它声明的那几个变量——但没有 allowlist 时默认仍是全环境可读，因此信任决策仍由运行 profile 的用户承担。
+> **不要运行来源不受信任的 profile。** `agentproc hub run <name>` 会从 GitHub 仓库拉取 profile 并运行。如果你不信任该仓库维护者通过 `${VAR}` 引用*读取*你的 shell 环境，就不要运行他们的 profile。`env_allowlist`（见下）缩小 `${VAR}` 可展开的范围；子进程默认继承已是最小集（见 `env_inherit`）。信任决策仍由运行 profile 的用户承担。
 
 bridge 用 POSIX shell 语义展开 `${VAR}`：未知变量展开为空字符串，而不是字面值 `${VAR}`。
 
-### `env_allowlist` —— 缩小信任边界
+### `env_inherit` —— 子进程环境继承
 
-默认情况下，`env` 块里的每个 `${VAR}` 都对 bridge 的完整环境展开，**并且 agent 进程会继承 bridge 的完整环境**。`env_allowlist` 让 profile 把这个边界缩小到它真正需要的变量——既管 `${VAR}` 展开，*也管* 子进程到底能看到哪些变量：
+控制 agent 进程在叠加 profile `env` 块、`AGENT_*` 注入与 CLI `--env` 额外项**之前**的**基础**环境。
+
+| 值 | 行为 |
+|----|------|
+| `minimal` / 缺省（默认） | 子进程基础环境仅为 **infra** 集（见下）。未声明的 bridge 密钥**不会**通过继承到达 agent。 |
+| `all` | 子进程整包继承 bridge 环境（旧的「信任 profile」行为）。给故意依赖 ambient shell 变量的 profile 用的逃生口。 |
+
+```yaml
+# 安全默认（等同于省略该字段）：
+# env_inherit: minimal
+
+# 旧式整包继承：
+env_inherit: all
+```
+
+- **默认安全。** SDK 0.6.1+ 默认 `minimal`。以前依赖未声明 ambient 环境变量的 profile，必须在 `env` 块中声明它们，或设置 `env_inherit: all`。
+- **与 `env_allowlist` 正交。** 继承与 `${VAR}` 过滤是两套独立旋钮。`env_allowlist` **不**改变继承；`env_inherit` **不**改变 `${VAR}` 展开。
+- **infra 集。** 在 `minimal` 下，bridge 从自身环境拷贝以下名字（若已设置）到子进程：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`LANG`、`LC_ALL`、`LC_CTYPE`、`LC_MESSAGES`、`TERM`、`TMPDIR`、`TZ`、`PWD`，以及 Windows 上的 `SystemRoot`、`TEMP`、`TMP`、`USERPROFILE`、`USERNAME`、`PATHEXT`、`COMSPEC`、`APPDATA`、`LOCALAPPDATA`、`PROGRAMDATA`、`NUMBER_OF_PROCESSORS`、`PROCESSOR_ARCHITECTURE`、`OS`。这些是 agent 找解释器/临时目录/locale 所需的运行变量——都不承载凭证。profile 若需要 bridge 持有的额外非密钥变量（如自定义 `WORKSPACE_DIR`），必须在 `env` 块中声明（若设了 `env_allowlist` 也要列入）。
+
+### `env_allowlist` —— 缩小 `${VAR}` 展开面
+
+默认情况下，`env` 块里的每个 `${VAR}` 都对 bridge 的完整环境展开（以便 profile 作者拉取其声明的凭证）。`env_allowlist` 让 profile 把这个展开面缩小到它真正需要的变量：
 
 ```yaml
 env:
@@ -108,14 +130,11 @@ env:
 env_allowlist: [ANTHROPIC_API_KEY]
 ```
 
-- **可选且 opt-in。** `env_allowlist` 缺省（默认）时，所有 `${VAR}` 引用照常展开，且子进程继承 bridge 的完整环境——即既有的「信任 profile」行为。现有 profile 无需改动。
-- **当其存在时，有两件事改变：**
-  1. 名字**不**在列表里的 `${VAR}` 展开为空字符串，并向 stderr 记录一条警告（例如 `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`）。进程仍会启动——值或列表里的拼写错误表现为空变量 + 一条警告，而非硬失败。
-  2. **子进程不再整包继承 bridge 的环境。** 它的环境由：一组最小 **infra** 集（见下）+ profile `env` 块（allowlist 过滤后）+ 注入的 `AGENT_*` 变量 + CLI `--env` 额外项 构成。bridge 手上、但 profile 未声明的任何密钥都不会到达 agent。没有这第二条规则，`env_allowlist` 只是个 `${VAR}` 展开的化妆品过滤器，而其它所有环境变量照样通过继承泄漏——因此这条对「信任边界」的承诺是承重墙。
-- **infra 集。** 当 `env_allowlist` 存在时，bridge 从自身环境拷贝以下名字（若已设置）到子进程：`PATH`、`HOME`、`USER`、`LOGNAME`、`SHELL`、`LANG`、`LC_ALL`、`LC_CTYPE`、`LC_MESSAGES`、`TERM`、`TMPDIR`、`TZ`、`PWD`，以及 Windows 上的 `SystemRoot`、`TEMP`、`TMP`、`USERPROFILE`、`USERNAME`、`PATHEXT`、`COMSPEC`、`APPDATA`、`LOCALAPPDATA`、`PROGRAMDATA`、`NUMBER_OF_PROCESSORS`、`PROCESSOR_ARCHITECTURE`、`OS`。这些是 agent 找解释器/临时目录/locale 所需的运行变量——都不承载凭证。profile 若需要 bridge 持有的额外非密钥变量（如自定义 `WORKSPACE_DIR`），必须在 `env` 块中声明并加入 `env_allowlist`。
-- **作用域。** `env_allowlist` 既管 profile `env` 块内的 `${VAR}` 展开，**也管**（当其存在时）子进程的基础环境继承。它不影响 `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` 占位符、bridge 注入的 `AGENT_*` 变量，也不影响根本不含 `${VAR}` 的 `env` 值。
-- **不支持通配。** 名字必须精确匹配。`["ANTHROPIC_*"]` 匹配不到 `ANTHROPIC_API_KEY`——请逐一列出全名。这让 allowlist 保持为显式声明，而不是一种可能悄然放大的模式。
-- **建议。** Hub profile **SHOULD** 设置 `env_allowlist`，这样 `agentproc hub run <name>` 就只暴露 profile 实际需要的凭证，而不是用户 shell 环境的全部。从第三方仓库拉取的 profile 即便没设 allowlist 也不一定是恶意的，但用户无从判断它读了什么——设上列表正是 profile 作者证明「我只碰我声明的变量」的方式。有了上面的继承规则，「声明的」现在才真正等于「agent 能看到的」。
+- **可选。** `env_allowlist` 缺省时，所有 `${VAR}` 引用对 bridge 完整环境展开。子进程继承仍由 `env_inherit` 控制（默认 `minimal`）。
+- **当其存在时：** 名字**不**在列表里的 `${VAR}` 展开为空字符串，并向 stderr 记录一条警告（例如 `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`）。进程仍会启动——值或列表里的拼写错误表现为空变量 + 一条警告，而非硬失败。
+- **作用域。** `env_allowlist` 只管 profile `env` 块内的 `${VAR}` 展开。它不影响继承（`env_inherit`）、`{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` 占位符、bridge 注入的 `AGENT_*` 变量，也不影响根本不含 `${VAR}` 的 `env` 值。
+- **不支持通配。** 名字必须精确匹配。`["ANTHROPIC_*"]` 匹配不到 `ANTHROPIC_API_KEY`——请逐一列出全名。
+- **建议。** Hub profile **SHOULD** 设置 `env_allowlist`，让 `${VAR}` 展开成为「我读哪些凭证」的显式声明。配合默认的 `env_inherit: minimal`，「声明的」才真正等于「agent 能看到的」。
 
 ### 命令执行模型
 
@@ -624,6 +643,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出码为 0」的惯
 
 本文档修订在此追踪。线协议 bump 会明确标出；其余条目除非另有说明，均为编辑性变更。
 
+- **wire 0.2 / doc 0.9** —— 默认安全的子进程环境继承。新增 profile 字段 `env_inherit: minimal|all`（默认 `minimal`）。继承与 `env_allowlist` 解耦：allowlist 只管 `${VAR}` 展开；整包 `process.env` / `os.environ` 继承需要显式 `env_inherit: all`。SDK 包版本升至 0.6.1；线协议仍为 `0.2`。
 - **wire 0.2 / doc 0.8** —— 可选工具授权通道：profile `permission: true`、环境变量 `AGENT_PERMISSION`、stdout `AGENT_PERMISSION_REQUEST:<json>`、stdin `AGENT_PERMISSION_RESPONSE:<json>`，以及保持 stdin 打开的回合规则。仅可选开启；默认 profile 与自动批准 / skip-permissions 部署不变。明确这是工具授权，而非通用 HIL / AskUserQuestion。因新增协议行前缀与回合中途 stdin 帧，线协议字符串变为 `0.2`。
 - **doc 0.7** —— `env_allowlist` 现在是真正的信任边界，而非 `${VAR}` 展开的化妆品过滤器。当 `env_allowlist` 存在时，agent 进程不再整包继承 bridge 的环境；其环境由一组最小 infra 集（`PATH`/`HOME`/`TERM`/……，规格中已枚举）+ profile `env` 块 + `AGENT_*` + CLI `--env` 额外项 构成。此前子进程整包继承 bridge 环境，因此 bridge 持有的任何密钥都会泄漏给 agent，allowlist 形同虚设——与「缩小信任边界」的承诺自相矛盾。`${VAR}` 拦截与警告行为不变。缺省 `env_allowlist` 仍保留兼容的整包继承行为。SDK 版本升至 0.5.2（Python 与 Node 同步）；线协议仍为 `0.1`。跨实现一致性覆盖面扩展到 SDK 入口（`create_profile` / `createProfile`）：新增 `spec/conformance/sdk.json` fixture，两 SDK 以子进程方式跑相同的返回类型 / `send_partial` / `send_error` / `ProtocolError` 场景，并断言一致的 stdout 与退出码。
 - **doc 0.5** —— 定义空 `AGENT_MESSAGE` 的语义（有附件时合法）。澄清 `command`/`args`：显式空数组 `args: []` 表示「不要切分」，与 `args` 缺失区分。新增 profile `env` 块的 `${VAR}` 安全警告。新增可选的 `env_allowlist` profile 字段：当其存在时，不在列表里的 `${VAR}` 引用展开为空 + 一条 stderr 警告，把信任边界从完整环境缩小到声明的那几个变量。明确 `AGENT_ERROR:` 与已交付 partial 的交互（不撤回），并明确 bridge 在输出 error 后 MAY 直接停止读取 stdout。重申 session-id 格式约束（不含空白/控制字符/冒号），并定义违规时 bridge 的行为（忽略该行、保留上一个 id、记录警告）。明确退出码优先级（超时 > `AGENT_ERROR:` > 退出码）。记录 SDK `send_error` 的终止性。移除未使用的 `session_line_prefix` profile 字段——bridge 硬编码 `AGENT_SESSION:`，该字段从未被读取。

@@ -351,6 +351,18 @@ class TestNormalizeProfile:
         p = normalize_profile({"command": "x", "env": {"A": "1"}})
         assert p["env_allowlist"] is None
 
+    def test_env_inherit_defaults_to_minimal(self):
+        p = normalize_profile({"command": "x"})
+        assert p["env_inherit"] == "minimal"
+
+    def test_env_inherit_all_accepted(self):
+        p = normalize_profile({"command": "x", "env_inherit": "all"})
+        assert p["env_inherit"] == "all"
+
+    def test_env_inherit_invalid_raises(self):
+        with pytest.raises(ValueError, match="env_inherit"):
+            normalize_profile({"command": "x", "env_inherit": "everything"})
+
     def test_env_allowlist_parsed_to_set(self):
         p = normalize_profile({"command": "x", "env_allowlist": ["A", "B"]})
         assert p["env_allowlist"] == {"A", "B"}
@@ -580,9 +592,8 @@ class TestRunEndToEnd:
 
     def test_env_allowlist_stops_undeclared_secrets_leaking(self, agent_script, monkeypatch):
         """A secret in the bridge env that the profile never declares must not
-        reach the agent. Pre-0.5.2 the child inherited os.environ wholesale, so
-        this leaked. With env_allowlist set, the child env is infra +
-        profile.env + AGENT_* only."""
+        reach the agent. Default inheritance is minimal infra, so undeclared
+        secrets never leak via os.environ wholesale."""
         monkeypatch.setenv("BRIDGE_AWS_SECRET", "aws-top-secret")
         monkeypatch.setenv("BRIDGE_DB_PASSWORD", "db-top-secret")
         agent = agent_script(
@@ -605,16 +616,33 @@ class TestRunEndToEnd:
         assert "DB=unset" in r.reply
         assert "PATH_SET=yes" in r.reply        # infra (PATH) still present
 
-    def test_env_allowlist_absent_child_inherits_full_env(self, agent_script, monkeypatch):
-        """Back-compat: no allowlist → full os.environ inheritance, so an
-        undeclared var leaks by design. Pins the documented back-compat
-        boundary so the tightening above is clearly opt-in."""
+    def test_default_env_inherit_minimal_blocks_undeclared_secrets(
+        self, agent_script, monkeypatch
+    ):
+        """Secure default: no env_inherit: all → undeclared bridge secrets
+        do not reach the child."""
+        monkeypatch.setenv("AGENTPROC_SECURE_DEFAULT_LEAK", "should-not-leak")
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            'echo "LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset}"\n'
+            'echo "PATH_SET=${PATH:+yes}"\n'
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert "LEAK=unset" in r.reply
+        assert "should-not-leak" not in r.reply
+        assert "PATH_SET=yes" in r.reply
+
+    def test_env_inherit_all_child_inherits_full_env(self, agent_script, monkeypatch):
+        """Escape hatch: env_inherit: all restores full os.environ inheritance."""
         monkeypatch.setenv("AGENTPROC_BACKCOMPAT_LEAK", "leaked-by-design")
         agent = agent_script(
             "#!/usr/bin/env bash\n"
             'echo "LEAK=${AGENTPROC_BACKCOMPAT_LEAK:-unset}"\n'
         )
-        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        r = run(
+            {"command": str(agent), "env_inherit": "all"},
+            RunOptions(message="hi"),
+        )
         assert "LEAK=leaked-by-design" in r.reply
 
     def test_attachment_passthrough_reaches_agent(self, agent_script):

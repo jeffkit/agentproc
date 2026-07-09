@@ -356,6 +356,24 @@ describe('normalizeProfile', () => {
     assert.strictEqual(normalizeProfile({ command: 'x', env: { A: '1' } }).env_allowlist, null);
   });
 
+  test('env_inherit defaults to minimal', () => {
+    assert.strictEqual(normalizeProfile({ command: 'x' }).env_inherit, 'minimal');
+  });
+
+  test('env_inherit: all accepted', () => {
+    assert.strictEqual(
+      normalizeProfile({ command: 'x', env_inherit: 'all' }).env_inherit,
+      'all',
+    );
+  });
+
+  test('env_inherit invalid value throws', () => {
+    assert.throws(
+      () => normalizeProfile({ command: 'x', env_inherit: 'everything' }),
+      /env_inherit/,
+    );
+  });
+
   test('env_allowlist parsed to Set', () => {
     const p = normalizeProfile({ command: 'x', env_allowlist: ['A', 'B'] });
     assert.ok(p.env_allowlist instanceof Set);
@@ -609,9 +627,8 @@ describe('run() — end-to-end', () => {
 
   test('env_allowlist stops undeclared secrets from leaking via inheritance', async () => {
     // A secret present in the bridge env but NOT referenced by the profile's
-    // env block must NOT reach the agent. Pre-0.5.2 the child inherited
-    // process.env wholesale, so this leaked. With env_allowlist set, the
-    // child env is infra + profile.env + AGENT_* only.
+    // env block must NOT reach the agent. Default inheritance is minimal infra,
+    // so undeclared secrets never leak via process.env wholesale.
     process.env.BRIDGE_AWS_SECRET = 'aws-top-secret';
     process.env.BRIDGE_DB_PASSWORD = 'db-top-secret';
     const agent = writeScript(
@@ -643,17 +660,35 @@ describe('run() — end-to-end', () => {
     }
   });
 
-  test('env_allowlist absent → child still inherits full process.env', async () => {
-    // Back-compat: no allowlist → full inheritance, so an undeclared var leaks.
-    // This pins the documented back-compat boundary so the tightening above
-    // is clearly opt-in.
+  test('default env_inherit=minimal → undeclared secrets do not leak', async () => {
+    process.env.AGENTPROC_SECURE_DEFAULT_LEAK = 'should-not-leak';
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset}"\n' +
+      'echo "PATH_SET=${PATH:+yes}"\n',
+    );
+    try {
+      const r = await run({ command: agent }, { message: 'hi' });
+      assert.ok(r.reply.includes('LEAK=unset'), `reply: ${r.reply}`);
+      assert.ok(!r.reply.includes('should-not-leak'), `leaked: ${r.reply}`);
+      assert.ok(r.reply.includes('PATH_SET=yes'), `PATH missing: ${r.reply}`);
+    } finally {
+      delete process.env.AGENTPROC_SECURE_DEFAULT_LEAK;
+    }
+  });
+
+  test('env_inherit: all → child inherits full process.env', async () => {
+    // Escape hatch for legacy trust-the-profile behaviour.
     process.env.AGENTPROC_BACKCOMPAT_LEAK = 'leaked-by-design';
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'echo "LEAK=${AGENTPROC_BACKCOMPAT_LEAK:-unset}"\n',
     );
     try {
-      const r = await run({ command: agent }, { message: 'hi' });
+      const r = await run(
+        { command: agent, env_inherit: 'all' },
+        { message: 'hi' },
+      );
       assert.ok(r.reply.includes('LEAK=leaked-by-design'), `reply: ${r.reply}`);
     } finally {
       delete process.env.AGENTPROC_BACKCOMPAT_LEAK;

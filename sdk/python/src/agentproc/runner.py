@@ -87,17 +87,15 @@ EXIT_SIGTERM = 143
 # Environment inheritance policy
 # ---------------------------------------------------------------------------
 
-# When a profile declares ``env_allowlist``, the child process does NOT inherit
-# the bridge's environment wholesale — doing so would let any secret the bridge
-# happens to hold reach the agent even though the profile never declared it,
-# making ``env_allowlist`` a cosmetic filter rather than a trust boundary.
-# Instead the child env is built from: (1) this minimal INFRA set (copied from
-# ``os.environ`` when present) so the agent can still find its interpreter /
-# temp dir / locale, (2) the profile ``env`` block (allowlist-filtered),
-# (3) the injected ``AGENT_*`` vars, (4) ``extra_env`` from the CLI ``--env``
-# flag. Secrets not declared by the profile never reach the agent. When
-# ``env_allowlist`` is absent, the bridge inherits ``os.environ`` wholesale
-# (back-compat) — the trust-the-profile behaviour.
+# Default: the child does NOT inherit the bridge's environment wholesale.
+# Undeclared secrets must not reach the agent just because the bridge process
+# happens to hold them. The child env is built from: (1) this minimal INFRA
+# set (copied from ``os.environ`` when present), (2) the profile ``env`` block
+# (${VAR} expanded; optionally allowlist-filtered), (3) the injected
+# ``AGENT_*`` vars, (4) ``extra_env`` from the CLI ``--env`` flag.
+# Escape hatch: ``env_inherit: all`` restores full ``os.environ`` inheritance
+# (legacy trust-the-profile behaviour). ``env_allowlist`` only gates ${VAR}
+# expansion — it no longer doubles as the inheritance switch.
 ENV_INFRA_VARS = (
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
     "LC_MESSAGES", "TERM", "TMPDIR", "TZ", "PWD",
@@ -108,14 +106,14 @@ ENV_INFRA_VARS = (
 )
 
 
-def build_base_env(allowlist: Optional[set]) -> Dict[str, str]:
+def build_base_env(env_inherit: str = "minimal") -> Dict[str, str]:
     """Build the child process base env per the inheritance policy.
 
-    ``None`` allowlist → full ``os.environ`` inheritance (back-compat).
-    A set → only the infra vars, ready for profile.env / AGENT_* / extra_env
-    to be layered on.
+    ``env_inherit == "all"`` → full ``os.environ`` inheritance (escape hatch).
+    Otherwise (default ``"minimal"``) → only the infra vars, ready for
+    profile.env / AGENT_* / extra_env to be layered on.
     """
-    if allowlist is None:
+    if env_inherit == "all":
         return dict(os.environ)
     base: Dict[str, str] = {}
     for name in ENV_INFRA_VARS:
@@ -204,8 +202,8 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     # env_allowlist (optional): when present, ${VAR} references in the env
     # block whose name is NOT in the list expand to empty + a stderr warning.
-    # Absent ⇒ current behaviour (expand against the full bridge environment).
-    # Opt-in: existing profiles keep working unchanged.
+    # Absent ⇒ expand against the full bridge environment (inheritance is
+    # controlled separately by env_inherit).
     allowlist_raw = src.get("env_allowlist")
     if allowlist_raw is None:
         env_allowlist: Optional[set] = None
@@ -214,12 +212,23 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
     else:
         raise ValueError("profile.env_allowlist must be a list")
 
+    # env_inherit: "minimal" (default) | "all". Controls child base-env
+    # inheritance only — not ${VAR} expansion.
+    env_inherit_raw = src.get("env_inherit")
+    if env_inherit_raw is None:
+        env_inherit = "minimal"
+    else:
+        env_inherit = str(env_inherit_raw)
+        if env_inherit not in ("minimal", "all"):
+            raise ValueError("profile.env_inherit must be 'minimal' or 'all'")
+
     return {
         "argv": argv,
         "args": [str(a) for a in args_value],
         "cwd": expand_path(str(cwd_value)) if cwd_value else None,
         "env": env_value,
         "env_allowlist": env_allowlist,
+        "env_inherit": env_inherit,
         "stdin": "message" if src.get("stdin") == "message" else "none",
         # Opt-in tool-authorization channel (wire 0.2). Default False.
         "permission": src.get("permission") is True,
@@ -531,7 +540,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         argv.append(substitute(a, subst_ctx))
 
     allowlist = profile["env_allowlist"]
-    env = build_base_env(allowlist)
+    env = build_base_env(profile["env_inherit"])
     for k, v in profile["env"].items():
         env[k] = expand_env_ref(
             substitute(str(v), subst_ctx),

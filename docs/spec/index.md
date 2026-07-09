@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.2` · **Document revision:** `0.8` · **Status:** Draft
+**Wire protocol:** `0.2` · **Document revision:** `0.9` · **Status:** Draft
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -19,6 +19,8 @@ stdin: none                   # none | message (message = write + EOF)
 cwd: /path/to/workspace
 env:
   MY_API_KEY: "${MY_API_KEY}"
+# env_inherit: minimal        # default — infra only; set `all` for full inheritance
+# env_allowlist: [MY_API_KEY] # optional: restrict ${VAR} expansion
 
 timeout_secs: 600             # stdout read timeout, default 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5

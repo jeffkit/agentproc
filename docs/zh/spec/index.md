@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.2` · **文档修订：** `0.8` · **状态：** 草案
+**线协议：** `0.2` · **文档修订：** `0.9` · **状态：** 草案
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -16,6 +16,8 @@ stdin: none                   # none | message（message = 写入后立即关闭
 cwd: /path/to/workspace
 env:                          # 额外注入的环境变量，支持 ${VAR} 引用
   MY_API_KEY: "${MY_API_KEY}"
+# env_inherit: minimal        # 默认 — 仅 infra；设为 `all` 则整包继承
+# env_allowlist: [MY_API_KEY] # 可选：限制 ${VAR} 展开
 
 timeout_secs: 600             # stdout 读取超时，默认 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL 宽限期，默认 5
