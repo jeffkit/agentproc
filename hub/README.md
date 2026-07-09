@@ -2,6 +2,8 @@
 
 Ready-to-use [AgentProc](https://agentproc.dev) profiles for popular AI agent CLIs. Each profile wraps a CLI as an AgentProc-compliant agent that any conformant bridge can drive — no bridge-specific shortcuts, no magic.
 
+See [PERMISSIONS.md](./PERMISSIONS.md) for which CLIs support mid-turn tool authorization (`permission: true`) vs auto-approve / yolo.
+
 ## Available profiles
 
 | Profile | CLI | Tested | Languages |

@@ -18,7 +18,9 @@ Adds an **opt-in** mid-turn tool-authorization channel so IM bridges can replace
 - **Opt-in only.** Agents/CLIs without a control-request style prompt keep using auto-approve flags. Bridges that do not implement the channel ignore it.
 - **Versions.** Wire protocol `0.1` → `0.2` (new line prefixes + mid-turn stdin frames). Spec document revision `0.8`. SDK packages `0.6.0` (Python + Node) so `PROTOCOL_VERSION` matches the wire string.
 - **Runner (Node + Python).** `normalizeProfile` / `normalize_profile` accept `permission`; `classifyLine` / `classify_line` recognize `AGENT_PERMISSION_REQUEST:`; `run()` injects `AGENT_PERMISSION=1`, keeps stdin open when enabled, calls `onPermission` / `on_permission`, writes `AGENT_PERMISSION_RESPONSE:`, and denies pending requests on turn timeout. Default profiles unchanged.
-- **Follow-up.** Hub `claude-code` translation of CLI `control_request` ↔ these frames (opt-in profile switch).
+- **Hub `claude-code`.** Opt-in `permission: true` switches the bridge to `--permission-prompt-tool stdio` and translates Claude `control_request`/`control_response` ↔ AgentProc permission frames. Default path still uses `--dangerously-skip-permissions`. `agentproc` CLI prompts on a TTY when the profile enables permission.
+- **Survey.** `hub/PERMISSIONS.md` records which other hub CLIs have a mid-turn stdio approval channel (codex = different protocol; gemini/others = keep yolo).
+- **Follow-up.** codebuddy parity (likely); codex dedicated translator.
 
 ---
 

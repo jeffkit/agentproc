@@ -354,6 +354,39 @@ async function runAgent(profilePath, opts) {
   // verbose: default true, --verbose keeps it true, --quiet sets it false.
   const verbose = opts.verbose !== false;
 
+  // Interactive tool authorization when the profile opts in. On a TTY we
+  // prompt; otherwise we deny (headless CI / pipes cannot answer mid-turn).
+  const profileBlock = profileRaw.agentproc && typeof profileRaw.agentproc === 'object'
+    ? profileRaw.agentproc
+    : profileRaw;
+  const permissionOn = profileBlock && profileBlock.permission === true;
+  const readline = require('node:readline');
+
+  function onPermission(req) {
+    const summary = req.description
+      || `${req.tool_name} ${JSON.stringify(req.input || {}).slice(0, 120)}`;
+    process.stderr.write(
+      `\n[agentproc] permission request ${req.request_id}: ${req.tool_name}\n` +
+      `  ${summary}\n`
+    );
+    if (!process.stdin.isTTY || !process.stderr.isTTY) {
+      process.stderr.write('[agentproc] no TTY — denying permission request\n');
+      return { behavior: 'deny', message: 'no TTY for interactive approval' };
+    }
+    return new Promise((resolve) => {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+      rl.question('Allow? [y/N] ', (answer) => {
+        rl.close();
+        const ok = /^y(es)?$/i.test(String(answer || '').trim());
+        if (ok) {
+          resolve({ behavior: 'allow', updated_input: req.input || {} });
+        } else {
+          resolve({ behavior: 'deny', message: 'denied by user' });
+        }
+      });
+    });
+  }
+
   const r = await runner.run(profileRaw, {
     message: prompt,
     sessionId: opts.session || '',
@@ -370,6 +403,7 @@ async function runAgent(profilePath, opts) {
     onSession: (id) => { if (verbose) process.stderr.write(`AGENT_SESSION:${id}\n`); },
     onError: (msg) => { if (verbose) process.stderr.write(`AGENT_ERROR:${JSON.stringify(msg)}\n`); },
     onStderr: (line) => { if (verbose) process.stderr.write(`[agent stderr] ${line}\n`); },
+    onPermission: permissionOn ? onPermission : undefined,
   });
 
   if (r.reply) {

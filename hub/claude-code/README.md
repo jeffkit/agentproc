@@ -120,10 +120,32 @@ The session ID is opaque — `claude` generates a UUID on its first turn, and th
 | `ANTHROPIC_API_KEY` | yes* | Auth. (*Or run `claude setup-token` once and omit.) |
 | `CLAUDE_MODEL` | no | Model alias or full name (e.g. `sonnet`, `claude-sonnet-4-6`) |
 | `CLAUDE_DISALLOW_TOOLS` | no | Comma-separated disallowed tools (default: `AskUserQuestion`) |
+| `AGENT_PERMISSION` | no | Injected by the runner when profile `permission: true` (`"1"`). Enables mid-turn tool authorization. |
+
+## Optional tool permission
+
+By default this profile runs unattended with `--dangerously-skip-permissions`.
+
+To require IM / CLI approval before tools run, set in the profile:
+
+```yaml
+permission: true
+```
+
+Then the bridge switches to:
+
+```text
+claude --print --input-format stream-json --output-format stream-json \
+  --verbose --permission-prompt-tool stdio --permission-mode default
+```
+
+and translates Claude Code `control_request` (`can_use_tool`) ↔ AgentProc `AGENT_PERMISSION_REQUEST` / `AGENT_PERMISSION_RESPONSE`. `AskUserQuestion` stays disallowed — clarifying questions belong in the reply body / next IM turn.
+
+`agentproc` on a TTY prompts `Allow? [y/N]` for each request; without a TTY it denies.
 
 ## Caveats
 
-- `--dangerously-skip-permissions` is set unconditionally — `claude` would otherwise prompt interactively, which a non-interactive AgentProc bridge can't satisfy. Run the bridge in a sandbox if you're concerned about tool execution.
+- Default path still uses `--dangerously-skip-permissions`. Prefer a sandbox, or enable `permission: true`.
 - The session ID forwarded by `claude` is the **CLI session ID**, not an upstream API conversation ID. `--resume` knows how to use it.
 - `streaming: false` falls back to one-shot mode: the bridge waits for the `result` event and emits the full text at once.
 
