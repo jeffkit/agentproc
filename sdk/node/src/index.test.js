@@ -119,8 +119,8 @@ describe('attachments removed in 0.5.0', () => {
   });
 });
 
-test('PROTOCOL_VERSION is "0.1"', () => {
-  assert.strictEqual(SDK.PROTOCOL_VERSION, '0.1');
+test('PROTOCOL_VERSION is "0.2"', () => {
+  assert.strictEqual(SDK.PROTOCOL_VERSION, '0.2');
 });
 
 // ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ describe('createProfile end-to-end', () => {
     assert.ok(!r.stdout.includes('undefined'));
   });
 
-  test('default protocolVersion is 0.1', async () => {
+  test('default protocolVersion is 0.2', async () => {
     const r = await runAgent(
       { AGENT_MESSAGE: 'hi', AGENT_STREAMING: '0' },
       `(async (sdk) => {
@@ -327,6 +327,6 @@ describe('createProfile end-to-end', () => {
       })`
     );
     assert.strictEqual(r.code, 0);
-    assert.ok(r.stdout.includes('pv=0.1'));
+    assert.ok(r.stdout.includes('pv=0.2'));
   });
 });

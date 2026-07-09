@@ -314,7 +314,7 @@ class TestNormalizeProfile:
 
 
 def test_protocol_version_is_0_1():
-    assert PROTOCOL_VERSION == "0.1"
+    assert PROTOCOL_VERSION == "0.2"
 
 
 # ---------------------------------------------------------------------------

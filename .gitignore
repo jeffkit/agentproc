@@ -36,3 +36,6 @@ docs/.vitepress/cache/
 # Env
 .env
 .env.local
+
+# git worktrees (local)
+.worktrees/

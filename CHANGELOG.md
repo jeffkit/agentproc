@@ -2,11 +2,24 @@
 
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
-- **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.1`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.7`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.5.2`. Includes runner/CLI/SDK behaviour changes.
+- **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.2`. Only changes when bytes on stdin/stdout change.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.8`. Does not change the wire contract.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.6.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec / SDK 0.6.0 — wire `0.2`: optional tool permission channel
+
+Adds an **opt-in** mid-turn tool-authorization channel so IM bridges can replace `--dangerously-skip-permissions` / `--yolo` when the underlying CLI supports stdio approval (e.g. Claude Code `--permission-prompt-tool stdio`).
+
+- **Not general HIL.** Clarifying questions stay in the reply body / next IM turn. Disabling questionnaire tools such as `AskUserQuestion` remains recommended. This channel is only for allow/deny before a tool runs.
+- **Profile.** `permission: false` (default) — unchanged behaviour. `permission: true` → inject `AGENT_PERMISSION=1`, keep stdin open for the turn, honor permission frames.
+- **Wire.** stdout `AGENT_PERMISSION_REQUEST:<json-object>`; stdin `AGENT_PERMISSION_RESPONSE:<json-object>` (`request_id`, `behavior: allow|deny`, optional `updated_input` / `message`).
+- **Opt-in only.** Agents/CLIs without a control-request style prompt keep using auto-approve flags. Bridges that do not implement the channel ignore it.
+- **Versions.** Wire protocol `0.1` → `0.2` (new line prefixes + mid-turn stdin frames). Spec document revision `0.8`. SDK packages `0.6.0` (Python + Node) so `PROTOCOL_VERSION` matches the wire string.
+- **This PR scope.** Spec (EN + ZH), docs quickref, `PROTOCOL_VERSION` constant + tests. Runner recognition / Hub claude-code translation land in follow-ups.
+
+---
 
 ### fix: runner SIGKILL timer leak + streaming `max_reply_chars` now enforced
 

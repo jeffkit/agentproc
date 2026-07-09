@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
-**Wire protocol:** `0.1` (the string injected as `AGENT_PROTOCOL_VERSION`)
-**Document revision:** `0.7`
+**Wire protocol:** `0.2` (the string injected as `AGENT_PROTOCOL_VERSION`)
+**Document revision:** `0.8`
 **Status:** Draft
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `AGENT_PROTOCOL_VERSION`.
@@ -39,7 +39,7 @@ Messaging Platform
 
 The protocol has exactly two sides:
 
-- **Input** — environment variables injected by the bridge before the process starts (optionally accompanied by a single stdin write)
+- **Input** — environment variables injected by the bridge before the process starts (optionally accompanied by stdin: a one-shot message write, and/or mid-turn permission responses when [optional tool permission](#optional-tool-permission) is enabled)
 - **Output** — stdout lines written by the agent process, distinguished by line prefix
 
 No HTTP, no sockets, no shared memory. Just a process.
@@ -72,6 +72,9 @@ send_error_reply: true        # tell the user when the agent errors
 
 # Streaming
 streaming: true               # forward AGENT_PARTIAL: lines in real time
+
+# Optional tool permission (default false — see "Optional tool permission")
+permission: false             # true → keep stdin open; honor AGENT_PERMISSION_* frames
 ```
 
 ### Placeholders
@@ -166,9 +169,20 @@ If a bridge implementation chooses to use a shell (e.g., for environment-variabl
 | Value | Behavior |
 |-------|----------|
 | `none` (default) | Message is only available via the `AGENT_MESSAGE` env var |
-| `message` | Message text is also written to stdin, **then stdin is closed (EOF)** |
+| `message` | Message text is also written to stdin, **then stdin is closed (EOF)** — unless `permission: true` (see below) |
 
-When `stdin: message` is set, the bridge writes the message followed by EOF. The agent can read it with any line-oriented or stream-oriented API (`input()`, `readline`, `fs.readFileSync(0)`, etc.) and trust that it will terminate.
+When `stdin: message` is set and `permission` is absent or `false`, the bridge writes the message followed by EOF. The agent can read it with any line-oriented or stream-oriented API (`input()`, `readline`, `fs.readFileSync(0)`, etc.) and trust that it will terminate.
+
+When `permission: true`, the bridge MUST keep stdin open for the rest of the turn so it can write `AGENT_PERMISSION_RESPONSE:` lines. If `stdin: message` is also set, the bridge writes the message text first (no EOF yet), then later writes permission responses as needed, and closes stdin only when the turn ends (process exit or bridge-imposed timeout). See [Optional tool permission](#optional-tool-permission).
+
+### `permission` field
+
+| Value | Behavior |
+|-------|----------|
+| `false` / absent (default) | Optional permission frames are **not** part of this turn. Bridges that see an `AGENT_PERMISSION_REQUEST:` line SHOULD log a warning and ignore it (treat as non-protocol / do not block). Agents that need tool approval without this field MUST use a CLI-side auto-approve mode (e.g. `--dangerously-skip-permissions`, `--yolo`) or pre-allow tools. |
+| `true` | Enables the optional permission channel for this profile. The bridge MUST keep stdin open, honor `AGENT_PERMISSION_REQUEST:` / write `AGENT_PERMISSION_RESPONSE:`, and inject `AGENT_PERMISSION=1`. |
+
+`permission` is **opt-in**. Profiles and CLIs that have no mid-turn approval channel keep working unchanged.
 
 ---
 
@@ -185,7 +199,8 @@ The bridge injects the following variables before spawning the process. The agen
 | `AGENT_SESSION_NAME` | Human-readable session name (default: `"default"`) |
 | `AGENT_FROM_USER` | Sender identifier (platform-specific: user ID, handle, etc.) |
 | `AGENT_STREAMING` | `"1"` = streaming mode, `"0"` = one-shot mode |
-| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. **Opaque and non-comparable** — see [Versioning](#versioning). Agents MUST NOT order or range-check this value. Its only practical use is logging and diagnostics; it carries no negotiation or feature-detection semantics. |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.2"`. **Opaque and non-comparable** — see [Versioning](#versioning). Agents MUST NOT order or range-check this value. Its only practical use is logging and diagnostics; it carries no negotiation or feature-detection semantics. |
+| `AGENT_PERMISSION` | `"1"` when the profile has `permission: true` and the bridge supports the optional permission channel; unset or `"0"` otherwise. Agents that can emit permission requests MUST check this (or the profile contract) before relying on mid-turn approval — absence means auto-approve / skip-permissions is the only option. |
 
 #### Empty messages
 
@@ -223,10 +238,11 @@ A line is treated as a **protocol line** if and only if it matches one of the pr
 1. `AGENT_SESSION:` — declares or updates the session ID
 2. `AGENT_PARTIAL:` — emits a streaming chunk
 3. `AGENT_ERROR:` — emits an error message to forward to the user
+4. `AGENT_PERMISSION_REQUEST:` — optional tool-permission request (only when `permission: true`; see [Optional tool permission](#optional-tool-permission))
 
 All other lines are **reply body** and forwarded verbatim.
 
-This means an agent's reply body MUST NOT contain lines that start with `AGENT_SESSION:`, `AGENT_PARTIAL:`, or `AGENT_ERROR:`. If an agent needs to output such text (e.g., when the user is discussing the protocol itself), it MUST prefix the line with a single space or otherwise ensure it does not match.
+This means an agent's reply body MUST NOT contain lines that start with `AGENT_SESSION:`, `AGENT_PARTIAL:`, `AGENT_ERROR:`, or `AGENT_PERMISSION_REQUEST:`. If an agent needs to output such text (e.g., when the user is discussing the protocol itself), it MUST prefix the line with a single space or otherwise ensure it does not match.
 
 > **Implementation note for bridges:** match prefixes against the *stripped* line if you want to be tolerant of leading whitespace from heredocs; otherwise match against the raw line. Bridges SHOULD be consistent.
 
@@ -334,14 +350,125 @@ AGENT_PARTIAL:"Let me look that up... "
 AGENT_ERROR:"Upstream API rate limited. Try again in 60s."
 ```
 
+**Optional permission mid-turn** (profile `permission: true`; bridge keeps stdin open):
+
+```
+AGENT_PARTIAL:"I'll create that file."
+AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}
+```
+
+Bridge writes on stdin after the user approves in the messaging UI:
+
+```
+AGENT_PERMISSION_RESPONSE:{"request_id":"1","behavior":"allow"}
+```
+
+Agent continues, then finishes:
+
+```
+AGENT_PARTIAL:"Done."
+AGENT_SESSION:cli-sess-…
+```
+
+---
+
+## Optional tool permission
+
+This section is **optional**. A conformant bridge or agent MAY ignore it entirely. Profiles default to `permission: false`. CLIs with no mid-turn approval channel (or bridges that only support unattended runs) keep using auto-approve flags such as `--dangerously-skip-permissions` or `--yolo` — that remains a valid and expected deployment mode.
+
+### What this is (and is not)
+
+- **Is:** a channel for **tool execution authorization** while a turn is in progress — the agent (or a wrapped CLI) needs allow/deny before running Bash, Write, etc.
+- **Is not:** a general human-in-the-loop Q&A protocol. Clarifying questions belong in the normal reply body / `AGENT_PARTIAL:` text; the user answers on the **next** IM turn. Disabling interactive questionnaire tools (e.g. Claude Code's `AskUserQuestion`) in headless IM bridges is therefore reasonable and recommended.
+
+### Enabling
+
+When the profile sets `permission: true`:
+
+1. The bridge MUST inject `AGENT_PERMISSION=1`.
+2. The bridge MUST keep the agent's stdin open until the process exits or the bridge times out (see [stdin / EOF Contract](#stdin--eof-contract)).
+3. The bridge MUST recognize `AGENT_PERMISSION_REQUEST:` lines and MUST write matching `AGENT_PERMISSION_RESPONSE:` lines to stdin.
+4. Agents that wrap a CLI with a native control protocol (e.g. Claude Code `--permission-prompt-tool stdio` emitting `control_request` / accepting `control_response`) translate between that protocol and these frames inside the agent process. AgentProc does not require every underlying CLI to speak `control_request`; only agents that opt in need a translation layer.
+
+When `permission` is absent or `false`, bridges MUST NOT require agents to speak these frames, and MUST NOT leave stdin open solely for permission traffic.
+
+### `AGENT_PERMISSION_REQUEST:` — agent → bridge (stdout)
+
+```
+AGENT_PERMISSION_REQUEST:<json-object>
+```
+
+The payload MUST be a single JSON object. Required fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `request_id` | string | Opaque id for this request. MUST be unique within the turn. The matching response MUST echo the same id. MUST NOT contain whitespace, control characters, or newlines. |
+| `tool_name` | string | Tool or action name (e.g. `Bash`, `Write`). |
+| `input` | object | Tool arguments as a JSON object (MAY be empty `{}`). |
+
+Optional fields the agent MAY include for UI / policy:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `description` | string | Short human-readable summary for the messaging UI. |
+| `tool_use_id` | string | Underlying CLI / model tool-use id, if any. |
+
+On a malformed line (invalid JSON or missing required fields), the bridge SHOULD log a warning to stderr and MUST NOT block the turn waiting for a user decision; it SHOULD write a deny response only if it can still parse a `request_id`, otherwise ignore the line.
+
+The request line is consumed by the bridge and does **not** appear in the user-visible reply body. Bridges typically render it as an approval prompt (buttons, reply keyboard, etc.) on the messaging platform.
+
+### `AGENT_PERMISSION_RESPONSE:` — bridge → agent (stdin)
+
+```
+AGENT_PERMISSION_RESPONSE:<json-object>
+```
+
+Written by the bridge to the agent's **stdin** (one line, then continue waiting for more requests or process exit). Required fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `request_id` | string | MUST match the pending request. |
+| `behavior` | string | `"allow"` or `"deny"`. |
+
+Optional:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `updated_input` | object | When `behavior` is `"allow"`, the input the agent SHOULD use (original or bridge-modified). Agents wrapping CLIs that require an updated input blob (e.g. Claude Code `updatedInput`) MUST pass this through. When omitted on allow, the agent uses the request's original `input`. |
+| `message` | string | When `behavior` is `"deny"`, a reason the agent MAY surface to the model or user. |
+
+### Ordering, blocking, and timeout
+
+- The agent MAY emit multiple permission requests in one turn (sequentially or with other protocol lines interleaved). Each outstanding `request_id` needs its own response.
+- After emitting `AGENT_PERMISSION_REQUEST:`, the agent (or wrapped CLI) typically **blocks** that tool call until a matching response arrives. The AgentProc bridge MUST NOT close stdin while a request is unanswered, except on turn timeout / process death.
+- **`timeout_secs` still applies to the whole turn.** If the user never approves in the messaging UI, the bridge's normal timeout fires (SIGTERM → grace → SIGKILL). Bridges SHOULD, when timing out with a pending permission request, prefer a deny response with a timeout `message` if stdin is still writable, then proceed with the normal kill sequence — but MUST NOT hang past `timeout_secs` waiting for the user.
+- Bridges MAY impose a shorter permission-specific wait; if they do, they MUST deny (or kill) rather than leave the agent blocked indefinitely.
+
+### Interaction with other protocol lines
+
+- `AGENT_PARTIAL:` / reply body MAY appear before and after permission traffic in the same turn.
+- `AGENT_ERROR:` still fails the turn. A pending permission request becomes moot; the bridge SHOULD stop waiting for user approval.
+- `AGENT_SESSION:` last-wins is unchanged; session lines MAY appear before or after permission traffic.
+
+### Relationship to auto-approve modes
+
+If the underlying CLI has no stdio permission prompt (or the profile leaves `permission: false`), the supported options remain:
+
+- CLI auto-approve / skip-permissions / yolo flags
+- Pre-allow specific tools via CLI flags or config
+- Sandbox the agent process and accept full auto-approve inside the sandbox
+
+Optional permission does not replace those modes; it is an alternative when both the agent and the bridge opt in.
+
 ---
 
 ## stdin / EOF Contract
 
-- When `stdin: none` (default), the bridge does not write to stdin. The agent's stdin reads will return EOF immediately.
-- When `stdin: message`, the bridge writes `AGENT_MESSAGE` to stdin followed by EOF. The agent can read it via `input()`, `readline()`, `fs.readFileSync(0, 'utf8')`, etc., and the read will terminate.
+- When `stdin: none` (default) and `permission` is not `true`, the bridge does not write to stdin. The agent's stdin reads will return EOF immediately.
+- When `stdin: message` and `permission` is not `true`, the bridge writes `AGENT_MESSAGE` to stdin followed by EOF. The agent can read it via `input()`, `readline()`, `fs.readFileSync(0, 'utf8')`, etc., and the read will terminate.
+- When `permission: true`, the bridge MUST keep stdin open for the turn. If `stdin: message` is also set, write the message first **without** EOF; then write zero or more `AGENT_PERMISSION_RESPONSE:` lines; close stdin only when the process exits or the bridge ends the turn (timeout / kill). If `stdin: none` with `permission: true`, the bridge still keeps stdin open solely for permission responses (no initial message write).
 
-The agent MUST NOT block on stdin when `stdin: none` is in effect.
+The agent MUST NOT block on stdin when `stdin: none` is in effect **and** `permission` is not `true`.
 
 ---
 
@@ -437,6 +564,10 @@ Because the underlying CLI often doesn't know its own session ID until it exits.
 
 Exit codes tell the bridge *that* something went wrong, but not *what* to tell the user. `AGENT_ERROR:` lets the agent forward a meaningful, user-readable error message (e.g., "API key expired", "rate limited; retry in 60s") instead of the bridge's generic template.
 
+**Why optional permission frames instead of general HIL?**
+
+Messaging bridges already give the user a next turn. Clarifying questions belong in the reply body. What headless coding CLIs uniquely need mid-turn is **tool authorization** (allow this Bash/Write before it runs). That maps to Claude Code's `control_request` / `control_response` over stdio — not to AskUserQuestion. Making the channel opt-in (`permission: true`) keeps auto-approve / `--dangerously-skip-permissions` / `--yolo` valid for CLIs or deployments with no approval prompt.
+
 ---
 
 ## Comparison with Related Protocols
@@ -504,8 +635,9 @@ The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on suc
 
 ## Changelog
 
-Document revisions are tracked here. The wire protocol has remained `0.1` since the initial draft; entries below record editorial changes and clarifications to this document, not wire-format changes.
+Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **wire 0.2 / doc 0.8** — Optional tool permission channel: profile `permission: true`, env `AGENT_PERMISSION`, stdout `AGENT_PERMISSION_REQUEST:<json>`, stdin `AGENT_PERMISSION_RESPONSE:<json>`, and the keep-stdin-open turn rule. Opt-in only; default profiles and auto-approve / skip-permissions deployments are unchanged. Clarifies that this is tool authorization, not general HIL / AskUserQuestion. Wire protocol string becomes `0.2` because new protocol line prefixes and mid-turn stdin frames are on the wire.
 - **doc 0.7** — `env_allowlist` is now a real trust boundary, not a cosmetic `${VAR}` filter. When `env_allowlist` is present, the agent process no longer inherits the bridge's full environment; its env is built from a minimal infra set (`PATH`/`HOME`/`TERM`/…, enumerated in the spec) + the profile `env` block + `AGENT_*` + CLI `--env` extras. Previously the child inherited the bridge env wholesale, so any secret the bridge held leaked to the agent regardless of the allowlist — contradicting the "shrinking the trust boundary" claim. The `${VAR}`-blocking and warning behaviour is unchanged. Absent `env_allowlist` keeps the back-compat full-inheritance behaviour. SDK version bumped to 0.5.2 (both Python and Node); wire protocol stays `0.1`. Cross-implementation conformance coverage extended to the SDK entry points (`create_profile` / `createProfile`) via a new `spec/conformance/sdk.json` fixture: both SDKs now run the same return-type / `send_partial` / `send_error` / `ProtocolError` scenarios as subprocesses and assert identical stdout + exit codes.
 - **doc 0.5** — Defined empty-`AGENT_MESSAGE` semantics (legal when attachments are present). Disambiguated `command`/`args`: `args: []` (explicit empty) now means "do not split", distinct from `args` absent. Added `${VAR}` security warning for profile `env` blocks. Added optional `env_allowlist` profile field: when present, `${VAR}` references not in the list expand to empty + a stderr warning, shrinking the trust boundary from the full environment to the declared variables. Codified `AGENT_ERROR:` interaction with already-delivered partials (not retracted), and that the bridge MAY stop reading stdout after the error. Restated the session-id format constraint (no whitespace/control/colon) and defined bridge behaviour on violation (ignore the line, preserve previous id, warn). Codified exit-code precedence (timeout > `AGENT_ERROR:` > exit code). Documented SDK `send_error` terminality. Removed the unused `session_line_prefix` profile field — bridges hardcode `AGENT_SESSION:` and the field was never read.
 - **doc 0.4** — Split wire-protocol version (`0.1`) from document revision in the header; added a Versioning section codifying that `AGENT_PROTOCOL_VERSION` is an opaque, non-comparable string. Promoted `AGENT_ATTACHMENTS` from Draft to P0 with a consistency requirement when bridges set it alongside the single-attachment vars. Clarified session-line ordering: when a CLI emits `AGENT_SESSION:` together with `AGENT_ERROR:` (the common `result{is_error}` shape), bridges MUST preserve the session id for the next turn even though the current turn is reported as a failure. Added `AGENT_ERROR:` → bridge MUST treat the turn as failed regardless of exit code. Defined `command` as argv[0] and `args` as the remaining argv, with a quoting rule so paths containing whitespace remain expressible without a shell. Noted Windows caveat for the timeout SIGTERM/SIGKILL contract.

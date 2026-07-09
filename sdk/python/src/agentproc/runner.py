@@ -1,7 +1,7 @@
 """AgentProc runner — the canonical bridge-side engine.
 
 This module is the canonical implementation of the AgentProc bridge-side
-contract (spec/protocol.md, wire protocol 0.1). The CLI (cli.py) is a thin
+contract (spec/protocol.md, wire protocol 0.2). The CLI (cli.py) is a thin
 wrapper around it.
 
 Responsibilities:
@@ -58,7 +58,7 @@ __all__ = [
     "diagnose_stderr_failure",
 ]
 
-PROTOCOL_VERSION = "0.1"
+PROTOCOL_VERSION = "0.2"
 
 DEFAULT_TIMEOUT_SECS = 1800
 DEFAULT_KILL_GRACE_SECS = 5

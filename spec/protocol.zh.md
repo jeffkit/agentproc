@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
-**线协议（Wire protocol）：** `0.1`（注入为 `AGENT_PROTOCOL_VERSION` 的字符串）
-**文档修订：** `0.7`
+**线协议（Wire protocol）：** `0.2`（注入为 `AGENT_PROTOCOL_VERSION` 的字符串）
+**文档修订：** `0.8`
 **状态：** 草案
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `AGENT_PROTOCOL_VERSION` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -72,6 +72,9 @@ send_error_reply: true        # agent 出错时是否通知用户
 
 # 流式回复
 streaming: true               # 实时转发 AGENT_PARTIAL: 行
+
+# 可选工具授权（默认 false — 见「可选工具授权」）
+permission: false             # true → 保持 stdin 打开；处理 AGENT_PERMISSION_* 帧
 ```
 
 ### 占位符
@@ -155,9 +158,20 @@ YAML 的双引号标量承载空格；bridge 把字符串作为单个 argv token
 | 值 | 行为 |
 |----|------|
 | `none`（默认） | 消息仅通过 `AGENT_MESSAGE` 环境变量传递 |
-| `message` | 消息文本同时写入 stdin，**然后立即关闭 stdin（EOF）** |
+| `message` | 消息文本同时写入 stdin，**然后立即关闭 stdin（EOF）** —— 除非 `permission: true`（见下） |
 
-当 `stdin: message` 时，bridge 写完消息后立即发送 EOF。agent 可以用任何面向行或流的 API（`input()`、`readline`、`fs.readFileSync(0)` 等）读取，且可以确保读取会终止。
+当 `stdin: message` 且 `permission` 缺省或为 `false` 时，bridge 写完消息后立即发送 EOF。agent 可以用任何面向行或流的 API（`input()`、`readline`、`fs.readFileSync(0)` 等）读取，且可以确保读取会终止。
+
+当 `permission: true` 时，bridge **MUST** 在本回合内保持 stdin 打开，以便写入 `AGENT_PERMISSION_RESPONSE:` 行。若同时设置了 `stdin: message`，bridge 先写入消息文本（此时尚不 EOF），随后按需写入授权应答，仅在回合结束（进程退出或 bridge 超时）时关闭 stdin。见[可选工具授权](#可选工具授权)。
+
+### `permission` 字段
+
+| 值 | 行为 |
+|----|------|
+| `false` / 缺省（默认） | 本回合**不**启用可选授权帧。若仍看到 `AGENT_PERMISSION_REQUEST:` 行，bridge **SHOULD** 记警告并忽略（不当作需阻塞的协议事件）。没有该字段却需要工具批准的 agent，**MUST** 使用 CLI 侧自动批准（如 `--dangerously-skip-permissions`、`--yolo`）或预先放行工具。 |
+| `true` | 为本 profile 启用可选授权通道。bridge **MUST** 保持 stdin 打开，处理 `AGENT_PERMISSION_REQUEST:` / 写入 `AGENT_PERMISSION_RESPONSE:`，并注入 `AGENT_PERMISSION=1`。 |
+
+`permission` 为**可选开启**。没有中途授权通道的 profile / CLI 行为与今日一致。
 
 ---
 
@@ -174,7 +188,8 @@ bridge 在启动进程前注入以下变量，agent process 直接读取。
 | `AGENT_SESSION_NAME` | 会话可读名称（默认 `"default"`） |
 | `AGENT_FROM_USER` | 发送者标识符（平台相关：用户 ID、handle 等） |
 | `AGENT_STREAMING` | `"1"` = 流式模式，`"0"` = 单次模式 |
-| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.1"`。**不透明且不可比较**——见[版本治理](#版本治理)。agent **MUST NOT** 对它排序或范围检查。其唯一实际用途是日志与诊断，不具备协商或特性发现语义。 |
+| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.2"`。**不透明且不可比较**——见[版本治理](#版本治理)。agent **MUST NOT** 对它排序或范围检查。其唯一实际用途是日志与诊断，不具备协商或特性发现语义。 |
+| `AGENT_PERMISSION` | 当 profile 设置 `permission: true` 且 bridge 支持可选授权通道时为 `"1"`；否则未设置或为 `"0"`。能够发出授权请求的 agent **MUST** 在依赖中途批准前检查此变量（或 profile 约定）——缺失则意味着只能走自动批准 / skip-permissions。 |
 
 #### 空消息
 
@@ -212,10 +227,11 @@ agent process 写入 stdout，bridge 实时逐行读取。
 1. `AGENT_SESSION:` — 声明或更新 session ID
 2. `AGENT_PARTIAL:` — 输出流式分块
 3. `AGENT_ERROR:` — 输出错误消息
+4. `AGENT_PERMISSION_REQUEST:` — 可选的工具授权请求（仅当 `permission: true`；见[可选工具授权](#可选工具授权)）
 
 其余所有行都是**回复正文**，原样转发。
 
-也就是说，agent 的回复正文 MUST NOT 包含以 `AGENT_SESSION:`、`AGENT_PARTIAL:` 或 `AGENT_ERROR:` 开头的行。如果 agent 必须输出这样的文本（比如用户在讨论协议本身），它 MUST 在行首加一个空格或用其他方式确保不匹配前缀。
+也就是说，agent 的回复正文 MUST NOT 包含以 `AGENT_SESSION:`、`AGENT_PARTIAL:`、`AGENT_ERROR:` 或 `AGENT_PERMISSION_REQUEST:` 开头的行。如果 agent 必须输出这样的文本（比如用户在讨论协议本身），它 MUST 在行首加一个空格或用其他方式确保不匹配前缀。
 
 > **bridge 实现提示**：如果想容忍 heredoc 等场景的前导空白，可以对去除首尾空白后的行匹配前缀；否则按原始行匹配。bridge 应保持一致。
 
@@ -321,14 +337,125 @@ AGENT_PARTIAL:"让我查一下... "
 AGENT_ERROR:"上游 API 被限流，60 秒后重试。"
 ```
 
+**可选授权（回合中途）**（profile `permission: true`；bridge 保持 stdin 打开）：
+
+```
+AGENT_PARTIAL:"我来创建那个文件。"
+AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}
+```
+
+用户在消息 UI 中批准后，bridge 向 stdin 写入：
+
+```
+AGENT_PERMISSION_RESPONSE:{"request_id":"1","behavior":"allow"}
+```
+
+agent 继续执行并结束：
+
+```
+AGENT_PARTIAL:"完成。"
+AGENT_SESSION:cli-sess-…
+```
+
+---
+
+## 可选工具授权
+
+本节为**可选**。符合规范的 bridge 或 agent **MAY** 完全忽略它。Profile 默认 `permission: false`。没有中途授权通道的 CLI（或只支持无人值守运行的 bridge）继续使用 `--dangerously-skip-permissions`、`--yolo` 等自动批准标志——这仍是合法且常见的部署方式。
+
+### 这是什么（以及不是什么）
+
+- **是：** 回合进行中的**工具执行授权**通道——agent（或所包装的 CLI）在运行 Bash、Write 等之前需要 allow/deny。
+- **不是：** 通用的人机问答（HIL）协议。澄清性问题应写在普通回复正文 / `AGENT_PARTIAL:` 文本中；用户在**下一轮** IM 消息中回答。因此，在无头 IM bridge 中禁用交互式问卷工具（例如 Claude Code 的 `AskUserQuestion`）是合理且推荐的。
+
+### 启用条件
+
+当 profile 设置 `permission: true` 时：
+
+1. bridge **MUST** 注入 `AGENT_PERMISSION=1`。
+2. bridge **MUST** 在进程退出或 bridge 超时之前保持 agent 的 stdin 打开（见 [stdin / EOF 合约](#stdin--eof-合约)）。
+3. bridge **MUST** 识别 `AGENT_PERMISSION_REQUEST:` 行，并 **MUST** 向 stdin 写入对应的 `AGENT_PERMISSION_RESPONSE:` 行。
+4. 包装带原生控制协议的 CLI 的 agent（例如 Claude Code 的 `--permission-prompt-tool stdio`，发出 `control_request` / 接受 `control_response`）在 agent 进程内做协议翻译。AgentProc **不要求**每个底层 CLI 都会说 `control_request`；只有选择启用的 agent 才需要翻译层。
+
+当 `permission` 缺省或为 `false` 时，bridge **MUST NOT** 要求 agent 使用这些帧，也 **MUST NOT** 仅为授权流量而保持 stdin 打开。
+
+### `AGENT_PERMISSION_REQUEST:` — agent → bridge（stdout）
+
+```
+AGENT_PERMISSION_REQUEST:<json-object>
+```
+
+载荷 **MUST** 是单个 JSON 对象。必填字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `request_id` | string | 本次请求的不透明 id。在同一回合内 **MUST** 唯一。对应应答 **MUST** 回显同一 id。**MUST NOT** 含空白、控制字符或换行。 |
+| `tool_name` | string | 工具或动作名（如 `Bash`、`Write`）。 |
+| `input` | object | 工具参数 JSON 对象（**MAY** 为空 `{}`）。 |
+
+agent **MAY** 附带的可选字段（供 UI / 策略使用）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `description` | string | 给消息 UI 的简短可读摘要。 |
+| `tool_use_id` | string | 底层 CLI / 模型的 tool-use id（若有）。 |
+
+行格式错误（非法 JSON 或缺少必填字段）时，bridge **SHOULD** 向 stderr 记警告，且 **MUST NOT** 阻塞等待用户决定；若仍能解析出 `request_id`，**SHOULD** 写入一条 deny 应答，否则忽略该行。
+
+请求行由 bridge 消费，**不会**出现在用户可见的回复正文中。bridge 通常将其渲染为消息平台上的批准提示（按钮、回复键盘等）。
+
+### `AGENT_PERMISSION_RESPONSE:` — bridge → agent（stdin）
+
+```
+AGENT_PERMISSION_RESPONSE:<json-object>
+```
+
+由 bridge 写入 agent 的 **stdin**（一行，然后继续等待更多请求或进程退出）。必填字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `request_id` | string | **MUST** 与待处理请求匹配。 |
+| `behavior` | string | `"allow"` 或 `"deny"`。 |
+
+可选：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `updated_input` | object | 当 `behavior` 为 `"allow"` 时，agent **SHOULD** 使用的输入（原始或经 bridge 修改）。包装要求「更新后 input」的 CLI（如 Claude Code 的 `updatedInput`）的 agent **MUST** 透传该字段。allow 时若省略，agent 使用请求中的原始 `input`。 |
+| `message` | string | 当 `behavior` 为 `"deny"` 时，agent **MAY** 展示给模型或用户的原因。 |
+
+### 顺序、阻塞与超时
+
+- agent **MAY** 在同一回合发出多个授权请求（顺序发出，或与其他协议行交错）。每个未完成的 `request_id` 都需要各自的应答。
+- 发出 `AGENT_PERMISSION_REQUEST:` 后，agent（或所包装的 CLI）通常会**阻塞**该工具调用，直到收到匹配应答。除回合超时 / 进程死亡外，AgentProc bridge **MUST NOT** 在请求未应答时关闭 stdin。
+- **`timeout_secs` 仍作用于整个回合。** 若用户始终未在消息 UI 中批准，bridge 的常规超时生效（SIGTERM → 宽限 → SIGKILL）。超时时若仍有未决授权请求，bridge **SHOULD** 在 stdin 仍可写时优先写入带超时 `message` 的 deny，再进入常规杀进程流程——但 **MUST NOT** 为等用户而超过 `timeout_secs`。
+- bridge **MAY** 设置更短的授权专用等待；若设置，则 **MUST** deny（或杀进程），而不是让 agent 无限阻塞。
+
+### 与其他协议行的交互
+
+- 同一回合中，`AGENT_PARTIAL:` / 回复正文 **MAY** 出现在授权流量之前或之后。
+- `AGENT_ERROR:` 仍会使本回合失败。未决的授权请求作废；bridge **SHOULD** 停止等待用户批准。
+- `AGENT_SESSION:` 的「最后一行生效」不变；session 行 **MAY** 出现在授权流量之前或之后。
+
+### 与自动批准模式的关系
+
+若底层 CLI 没有 stdio 授权提示（或 profile 保持 `permission: false`），仍可使用：
+
+- CLI 自动批准 / skip-permissions / yolo 标志
+- 通过 CLI 标志或配置预先放行特定工具
+- 沙箱化 agent 进程并在沙箱内接受完全自动批准
+
+可选授权并不取代这些模式；它是 agent 与 bridge **双方都选择启用**时的替代方案。
+
 ---
 
 ## stdin / EOF 合约
 
-- 当 `stdin: none`（默认）时，bridge 不向 stdin 写入任何内容。agent 的 stdin 读取会立即返回 EOF。
-- 当 `stdin: message` 时，bridge 将 `AGENT_MESSAGE` 写入 stdin 后立即发送 EOF。agent 可以通过 `input()`、`readline()`、`fs.readFileSync(0, 'utf8')` 等方式读取，且读取会终止。
+- 当 `stdin: none`（默认）且 `permission` 不为 `true` 时，bridge 不向 stdin 写入任何内容。agent 的 stdin 读取会立即返回 EOF。
+- 当 `stdin: message` 且 `permission` 不为 `true` 时，bridge 将 `AGENT_MESSAGE` 写入 stdin 后立即发送 EOF。agent 可以通过 `input()`、`readline()`、`fs.readFileSync(0, 'utf8')` 等方式读取，且读取会终止。
+- 当 `permission: true` 时，bridge **MUST** 在本回合保持 stdin 打开。若同时设置了 `stdin: message`，先写入消息**且不** EOF；随后写入零条或多条 `AGENT_PERMISSION_RESPONSE:`；仅在进程退出或 bridge 结束回合（超时 / 强杀）时关闭 stdin。若 `stdin: none` 且 `permission: true`，bridge 仍保持 stdin 打开，仅用于授权应答（无初始消息写入）。
 
-当 `stdin: none` 生效时，agent MUST NOT 在 stdin 上阻塞等待。
+当 `stdin: none` 生效**且** `permission` 不为 `true` 时，agent MUST NOT 在 stdin 上阻塞等待。
 
 ---
 
@@ -424,6 +551,10 @@ echo "You said: $AGENT_MESSAGE"
 
 退出码告诉 bridge「*出错了*」，但不告诉它「*该对用户说什么*」。`AGENT_ERROR:` 让 agent 转发一条有意义的、用户可读的错误消息（如「API key 过期」、「被限流，60 秒后重试」），而不是 bridge 的通用模板。
 
+**为什么用可选授权帧，而不是通用 HIL？**
+
+消息 bridge 本身已经给了用户「下一轮」。澄清性问题应写在回复正文里。无头 coding CLI 在回合中途真正需要的是**工具授权**（允许这次 Bash/Write 再执行）。这对应 Claude Code 在 stdio 上的 `control_request` / `control_response`——而不是 AskUserQuestion。把通道做成可选（`permission: true`），才能让自动批准 / `--dangerously-skip-permissions` / `--yolo` 对没有授权提示的 CLI 或部署方式仍然合法。
+
 ---
 
 ## 与相关协议的对比
@@ -491,8 +622,9 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出码为 0」的惯
 
 ## Changelog
 
-本文档修订在此追踪。线协议自首个草案起保持 `0.1` 不变；下方条目记录本文档的编辑性变更与澄清，并非线协议变更。
+本文档修订在此追踪。线协议 bump 会明确标出；其余条目除非另有说明，均为编辑性变更。
 
+- **wire 0.2 / doc 0.8** —— 可选工具授权通道：profile `permission: true`、环境变量 `AGENT_PERMISSION`、stdout `AGENT_PERMISSION_REQUEST:<json>`、stdin `AGENT_PERMISSION_RESPONSE:<json>`，以及保持 stdin 打开的回合规则。仅可选开启；默认 profile 与自动批准 / skip-permissions 部署不变。明确这是工具授权，而非通用 HIL / AskUserQuestion。因新增协议行前缀与回合中途 stdin 帧，线协议字符串变为 `0.2`。
 - **doc 0.7** —— `env_allowlist` 现在是真正的信任边界，而非 `${VAR}` 展开的化妆品过滤器。当 `env_allowlist` 存在时，agent 进程不再整包继承 bridge 的环境；其环境由一组最小 infra 集（`PATH`/`HOME`/`TERM`/……，规格中已枚举）+ profile `env` 块 + `AGENT_*` + CLI `--env` 额外项 构成。此前子进程整包继承 bridge 环境，因此 bridge 持有的任何密钥都会泄漏给 agent，allowlist 形同虚设——与「缩小信任边界」的承诺自相矛盾。`${VAR}` 拦截与警告行为不变。缺省 `env_allowlist` 仍保留兼容的整包继承行为。SDK 版本升至 0.5.2（Python 与 Node 同步）；线协议仍为 `0.1`。跨实现一致性覆盖面扩展到 SDK 入口（`create_profile` / `createProfile`）：新增 `spec/conformance/sdk.json` fixture，两 SDK 以子进程方式跑相同的返回类型 / `send_partial` / `send_error` / `ProtocolError` 场景，并断言一致的 stdout 与退出码。
 - **doc 0.5** —— 定义空 `AGENT_MESSAGE` 的语义（有附件时合法）。澄清 `command`/`args`：显式空数组 `args: []` 表示「不要切分」，与 `args` 缺失区分。新增 profile `env` 块的 `${VAR}` 安全警告。新增可选的 `env_allowlist` profile 字段：当其存在时，不在列表里的 `${VAR}` 引用展开为空 + 一条 stderr 警告，把信任边界从完整环境缩小到声明的那几个变量。明确 `AGENT_ERROR:` 与已交付 partial 的交互（不撤回），并明确 bridge 在输出 error 后 MAY 直接停止读取 stdout。重申 session-id 格式约束（不含空白/控制字符/冒号），并定义违规时 bridge 的行为（忽略该行、保留上一个 id、记录警告）。明确退出码优先级（超时 > `AGENT_ERROR:` > 退出码）。记录 SDK `send_error` 的终止性。移除未使用的 `session_line_prefix` profile 字段——bridge 硬编码 `AGENT_SESSION:`，该字段从未被读取。
 - **doc 0.4** —— 头部将线协议版本（`0.1`）与文档修订号分开；新增「版本治理」章节，明确 `AGENT_PROTOCOL_VERSION` 是不透明且不可比较的字符串。将 `AGENT_ATTACHMENTS` 从草案提升至 P0，并加上 bridge 同时设置两层变量时的一致性要求。澄清 session 行顺序：当 CLI 同时输出 `AGENT_SESSION:` 与 `AGENT_ERROR:`（`result{is_error}` 的常见形态）时，bridge **MUST** 为下一轮保留 session ID，即便当前这一轮作为失败上报。`AGENT_ERROR:` → bridge **MUST** 视为失败，不论退出码（原为 SHOULD）。把 `command` 定义为 argv[0]、`args` 为其余 argv，并加上引号规则，让含空格路径仍能在不走 shell 的前提下表达。补上 SIGTERM/SIGKILL 超时合约的 Windows 注意事项。

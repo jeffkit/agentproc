@@ -713,6 +713,6 @@ describe('run() — end-to-end', () => {
   });
 });
 
-test('PROTOCOL_VERSION is "0.1"', () => {
-  assert.strictEqual(PROTOCOL_VERSION, '0.1');
+test('PROTOCOL_VERSION is "0.2"', () => {
+  assert.strictEqual(PROTOCOL_VERSION, '0.2');
 });

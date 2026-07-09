@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.1` · **Document revision:** `0.5` · **Status:** Draft
+**Wire protocol:** `0.2` · **Document revision:** `0.8` · **Status:** Draft
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -28,6 +28,8 @@ include_stderr_in_reply: false
 send_error_reply: true        # tell the user when the agent errors
 
 streaming: true               # forward AGENT_PARTIAL: lines in real time
+
+permission: false             # optional tool authorization (keep stdin open; see full spec)
 ```
 
 Placeholders are substituted **without** invoking a shell. The argv is built from two fields:
@@ -60,7 +62,8 @@ The resulting argv is passed to `execve` directly, which prevents shell-injectio
 | `AGENT_SESSION_NAME` | Human-readable session name (default `"default"`) |
 | `AGENT_FROM_USER` | Sender identifier |
 | `AGENT_STREAMING` | `"1"` = streaming, `"0"` = one-shot |
-| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.1"`. **Opaque and non-comparable** — see the spec's Versioning section. Agents MUST NOT order or range-check it. |
+| `AGENT_PROTOCOL_VERSION` | Protocol version string, e.g. `"0.2"`. **Opaque and non-comparable** — see the spec's Versioning section. Agents MUST NOT order or range-check it. |
+| `AGENT_PERMISSION` | `"1"` when profile `permission: true` (optional tool-authorization channel); unset/`"0"` otherwise. |
 
 ### Attachments — P0
 
@@ -78,9 +81,11 @@ Agents read whichever single-attachment var is non-empty. (A multi-attachment `A
 | `stdin` value | Behavior |
 |---------------|----------|
 | `none` (default) | Message only available via `AGENT_MESSAGE` |
-| `message` | Message is also written to stdin, **then stdin is closed (EOF)** |
+| `message` | Message is also written to stdin, **then stdin is closed (EOF)** — unless `permission: true` |
 
-The agent MUST NOT block on stdin when `stdin: none` is in effect.
+When `permission: true`, the bridge keeps stdin open for mid-turn `AGENT_PERMISSION_RESPONSE:` lines (see full spec).
+
+The agent MUST NOT block on stdin when `stdin: none` is in effect and `permission` is not `true`.
 
 ---
 
@@ -89,13 +94,14 @@ The agent MUST NOT block on stdin when `stdin: none` is in effect.
 A line is a **protocol line** if it starts with one of these prefixes (evaluated in this order):
 
 ```
-AGENT_SESSION:<opaque-id>        ← session id; can appear anywhere; LAST WINS
-AGENT_PARTIAL:<json-string>      ← streaming chunk, any line
-AGENT_ERROR:<json-string>        ← user-readable error, any line, any mode
-<everything else>                ← reply body, forwarded verbatim
+AGENT_SESSION:<opaque-id>                    ← session id; can appear anywhere; LAST WINS
+AGENT_PARTIAL:<json-string>                  ← streaming chunk, any line
+AGENT_ERROR:<json-string>                    ← user-readable error, any line, any mode
+AGENT_PERMISSION_REQUEST:<json-object>       ← optional tool authorization (permission: true)
+<everything else>                            ← reply body, forwarded verbatim
 ```
 
-Reply-body lines MUST NOT start with `AGENT_SESSION:`, `AGENT_PARTIAL:`, or `AGENT_ERROR:`. Prefix with a single space if you need to output such text literally.
+Reply-body lines MUST NOT start with those prefixes. Prefix with a single space if you need to output such text literally.
 
 ### Session line — last wins
 
@@ -125,6 +131,22 @@ JSON-encoded user-readable error. Honored **regardless** of `streaming` mode. Th
 ```
 AGENT_ERROR:"Upstream API rate limited. Try again in 60s."
 ```
+
+### Optional tool permission
+
+Opt-in via profile `permission: true`. Not general HIL — tool authorization only. CLIs without a mid-turn approval channel keep using `--dangerously-skip-permissions` / `--yolo`.
+
+```
+AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}
+```
+
+Bridge writes on stdin after the user approves:
+
+```
+AGENT_PERMISSION_RESPONSE:{"request_id":"1","behavior":"allow"}
+```
+
+See the full spec for stdin keep-open rules, timeouts, and field definitions.
 
 ---
 

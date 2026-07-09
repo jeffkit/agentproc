@@ -4,7 +4,7 @@
  * protocol-compliant agent invocation.
  *
  * This module is the canonical implementation of the AgentProc bridge-side
- * contract (spec/protocol.md, wire protocol 0.1). The CLI (cli.js) is a thin wrapper around it.
+ * contract (spec/protocol.md, wire protocol 0.2). The CLI (cli.js) is a thin wrapper around it.
  *
  * Responsibilities:
  *   - Parse and validate a profile object
@@ -34,7 +34,7 @@ const os = require('node:os');
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION = '0.1';
+const PROTOCOL_VERSION = '0.2';
 
 const DEFAULT_TIMEOUT_SECS = 1800;
 const DEFAULT_KILL_GRACE_SECS = 5;

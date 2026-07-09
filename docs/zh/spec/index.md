@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.1` · **文档修订：** `0.5` · **状态：** 草案
+**线协议：** `0.2` · **文档修订：** `0.8` · **状态：** 草案
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -25,6 +25,8 @@ include_stderr_in_reply: false
 send_error_reply: true        # agent 失败时是否通知用户
 
 streaming: true               # 实时转发 AGENT_PARTIAL: 行
+
+permission: false             # 可选工具授权（保持 stdin 打开；见完整规范）
 ```
 
 ---
@@ -40,7 +42,8 @@ streaming: true               # 实时转发 AGENT_PARTIAL: 行
 | `AGENT_SESSION_NAME` | 会话可读名称（默认 `"default"`） |
 | `AGENT_FROM_USER` | 发送者标识符 |
 | `AGENT_STREAMING` | `"1"` = 流式，`"0"` = 单次 |
-| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.1"`。**不透明且不可比较**——见完整规范的「版本治理」章节。agent **MUST NOT** 对它排序或范围检查。 |
+| `AGENT_PROTOCOL_VERSION` | 协议版本字符串，例如 `"0.2"`。**不透明且不可比较**——见完整规范的「版本治理」章节。agent **MUST NOT** 对它排序或范围检查。 |
+| `AGENT_PERMISSION` | profile `permission: true` 时为 `"1"`（可选工具授权通道）；否则未设置 / `"0"`。 |
 
 ### 附件（P0）
 
@@ -57,13 +60,14 @@ agent 读取非空的那个单附件变量。（多附件的 `AGENT_ATTACHMENTS`
 
 ## 输出 — stdout 协议
 
-按行的前缀区分类型。判断顺序：`AGENT_SESSION:` → `AGENT_PARTIAL:` → `AGENT_ERROR:`，其余行原样作为回复正文。
+按行的前缀区分类型。判断顺序：`AGENT_SESSION:` → `AGENT_PARTIAL:` → `AGENT_ERROR:` → `AGENT_PERMISSION_REQUEST:`（可选），其余行原样作为回复正文。
 
 ```
-AGENT_SESSION:<opaque-id>         ← 可选，任意位置，最后一行生效
-AGENT_PARTIAL:<json-string>       ← 可选，流式分块
-AGENT_ERROR:<json-string>         ← 可选，向用户透出错误
-<回复正文>                         ← 其余所有行
+AGENT_SESSION:<opaque-id>                    ← 可选，任意位置，最后一行生效
+AGENT_PARTIAL:<json-string>                  ← 可选，流式分块
+AGENT_ERROR:<json-string>                    ← 可选，向用户透出错误
+AGENT_PERMISSION_REQUEST:<json-object>       ← 可选工具授权（permission: true）
+<回复正文>                                    ← 其余所有行
 ```
 
 ### Session 行
@@ -93,6 +97,22 @@ AGENT_PARTIAL:"这是第二部分。"
 ```
 AGENT_ERROR:"上游 API 被限流，60 秒后重试。"
 ```
+
+### 可选工具授权
+
+通过 profile `permission: true` 可选开启。这不是通用 HIL，只做工具执行授权。没有中途授权通道的 CLI 继续使用 `--dangerously-skip-permissions` / `--yolo`。
+
+```
+AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}
+```
+
+用户批准后，bridge 向 stdin 写入：
+
+```
+AGENT_PERMISSION_RESPONSE:{"request_id":"1","behavior":"allow"}
+```
+
+stdin 保持打开、超时与字段定义见完整规范。
 
 ### 回复正文
 

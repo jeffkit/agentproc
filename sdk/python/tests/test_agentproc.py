@@ -131,7 +131,7 @@ class TestParseAttachments:
 
 
 def test_protocol_version_is_0_1():
-    assert agentproc.PROTOCOL_VERSION == "0.1"
+    assert agentproc.PROTOCOL_VERSION == "0.2"
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ class TestCreateProfileE2E:
             "return 'pv=' + ctx.protocol_version",
         )
         assert code == 0
-        assert "pv=0.1" in out
+        assert "pv=0.2" in out
 
     def test_session_line_handles_colons_in_id(self):
         # The spec says session IDs are opaque strings without whitespace.
