@@ -534,6 +534,21 @@ async function run(profileRaw, options) {
     ],
   });
 
+  // The agent may exit (or close its stdin) before/while we write the turn
+  // line — e.g. a one-shot CLI that reads nothing from stdin. In that case
+  // writes to child.stdin fail with EPIPE, which Node emits asynchronously
+  // as an 'error' event on the stream. Without a listener it becomes an
+  // uncaughtException and crashes the bridge. An early-exit agent is a
+  // legitimate condition (the run() result is derived from stdout/exit
+  // code), so swallow stream errors here.
+  if (child.stdin) {
+    child.stdin.on('error', (err) => {
+      if (err && err.code === 'EPIPE') return;
+      // Re-throw genuinely unexpected stream errors.
+      throw err;
+    });
+  }
+
   /** @type {RunResult} */
   const result = {
     reply: '',

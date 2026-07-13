@@ -58,7 +58,7 @@ Homebrew 的 Python 默认不暴露 `pip`。可以跑 `python3 -m ensurepip && p
 
 ```bash
 agentproc --version
-# agentproc 0.7.0 (protocol 0.3)
+# agentproc 0.7.1 (protocol 0.3)
 ```
 
 ## ② 浏览 hub

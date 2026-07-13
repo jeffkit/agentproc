@@ -4,9 +4,17 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.3`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.0`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.7.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.7.1`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec / SDK 0.7.1 — fix Node runner EPIPE crash when agent exits early (wire `0.3`, doc `1.0`)
+
+Patch over 0.7.0. The Node runner writes the turn object to the agent's stdin on every run. If the agent exits (or closes its stdin) before the write lands — e.g. a one-shot CLI that reads nothing from stdin — the write fails with `EPIPE`, which Node emits **asynchronously** as an `'error'` event on the stdin stream. With no listener attached, that became an `uncaughtException` and crashed the bridge. The crash was timing-sensitive and surfaced on Node 22 in CI (`conformance` and `test-node (22)`); Node 20/24 and the Python runner (which already wrapped the write in `try/except (BrokenPipeError, ...)`) were unaffected.
+
+- **Node runner.** `sdk/node/src/runner.js` attaches an `'error'` listener to `child.stdin` after spawn that swallows `EPIPE` (an early-exit agent is a legitimate condition; the run result is derived from stdout / exit code) and re-throws any other stream error. The existing synchronous `try/catch` around `stdin.write` stays.
+- **No wire / spec change.** Wire protocol stays `0.3`, doc revision stays `1.0`. Python package is re-versioned to `0.7.1` to keep the dual-SDK version track in sync (no Python code change).
+- **Versions.** SDK packages `0.7.0` → `0.7.1` (Python + Node, patch).
 
 ### Spec / SDK 0.7.0 — wire `0.3`: full NDJSON, single-turn object I/O (doc `1.0`)
 
