@@ -66,7 +66,18 @@ describe('scenario conformance (scenarios.json)', () => {
       assert.strictEqual(r.sessionId, exp.session_id, `sessionId: got ${JSON.stringify(r.sessionId)}, expected ${JSON.stringify(exp.session_id)}`);
       assert.strictEqual(r.error, exp.error, `error: got ${JSON.stringify(r.error)}, expected ${JSON.stringify(exp.error)}`);
       assert.strictEqual(r.exitCode, exp.exit_code, `exitCode: got ${r.exitCode}, expected ${exp.exit_code}`);
-      assert.deepStrictEqual(partials, exp.partials, `partials: got ${JSON.stringify(partials)}, expected ${JSON.stringify(exp.partials)}`);
+      // partials comparison: when `partials_any_of` is present, the scenario
+      // accepts any of the listed candidate sequences (used for spec-loose
+      // semantics like whether to emit a tail-truncated chunk vs nothing).
+      // Otherwise the strict `partials` equality applies.
+      if (Array.isArray(exp.partials_any_of)) {
+        const matches = exp.partials_any_of.some(cand =>
+          JSON.stringify(partials) === JSON.stringify(cand)
+        );
+        assert.ok(matches, `partials: got ${JSON.stringify(partials)}, expected any of ${JSON.stringify(exp.partials_any_of)}`);
+      } else {
+        assert.deepStrictEqual(partials, exp.partials, `partials: got ${JSON.stringify(partials)}, expected ${JSON.stringify(exp.partials)}`);
+      }
     });
   }
 });

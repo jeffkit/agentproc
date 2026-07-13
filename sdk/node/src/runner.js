@@ -47,6 +47,7 @@ const PROTOCOL_VERSION = '0.3';
 const DEFAULT_TIMEOUT_SECS = 1800;
 const DEFAULT_KILL_GRACE_SECS = 5;
 const DEFAULT_MAX_REPLY_CHARS = 8000;
+const DEFAULT_TRUNCATION_SUFFIX = '\n\n…(truncated)';
 
 // Exit codes per spec
 const EXIT_SUCCESS = 0;
@@ -140,6 +141,12 @@ function normalizeProfile(raw) {
     timeout_secs: Number.isFinite(src.timeout_secs) ? src.timeout_secs : DEFAULT_TIMEOUT_SECS,
     kill_grace_secs: Number.isFinite(src.kill_grace_secs) ? src.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
     max_reply_chars: Number.isFinite(src.max_reply_chars) ? src.max_reply_chars : DEFAULT_MAX_REPLY_CHARS,
+    // Spec profile YAML: optional truncation notice appended when the reply is
+    // capped. Defaults to "\n\n…(truncated)". An empty string disables the
+    // notice entirely (the cap still applies, just no visible marker).
+    truncation_suffix: typeof src.truncation_suffix === 'string'
+      ? src.truncation_suffix
+      : DEFAULT_TRUNCATION_SUFFIX,
     // Bridge-side hint: when false, the runner ignores {"type":"partial"} events
     // and assembles the reply from {"type":"text"} events only. Not a wire field.
     streaming: src.streaming !== false,
@@ -560,6 +567,11 @@ async function run(profileRaw, options) {
 
   const textChunks = [];
   let killed = false;
+  // Spec 5.4: once an error event arrives, subsequent partial/text events
+  // MUST be discarded (they cannot contribute to a failed turn's reply).
+  // `session` is exempt — last-wins still applies so the id for the next
+  // turn can be captured even after an error.
+  let errorSeen = false;
   /** @type {Set<string>} */
   const pendingPermissionIds = new Set();
   let stdinClosed = false;
@@ -593,7 +605,7 @@ async function run(profileRaw, options) {
   let cumulativePartialChars = 0;
   let partialsTruncated = false;
   const maxChars = profile.max_reply_chars;
-  const truncSuffix = maxChars === DEFAULT_MAX_REPLY_CHARS ? '\n\n…(truncated)' : '';
+  const truncSuffix = profile.truncation_suffix;
 
   // ---- stdout: line-by-line event parsing ----
   let stdoutBuf = '';
@@ -623,7 +635,9 @@ async function run(profileRaw, options) {
         if (options.onProtocolLine) options.onProtocolLine(line);
       }
     } else if (c.kind === 'partial') {
-      if (streaming && options.onPartial && !partialsTruncated) {
+      // Spec 5.4: post-error partials are discarded (not forwarded, not
+      // appended). `onProtocolLine` still fires so debug traces stay complete.
+      if (!errorSeen && streaming && options.onPartial && !partialsTruncated) {
         const remaining = maxChars - cumulativePartialChars;
         if (c.value.length >= remaining) {
           // Emit whatever fits, then the truncation notice, then stop.
@@ -637,10 +651,12 @@ async function run(profileRaw, options) {
       }
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'text') {
-      textChunks.push(c.value);
+      // Spec 5.4: post-error text is discarded.
+      if (!errorSeen) textChunks.push(c.value);
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'error') {
       result.error = c.value;
+      errorSeen = true;
       if (options.onError) options.onError(c.value);
       if (options.onProtocolLine) options.onProtocolLine(line);
       // Pending permission requests become moot; stop waiting for UI approval.
@@ -678,14 +694,23 @@ async function run(profileRaw, options) {
             .then(() => options.onPermission(req))
             .then(decision => {
               if (!decision || typeof decision !== 'object') return;
-              writePermissionResponse({
+              // Spec: when the bridge omits updated_input, the response MUST
+              // omit it too — the agent (or wrapped CLI) is responsible for
+              // falling back to the request's original input. Don't auto-fill
+              // req.input here: that would erase the distinction between
+              // "user accepted unchanged" and "user never touched it" for
+              // downstream CLIs (e.g. Claude Code's updatedInput semantics).
+              const out = {
                 request_id: req.request_id,
                 behavior: decision.behavior === 'allow' ? 'allow' : 'deny',
-                updated_input: decision.updated_input !== undefined
-                  ? decision.updated_input
-                  : (decision.updatedInput !== undefined ? decision.updatedInput : req.input),
                 message: decision.message,
-              });
+              };
+              if (decision.updated_input !== undefined) {
+                out.updated_input = decision.updated_input;
+              } else if (decision.updatedInput !== undefined) {
+                out.updated_input = decision.updatedInput;
+              }
+              writePermissionResponse(out);
             })
             .catch(err => {
               if (options.onStderr) {
@@ -848,10 +873,7 @@ async function run(profileRaw, options) {
   // Reply body = concatenation of {"type":"text"} events (direct, no separator).
   result.reply = textChunks.join('');
   if (result.reply.length > profile.max_reply_chars) {
-    const suffix = profile.max_reply_chars === DEFAULT_MAX_REPLY_CHARS
-      ? '\n\n…(truncated)'
-      : '';
-    result.reply = result.reply.slice(0, profile.max_reply_chars) + suffix;
+    result.reply = result.reply.slice(0, profile.max_reply_chars) + profile.truncation_suffix;
   }
 
   // Exit code per spec.
@@ -882,6 +904,7 @@ module.exports = {
   DEFAULT_TIMEOUT_SECS,
   DEFAULT_KILL_GRACE_SECS,
   DEFAULT_MAX_REPLY_CHARS,
+  DEFAULT_TRUNCATION_SUFFIX,
   EXIT_SUCCESS,
   EXIT_ERROR,
   EXIT_TIMEOUT,

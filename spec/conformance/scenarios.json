@@ -32,6 +32,24 @@
       "expect": {"reply": "", "session_id": "sess-before-error", "error": "turn failed", "exit_code": 1, "partials": []}
     },
     {
+      "name": "partials after error are discarded",
+      "lines": ["{\"type\":\"partial\",\"text\":\"before\"}", "{\"type\":\"error\",\"message\":\"boom\"}", "{\"type\":\"partial\",\"text\":\"after\"}"],
+      "streaming": true,
+      "expect": {"reply": "", "session_id": "", "error": "boom", "exit_code": 1, "partials": ["before"]}
+    },
+    {
+      "name": "text after error is discarded",
+      "lines": ["{\"type\":\"error\",\"message\":\"boom\"}", "{\"type\":\"text\",\"text\":\"should not appear\"}"],
+      "streaming": true,
+      "expect": {"reply": "", "session_id": "", "error": "boom", "exit_code": 1, "partials": []}
+    },
+    {
+      "name": "session after error still updates id (last-wins)",
+      "lines": ["{\"type\":\"error\",\"message\":\"boom\"}", "{\"type\":\"session\",\"id\":\"learned-after-error\"}"],
+      "streaming": true,
+      "expect": {"reply": "", "session_id": "learned-after-error", "error": "boom", "exit_code": 1, "partials": []}
+    },
+    {
       "name": "text event carries newlines verbatim",
       "lines": ["{\"type\":\"text\",\"text\":\"line 1\\nline 2\\nline 3\"}"],
       "streaming": true,
@@ -90,21 +108,25 @@
       "profile_overrides": {"max_reply_chars": 10},
       "lines": ["{\"type\":\"text\",\"text\":\"0123456789ABCDEF\"}"],
       "streaming": false,
-      "expect": {"reply": "0123456789", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+      "expect": {"reply": "0123456789\n\n…(truncated)", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "streaming partials truncated at max_reply_chars",
       "profile_overrides": {"max_reply_chars": 10},
       "lines": ["{\"type\":\"partial\",\"text\":\"hello \"}", "{\"type\":\"partial\",\"text\":\"world!!\"}", "{\"type\":\"session\",\"id\":\"sess-1\"}"],
       "streaming": true,
-      "expect": {"reply": "", "session_id": "sess-1", "error": "", "exit_code": 0, "partials": ["hello ", "worl"]}
+      "expect": {"reply": "", "session_id": "sess-1", "error": "", "exit_code": 0, "partials": ["hello ", "worl", "\n\n…(truncated)"]}
     },
     {
       "name": "streaming partials: first chunk already exceeds cap",
       "profile_overrides": {"max_reply_chars": 3},
       "lines": ["{\"type\":\"partial\",\"text\":\"hello\"}", "{\"type\":\"partial\",\"text\":\"world\"}"],
       "streaming": true,
-      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": ["hel"]}
+      "expect": {
+        "reply": "", "session_id": "", "error": "", "exit_code": 0,
+        "partials_any_of": [["hel", "\n\n…(truncated)"], ["\n\n…(truncated)"]],
+        "_note": "Spec 5.3 leaves it implementation-defined whether a chunk that exceeds the remaining cap is forwarded as a tail-truncated slice (\"hel\") or dropped entirely; either way the truncation notice follows. Both candidates are conformant."
+      }
     }
   ]
 }

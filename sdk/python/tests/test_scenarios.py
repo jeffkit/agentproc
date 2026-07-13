@@ -75,6 +75,16 @@ def test_scenario_conformance(scenario: dict, tmp_path: Path) -> None:
     assert r.exit_code == expect["exit_code"], (
         f"{scenario['name']}: exit_code got {r.exit_code!r}, expected {expect['exit_code']!r}"
     )
-    assert partials == expect["partials"], (
-        f"{scenario['name']}: partials got {partials!r}, expected {expect['partials']!r}"
-    )
+    # partials comparison: when `partials_any_of` is present, the scenario
+    # accepts any of the listed candidate sequences (used for spec-loose
+    # semantics like whether to emit a tail-truncated chunk vs nothing).
+    # Otherwise the strict `partials` equality applies.
+    if "partials_any_of" in expect:
+        candidates = expect["partials_any_of"]
+        assert any(partials == cand for cand in candidates), (
+            f"{scenario['name']}: partials got {partials!r}, expected any of {candidates!r}"
+        )
+    else:
+        assert partials == expect["partials"], (
+            f"{scenario['name']}: partials got {partials!r}, expected {expect['partials']!r}"
+        )

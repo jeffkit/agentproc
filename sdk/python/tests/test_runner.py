@@ -97,6 +97,15 @@ class TestPermissionHelpers:
             {"request_id": "2", "behavior": "deny", "message": "nope"}
         ) == '{"type":"permission_response","request_id":"2","behavior":"deny","message":"nope"}'
 
+    def test_format_allow_without_updated_input_omits_field(self):
+        # allow without updated_input MUST omit the field — the agent/CLI is
+        # responsible for falling back to the request's original input. The
+        # runner must not pre-fill it (would erase the "user accepted
+        # unchanged" vs "user never touched it" distinction downstream).
+        assert format_permission_response(
+            {"request_id": "3", "behavior": "allow"}
+        ) == '{"type":"permission_response","request_id":"3","behavior":"allow"}'
+
     def test_is_valid(self):
         assert is_valid_permission_request({"request_id": "1", "tool_name": "Bash", "input": {}})
         assert not is_valid_permission_request({"request_id": "1", "tool_name": "Bash"})
@@ -264,6 +273,22 @@ class TestNormalizeProfile:
         assert "env_inherit" not in p
         p2 = normalize_profile({"command": "x", "env_inherit": "all"})
         assert "env_inherit" not in p2
+
+    def test_truncation_suffix_defaults_to_ellipsis(self):
+        p = normalize_profile({"command": "x"})
+        assert p["truncation_suffix"] == "\n\n…(truncated)"
+
+    def test_truncation_suffix_custom_value_is_honoured(self):
+        # A custom cap no longer silently strips the truncation notice —
+        # users get the default suffix unless they explicitly override.
+        p = normalize_profile({"command": "x", "max_reply_chars": 100})
+        assert p["truncation_suffix"] == "\n\n…(truncated)"
+        p2 = normalize_profile({"command": "x", "truncation_suffix": " [more]"})
+        assert p2["truncation_suffix"] == " [more]"
+
+    def test_truncation_suffix_empty_string_disables_notice(self):
+        p = normalize_profile({"command": "x", "truncation_suffix": ""})
+        assert p["truncation_suffix"] == ""
 
     def test_permission_defaults_false(self):
         assert normalize_profile({"command": "x"})["permission"] is False

@@ -312,6 +312,26 @@ describe('normalizeProfile', () => {
     assert.strictEqual(p2.env_inherit, undefined);
   });
 
+  test('truncation_suffix defaults to ellipsis notice', () => {
+    const p = normalizeProfile({ command: 'x' });
+    assert.strictEqual(p.truncation_suffix, '\n\n…(truncated)');
+  });
+
+  test('truncation_suffix: custom cap no longer strips the notice', () => {
+    // Regression: a custom max_reply_chars used to silently disable the
+    // notice (only === DEFAULT_MAX_REPLY_CHARS got one). Now the notice is
+    // tied to truncation_suffix, independent of cap.
+    const p = normalizeProfile({ command: 'x', max_reply_chars: 100 });
+    assert.strictEqual(p.truncation_suffix, '\n\n…(truncated)');
+    const p2 = normalizeProfile({ command: 'x', truncation_suffix: ' [more]' });
+    assert.strictEqual(p2.truncation_suffix, ' [more]');
+  });
+
+  test('truncation_suffix: empty string disables the notice', () => {
+    const p = normalizeProfile({ command: 'x', truncation_suffix: '' });
+    assert.strictEqual(p.truncation_suffix, '');
+  });
+
   test('permission defaults false; true only when boolean true', () => {
     assert.strictEqual(normalizeProfile({ command: 'x' }).permission, false);
     assert.strictEqual(normalizeProfile({ command: 'x', permission: true }).permission, true);
@@ -760,6 +780,14 @@ test('formatPermissionResponse / isValidPermissionRequest', () => {
   assert.strictEqual(
     formatPermissionResponse({ request_id: '2', behavior: 'deny', message: 'nope' }),
     '{"type":"permission_response","request_id":"2","behavior":"deny","message":"nope"}',
+  );
+  // allow without updated_input MUST omit the field — the agent/CLI is
+  // responsible for falling back to the request's original input. The
+  // runner must not pre-fill it (would erase the "user accepted unchanged"
+  // vs "user never touched it" distinction downstream).
+  assert.strictEqual(
+    formatPermissionResponse({ request_id: '3', behavior: 'allow' }),
+    '{"type":"permission_response","request_id":"3","behavior":"allow"}',
   );
   assert.ok(isValidPermissionRequest({ request_id: '1', tool_name: 'Bash', input: {} }));
   assert.ok(!isValidPermissionRequest({ request_id: '1', tool_name: 'Bash' }));

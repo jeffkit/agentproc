@@ -69,7 +69,7 @@ env_allowlist: [MY_API_KEY]   # 可选：限制 env 块可读取哪些 ${VAR}
 timeout_secs: 600             # stdout 读取超时，默认 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL 的宽限期，默认 5
 max_reply_chars: 8000         # 在此长度截断（正文 + 流式 partial），默认 8000
-truncation_suffix: "\n\n…(truncated)"
+truncation_suffix: "\n\n…(truncated)"   # 回复被截断时追加的提示，默认如图。空字符串禁用提示（截断仍然生效）。
 include_stderr_in_reply: false
 send_error_reply: true        # agent 出错时告知用户
 
@@ -308,7 +308,7 @@ agent **MAY** 包含额外字段（向前兼容）；bridge **SHOULD** 忽略它
 | `type` | string | 字面量 `"error"`。 |
 | `message` | string | 用户可读的错误消息。 |
 
-此事件**无论** `streaming` 模式都被尊重。bridge 把消息作为错误回复转发给用户，并 **SHOULD** 停止转发同一 turn 的后续 `partial` 事件（已投递的分块不被撤回，仅抑制后续——见下文「与已投递 partial 的交互」）。
+此事件**无论** `streaming` 模式都被尊重。bridge 把消息作为错误回复转发给用户，并 **MUST** 停止转发同一 turn 的后续 `partial` 事件（已投递的分块不被撤回，仅抑制后续——见下文「与已投递 partial 的交互」）。`error` 之后到达的 `text` 事件也 **MUST** 被丢弃（它们不能贡献给失败 turn 的回复正文）。`session` 例外——last-wins 仍生效，故 `error` 之后到达的 `session` 事件仍会更新为下一 turn 持久的会话 ID。
 
 一旦发出 `error` 事件，bridge **MAY** 完全停止读取 agent 的 stdout——它已捕获错误及（依会话事件规则）出现在错误之前的最终会话 ID。agent 进程预期随后很快退出；若不退出，bridge 的正常超时生效。
 
@@ -336,6 +336,8 @@ agent **MAY** 包含额外字段（向前兼容）；bridge **SHOULD** 忽略它
 
 - **非流式（`streaming: false`）：** 拼装好的 `text` 正文在投递前截断为 `max_reply_chars` 个字符。
 - **流式（默认）：** 跟踪所有已转发 `partial` 分块的累计长度。一旦达到 `max_reply_chars`，bridge 追加截断提示（profile 的 `truncation_suffix`）并停止转发当前 turn 的后续 partial。
+
+**实现自定义：边界分块。** 当一个 `partial` 分块跨越上限（分块本身大于剩余预算）时，bridge **MAY** 选择 (a) 先转发填满剩余预算的尾段截断切片，再发截断提示；或 (b) 整体丢弃该分块，仅转发截断提示。两者均合规。截断提示是告知用户回复已被封顶的标志；用户是否看到那片挤得下的切片，是各 bridge 的 UX 选择。
 
 上限统一施加，使得在 profile 中设 `max_reply_chars: 2000` 对流式 agent（`partial`）和单正文 agent（`text`）效果相同。缓冲所有输出并以 `text` 发出的 agent，或把一切作为 `partial` 转发的 agent，都撞同一堵墙。
 
@@ -465,7 +467,7 @@ agent **MAY** 为 UI / 策略包含的可选字段：
 
 | 字段 | 类型 | 描述 |
 |-------|------|-------------|
-| `updated_input` | object | 当 `behavior` 为 `"allow"` 时，agent **SHOULD** 使用的输入（原始或 bridge 修改后的）。封装需要更新输入 blob 的 CLI 的 agent（例如 Claude Code `updatedInput`）**MUST** 透传。allow 时省略则 agent 使用请求的原始 `input`。 |
+| `updated_input` | object | 当 `behavior` 为 `"allow"` 时，agent **SHOULD** 使用的输入——当 bridge 想覆盖或明确确认请求的 `input` 时。封装需要更新输入 blob 的 CLI 的 agent（例如 Claude Code `updatedInput`）**MUST** 透传。allow 时若响应省略 `updated_input`，agent **MUST** 回退到请求的原始 `input`——bridge **不**会代为填充。当上游批准者未提供时，bridge **MUST NOT** 用请求的原始 `input` 预填 `updated_input`：这样做会抹掉下游 CLI 「用户明确接受未修改」与「用户根本没动过」之间的区别。 |
 | `message` | string | 当 `behavior` 为 `"deny"` 时，agent **MAY** 转给模型或用户的原因。 |
 
 ### 顺序、阻塞与超时

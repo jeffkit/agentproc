@@ -45,6 +45,7 @@ __all__ = [
     "DEFAULT_TIMEOUT_SECS",
     "DEFAULT_KILL_GRACE_SECS",
     "DEFAULT_MAX_REPLY_CHARS",
+    "DEFAULT_TRUNCATION_SUFFIX",
     "EXIT_SUCCESS",
     "EXIT_ERROR",
     "EXIT_TIMEOUT",
@@ -73,6 +74,7 @@ PROTOCOL_VERSION = "0.3"
 DEFAULT_TIMEOUT_SECS = 1800
 DEFAULT_KILL_GRACE_SECS = 5
 DEFAULT_MAX_REPLY_CHARS = 8000
+DEFAULT_TRUNCATION_SUFFIX = "\n\n…(truncated)"
 
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
@@ -206,6 +208,13 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
         "max_reply_chars": (
             int(src["max_reply_chars"]) if _is_int_like(src.get("max_reply_chars"))
             else DEFAULT_MAX_REPLY_CHARS
+        ),
+        # Spec profile YAML: optional truncation notice appended when the reply
+        # is capped. Defaults to "\n\n…(truncated)". An empty string disables
+        # the notice entirely (the cap still applies, just no visible marker).
+        "truncation_suffix": (
+            src["truncation_suffix"] if isinstance(src.get("truncation_suffix"), str)
+            else DEFAULT_TRUNCATION_SUFFIX
         ),
         # Bridge-side hint: when False, the runner ignores {"type":"partial"}
         # events and assembles the reply from {"type":"text"} events only.
@@ -545,6 +554,11 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     result = RunResult()
     text_chunks: List[str] = []
+    # Spec 5.4: once an error event arrives, subsequent partial/text events
+    # MUST be discarded (they cannot contribute to a failed turn's reply).
+    # `session` is exempt — last-wins still applies so the id for the next
+    # turn can be captured even after an error.
+    error_seen = False
     pending_permission_ids: set = set()
     stdin_lock = threading.Lock()
     stdin_closed = False
@@ -552,7 +566,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     _cumulative_partial_chars = 0
     _partials_truncated = False
     _max_chars = profile["max_reply_chars"]
-    _trunc_suffix = "\n\n…(truncated)" if _max_chars == DEFAULT_MAX_REPLY_CHARS else ""
+    _trunc_suffix = profile["truncation_suffix"]
     # Two views on stderr:
     #   - stderr_window: bounded sliding window (8 KB) for the on_stderr UI
     #     callback, so a noisy agent cannot exhaust memory.
@@ -668,7 +682,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     assert proc.stdout is not None
 
     def _handle_line(raw_line: str) -> None:
-        nonlocal _cumulative_partial_chars, _partials_truncated
+        nonlocal _cumulative_partial_chars, _partials_truncated, error_seen
         line = raw_line.rstrip("\r")
         c = classify_line(line)
         kind = c["kind"]
@@ -689,7 +703,15 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 if options.on_protocol_line:
                     options.on_protocol_line(line)
         elif kind == "partial":
-            if streaming and options.on_partial and not _partials_truncated:
+            # Spec 5.4: post-error partials are discarded (not forwarded, not
+            # appended). on_protocol_line still fires so debug traces stay
+            # complete.
+            if (
+                not error_seen
+                and streaming
+                and options.on_partial
+                and not _partials_truncated
+            ):
                 remaining = _max_chars - _cumulative_partial_chars
                 if len(c["value"]) >= remaining:
                     if remaining > 0:
@@ -703,11 +725,14 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             if options.on_protocol_line:
                 options.on_protocol_line(line)
         elif kind == "text":
-            text_chunks.append(c["value"])
+            # Spec 5.4: post-error text is discarded.
+            if not error_seen:
+                text_chunks.append(c["value"])
             if options.on_protocol_line:
                 options.on_protocol_line(line)
         elif kind == "error":
             result.error = c["value"]
+            error_seen = True
             if options.on_error:
                 options.on_error(c["value"])
             if options.on_protocol_line:
@@ -750,20 +775,28 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                     try:
                         decision = options.on_permission(req)
                         if isinstance(decision, dict):
+                            # Spec: when the bridge omits updated_input, the
+                            # response MUST omit it too — the agent (or wrapped
+                            # CLI) is responsible for falling back to the
+                            # request's original input. Don't auto-fill
+                            # req["input"] here: that would erase the
+                            # distinction between "user accepted unchanged"
+                            # and "user never touched it" for downstream CLIs
+                            # (e.g. Claude Code's updatedInput semantics).
                             updated = decision.get("updated_input")
                             if updated is None and "updatedInput" in decision:
                                 updated = decision.get("updatedInput")
-                            if updated is None:
-                                updated = req.get("input")
-                            _write_permission_response({
+                            response_decision: Dict[str, Any] = {
                                 "request_id": req["request_id"],
                                 "behavior": (
                                     "allow" if decision.get("behavior") == "allow"
                                     else "deny"
                                 ),
-                                "updated_input": updated if isinstance(updated, dict) else req.get("input"),
                                 "message": decision.get("message"),
-                            })
+                            }
+                            if isinstance(updated, dict):
+                                response_decision["updated_input"] = updated
+                            _write_permission_response(response_decision)
                     except Exception as exc:  # noqa: BLE001 — surface to agent as deny
                         if options.on_stderr:
                             options.on_stderr(
@@ -864,8 +897,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     # Reply body = concatenation of {"type":"text"} events (direct, no separator).
     result.reply = "".join(text_chunks)
     if len(result.reply) > profile["max_reply_chars"]:
-        suffix = "\n\n…(truncated)" if profile["max_reply_chars"] == DEFAULT_MAX_REPLY_CHARS else ""
-        result.reply = result.reply[: profile["max_reply_chars"]] + suffix
+        result.reply = result.reply[: profile["max_reply_chars"]] + profile["truncation_suffix"]
 
     # If the agent exited non-zero with no error event, peek at its stderr for
     # common "command/file not found" patterns and surface a friendly hint.

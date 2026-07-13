@@ -69,7 +69,7 @@ env_allowlist: [MY_API_KEY]   # optional: restrict which ${VAR} the env block ma
 timeout_secs: 600             # stdout read timeout, default 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
 max_reply_chars: 8000         # truncate at this length (body + streaming partials), default 8000
-truncation_suffix: "\n\n…(truncated)"
+truncation_suffix: "\n\n…(truncated)"   # notice appended when reply is capped; default shown. Empty string disables the notice (the cap still applies).
 include_stderr_in_reply: false
 send_error_reply: true        # tell the user when the agent errors
 
@@ -308,7 +308,7 @@ This event is consumed by the bridge and does **not** appear in the reply sent t
 | `type` | string | Literal `"error"`. |
 | `message` | string | A user-readable error message. |
 
-This event is honored **regardless** of `streaming` mode. The bridge forwards the message to the user as an error reply and SHOULD stop forwarding any further `partial` events from the same turn (already-delivered chunks are not retracted, only future ones are suppressed — see "Interaction with already-delivered partials" below).
+This event is honored **regardless** of `streaming` mode. The bridge forwards the message to the user as an error reply and MUST stop forwarding any further `partial` events from the same turn (already-delivered chunks are not retracted, only future ones are suppressed — see "Interaction with already-delivered partials" below). `text` events that arrive after an `error` MUST also be discarded (they cannot contribute to the reply body of a failed turn). The `session` event is exempt — last-wins still applies, so a `session` event arriving after an `error` still updates the id persisted for the next turn.
 
 Once an `error` event has been emitted, the bridge MAY stop reading the agent's stdout entirely — it has already captured the error and (per the session-event rule) the final session id if one appeared before the error. The agent process is expected to exit shortly after; if it does not, the bridge's normal timeout applies.
 
@@ -336,6 +336,8 @@ A stdout line that is not valid JSON, is valid JSON but not an object, or lacks 
 
 - **Non-streaming (`streaming: false`):** the assembled `text` body is truncated to `max_reply_chars` characters before delivery.
 - **Streaming (default):** the cumulative length of all forwarded `partial` chunks is tracked. Once it reaches `max_reply_chars`, the bridge appends a truncation notice (the profile's `truncation_suffix`) and stops forwarding further partials from the current turn.
+
+**Implementation-defined: the boundary chunk.** When a `partial` chunk straddles the cap (the chunk itself is larger than the remaining budget), the bridge MAY either (a) forward a tail-truncated slice that fits the remaining budget, then the truncation notice, or (b) drop the chunk entirely and forward only the truncation notice. Both are conformant. The truncation notice is what tells the user the reply was capped; whether the user sees the slice that fits is a per-bridge UX choice.
 
 The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profile has the same effect whether the agent streams (`partial`) or returns a single body (`text`). Agents that buffer all output and emit it as `text` — or agents that forward everything as `partial` — both hit the same wall.
 
@@ -465,7 +467,7 @@ Optional:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `updated_input` | object | When `behavior` is `"allow"`, the input the agent SHOULD use (original or bridge-modified). Agents wrapping CLIs that require an updated input blob (e.g. Claude Code `updatedInput`) MUST pass this through. When omitted on allow, the agent uses the request's original `input`. |
+| `updated_input` | object | When `behavior` is `"allow"`, the input the agent SHOULD use, when the bridge wants to override or explicitly confirm the request's `input`. Agents wrapping CLIs that require an updated input blob (e.g. Claude Code `updatedInput`) MUST pass this through. When the response omits `updated_input` on allow, the agent MUST fall back to the request's original `input` — the bridge does NOT auto-fill it. Bridges MUST NOT pre-fill `updated_input` with the request's original `input` when the upstream approver did not provide one: doing so erases the distinction between "user explicitly accepted unchanged" and "user never touched it" for downstream CLIs. |
 | `message` | string | When `behavior` is `"deny"`, a reason the agent MAY surface to the model or user. |
 
 ### Ordering, blocking, and timeout
