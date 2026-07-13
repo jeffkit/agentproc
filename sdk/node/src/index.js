@@ -120,23 +120,36 @@ function appendHistory(sessionId, entries, sessionDir) {
 
 /**
  * Read exactly one line from stdin (the turn object) and JSON-decode it.
- * Synchronous read of fd 0 up to the first newline. Returns the parsed
- * object, or an empty object on any failure (best-effort, fail-soft per spec).
+ *
+ * Reads byte-by-byte from fd 0 until the first newline (or EOF). This is
+ * deliberate: `fs.readFileSync(0)` reads until EOF, which deadlocks the
+ * agent process when the bridge keeps stdin open for permission traffic
+ * (`profile.permission: true`). A byte-at-a-time loop is fast enough on
+ * the turn payload (a few KB at most) and lets stdin stay open for the
+ * handler to read subsequent permission_response frames itself.
+ *
+ * Returns the parsed object, or an empty object on any failure
+ * (best-effort, fail-soft per spec).
  */
 function readTurn() {
-  let raw = '';
+  let line = '';
   try {
-    // Read available stdin up to the first newline. fs.readFileSync(0) reads
-    // until EOF when the bridge closed stdin (permission off); when stdin is
-    // kept open (permission on), the first line is the turn and the rest is
-    // permission_response traffic the agent-side SDK does not handle here.
-    const buf = fs.readFileSync(0, null);
-    raw = buf.toString('utf8');
+    const buf = Buffer.alloc(1);
+    while (true) {
+      // fs.readSync returns 0 at EOF, >0 on a byte read. EAGAIN/EWOULDBLOCK
+      // would manifest as a thrown error on fd 0 in practice (the bridge
+      // either wrote data or closed), so a synchronous loop is safe here.
+      const n = fs.readSync(0, buf, 0, 1);
+      if (n === 0) break;            // EOF
+      const ch = buf[0];
+      if (ch === 0x0a) break;        // \n
+      line += buf.toString('utf8');
+    }
   } catch {
+    // Best-effort: an error reading stdin yields an empty turn. The handler
+    // will then see a default-empty context, which is the spec's fail-soft.
     return {};
   }
-  const nl = raw.indexOf('\n');
-  const line = nl >= 0 ? raw.slice(0, nl) : raw;
   try {
     const v = JSON.parse(line);
     if (v && typeof v === 'object' && !Array.isArray(v)) return v;
@@ -148,6 +161,7 @@ function readTurn() {
 
 function contextFromTurn() {
   const t = readTurn();
+  const permissionEnabled = t.permission === true;
   return {
     message: typeof t.message === 'string' ? t.message : '',
     sessionId: typeof t.session_id === 'string' ? t.session_id : '',
@@ -155,7 +169,7 @@ function contextFromTurn() {
     fromUser: typeof t.from_user === 'string' ? t.from_user : '',
     protocolVersion: typeof t.protocol_version === 'string' ? t.protocol_version : PROTOCOL_VERSION,
     attachments: Array.isArray(t.attachments) ? t.attachments : [],
-    permission: t.permission === true,
+    permission: permissionEnabled,
 
     /** Send a streaming chunk to the user immediately. */
     sendPartial(text, role) {
@@ -170,7 +184,82 @@ function contextFromTurn() {
       if (!text) return;
       process.stdout.write(JSON.stringify({ type: 'error', message: text }) + '\n');
     },
+
+    /**
+     * Send a tool-permission request to the bridge (only valid when
+     * `ctx.permission === true`). The bridge surfaces it to the user; the
+     * matching decision arrives on stdin as a
+     * `{"type":"permission_response",...}` line, which `readPermissionResponse`
+     * decodes.
+     *
+     * `request_id` MUST be unique within the turn. The bridge echoes it in
+     * the response.
+     */
+    sendPermissionRequest(req) {
+      if (!permissionEnabled) {
+        throw new Error(
+          'ctx.sendPermissionRequest() requires profile.permission: true — the bridge would otherwise not honor the request'
+        );
+      }
+      if (!req || typeof req !== 'object') {
+        throw new Error('sendPermissionRequest(req): req must be an object');
+      }
+      if (typeof req.request_id !== 'string' || !req.request_id) {
+        throw new Error('sendPermissionRequest: req.request_id is required');
+      }
+      const payload = { type: 'permission_request' };
+      for (const k of ['request_id', 'tool_name', 'input']) {
+        payload[k] = req[k];
+      }
+      // Optional fields the agent MAY include.
+      for (const k of ['description', 'tool_use_id']) {
+        if (req[k] !== undefined) payload[k] = req[k];
+      }
+      process.stdout.write(JSON.stringify(payload) + '\n');
+    },
+
+    /**
+     * Read the next `{"type":"permission_response",...}` frame from stdin.
+     * Blocks until a frame arrives (or EOF). Returns the parsed object
+     * (containing `request_id`, `behavior`, optional `updated_input` /
+     * `message`), or `null` on EOF.
+     *
+     * Only valid when `ctx.permission === true`. The bridge MUST have
+     * kept stdin open for permission traffic; in `permission: false` mode
+     * stdin is closed after the turn line, so this would return `null`
+     * immediately.
+     */
+    readPermissionResponse() {
+      return readNextStdinLine();
+    },
   };
+}
+
+/**
+ * Read one NDJSON line from stdin (used by `ctx.readPermissionResponse`).
+ * Returns the parsed object, or null at EOF / on JSON error.
+ */
+function readNextStdinLine() {
+  let line = '';
+  try {
+    const buf = Buffer.alloc(1);
+    while (true) {
+      const n = fs.readSync(0, buf, 0, 1);
+      if (n === 0) return null;          // EOF
+      const ch = buf[0];
+      if (ch === 0x0a) break;            // \n
+      line += buf.toString('utf8');
+    }
+  } catch {
+    return null;
+  }
+  try {
+    const v = JSON.parse(line);
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+  } catch {
+    // fall through
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

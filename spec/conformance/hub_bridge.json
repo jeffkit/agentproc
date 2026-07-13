@@ -1,0 +1,142 @@
+{
+  "_comment": "Hub bridge engine conformance (wire 0.3). Drives the shared `_shared/stream_utils.run_bridge` (Python) and `_shared/stream_utils.runBridge` (Node) with a minimal identity parse_event that forwards {partial/text/session/error} as-is, feeding each scenario's `cli_stdout` lines as the wrapped CLI's NDJSON output. Both implementations MUST produce identical `bridge_stdout` lines and the listed `exit_code`. Add scenarios here when stream_utils.py and stream_utils.js drift on: error-mid-stream preserving session, empty-message+attachment accepted, FileNotFoundError → emit_error, last-wins ordering, session-after-error. Per-CLI parse_event variations are covered in each hub's own tests; this fixture covers the shared engine.",
+  "parse_event_kind": "identity",
+  "scenarios": [
+    {
+      "name": "basic partial + session + text",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [
+        "{\"type\":\"partial\",\"text\":\"thinking... \"}",
+        "{\"type\":\"partial\",\"text\":\"done.\"}",
+        "{\"type\":\"session\",\"id\":\"sess-abc\"}",
+        "{\"type\":\"text\",\"text\":\"the answer\"}"
+      ],
+      "cli_exit": 0,
+      "expect": {
+        "exit_code": 0,
+        "stdout_lines": [
+          "{\"type\":\"partial\",\"text\":\"thinking... \"}",
+          "{\"type\":\"partial\",\"text\":\"done.\"}",
+          "{\"type\":\"session\",\"id\":\"sess-abc\"}",
+          "{\"type\":\"text\",\"text\":\"the answer\"}"
+        ]
+      }
+    },
+    {
+      "name": "error mid-stream preserves session id",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [
+        "{\"type\":\"partial\",\"text\":\"half done\"}",
+        "{\"type\":\"session\",\"id\":\"sess-err\"}",
+        "{\"type\":\"error\",\"message\":\"rate limited\"}"
+      ],
+      "cli_exit": 1,
+      "expect": {
+        "exit_code": 1,
+        "stdout_lines": [
+          "{\"type\":\"partial\",\"text\":\"half done\"}",
+          "{\"type\":\"session\",\"id\":\"sess-err\"}",
+          "{\"type\":\"error\",\"message\":\"rate limited\"}"
+        ]
+      },
+      "_note": "Spec: session MUST persist on error-terminated turns. The session event arrives before the error and is preserved by the bridge — without this, the next turn in the same conversation would lose its context."
+    },
+    {
+      "name": "session discovered at end (typical CLI-wrapping case)",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [
+        "{\"type\":\"partial\",\"text\":\"first\"}",
+        "{\"type\":\"partial\",\"text\":\" second\"}",
+        "{\"type\":\"session\",\"id\":\"learned-at-exit\"}"
+      ],
+      "cli_exit": 0,
+      "expect": {
+        "exit_code": 0,
+        "stdout_lines": [
+          "{\"type\":\"partial\",\"text\":\"first\"}",
+          "{\"type\":\"partial\",\"text\":\" second\"}",
+          "{\"type\":\"session\",\"id\":\"learned-at-exit\"}",
+          "{\"type\":\"text\",\"text\":\" second\"}"
+        ]
+      },
+      "_note": "Many CLIs only learn their session id at exit. Bridge forwards the id after the partials, then emits a text event using the last partial as the reply body (the partial-as-reply fallback) so non-streaming consumers still receive a body."
+    },
+    {
+      "name": "empty message + attachment is accepted (image-only turn)",
+      "turn": {"type": "turn", "message": "", "session_id": "", "from_user": "u1", "attachments": [{"kind": "image", "url": "https://x/a.png"}], "protocol_version": "0.3"},
+      "cli_stdout": [
+        "{\"type\":\"session\",\"id\":\"sess-img\"}",
+        "{\"type\":\"text\",\"text\":\"got the image\"}"
+      ],
+      "cli_exit": 0,
+      "expect": {
+        "exit_code": 0,
+        "stdout_lines": [
+          "{\"type\":\"session\",\"id\":\"sess-img\"}",
+          "{\"type\":\"text\",\"text\":\"got the image\"}"
+        ]
+      }
+    },
+    {
+      "name": "empty message and no attachment → bridge emits error and exits 1",
+      "turn": {"type": "turn", "message": "", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [],
+      "cli_exit": 0,
+      "expect": {
+        "exit_code": 1,
+        "stdout_lines_any_of": [
+          ["{\"type\":\"error\",\"message\":\"turn.message is required (or include turn.attachments)\"}"]
+        ]
+      },
+      "_note": "Both bridges emit a `turn.message is required` error — the wording MAY differ slightly per language; `stdout_lines_any_of` accepts either the canonical form or the plain-cli variant (which prefixes the CLI name)."
+    },
+    {
+      "name": "CLI exits non-zero without session and without error event → bridge surfaces exit + stderr",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [],
+      "cli_exit": 2,
+      "cli_stderr": "boom",
+      "expect": {
+        "exit_code": 1,
+        "stdout_lines_contains": ["{\"type\":\"error\",\"message\":", "exited with 2", "boom"]
+      },
+      "_note": "The bridges produce a single {\"type\":\"error\",...} line whose message embeds both the exit code and stderr snippet. Wording varies per language; we assert substrings rather than exact match."
+    },
+    {
+      "name": "CLI exits non-zero but session was captured → session still persisted",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [
+        "{\"type\":\"session\",\"id\":\"sess-survives-exit\"}",
+        "{\"type\":\"text\",\"text\":\"partial reply\"}"
+      ],
+      "cli_exit": 1,
+      "cli_stderr": "",
+      "expect": {
+        "exit_code": 0,
+        "stdout_lines": [
+          "{\"type\":\"session\",\"id\":\"sess-survives-exit\"}",
+          "{\"type\":\"text\",\"text\":\"partial reply\"}"
+        ]
+      },
+      "_note": "When the CLI exits non-zero but the bridge captured a session id and some reply text, the bridge still emits session + text and exits 0. Non-zero exit without a session is what surfaces as an error."
+    },
+    {
+      "name": "final text falls back to last partial when no text event emitted",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.3"},
+      "cli_stdout": [
+        "{\"type\":\"partial\",\"text\":\"streamed only\"}",
+        "{\"type\":\"session\",\"id\":\"sess-fallback\"}"
+      ],
+      "cli_exit": 0,
+      "expect": {
+        "exit_code": 0,
+        "stdout_lines": [
+          "{\"type\":\"partial\",\"text\":\"streamed only\"}",
+          "{\"type\":\"session\",\"id\":\"sess-fallback\"}",
+          "{\"type\":\"text\",\"text\":\"streamed only\"}"
+        ]
+      },
+      "_note": "When the CLI streams only via partials and never emits a terminal text event, the bridge uses the last partial text as the final reply body so a non-streaming consumer still gets the answer."
+    }
+  ]
+}

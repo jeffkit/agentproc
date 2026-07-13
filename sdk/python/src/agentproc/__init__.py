@@ -166,6 +166,64 @@ class AgentContext:
         sys.stdout.flush()
         return _NoopAwaitable()
 
+    def send_permission_request(self, req: Dict[str, Any]) -> None:
+        """Send a tool-permission request to the bridge.
+
+        Only valid when ``ctx.permission`` is True (the profile set
+        ``permission: true`` and the bridge enabled the channel). The bridge
+        surfaces the request to the user; the matching decision arrives on
+        stdin as a ``{"type":"permission_response",...}`` frame that
+        :meth:`read_permission_response` decodes.
+
+        ``req`` MUST include ``request_id`` (unique within the turn),
+        ``tool_name``, and ``input`` (object). ``description`` and
+        ``tool_use_id`` are optional.
+        """
+        if not self.permission:
+            raise RuntimeError(
+                "ctx.send_permission_request() requires profile.permission: "
+                "true — the bridge would otherwise not honor the request"
+            )
+        if not isinstance(req, dict):
+            raise TypeError("req must be a dict")
+        rid = req.get("request_id")
+        if not isinstance(rid, str) or not rid:
+            raise ValueError("req['request_id'] is required")
+        payload: Dict[str, Any] = {"type": "permission_request"}
+        for k in ("request_id", "tool_name", "input"):
+            payload[k] = req.get(k)
+        for k in ("description", "tool_use_id"):
+            if k in req:
+                payload[k] = req[k]
+        sys.stdout.write(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
+        sys.stdout.flush()
+
+    def read_permission_response(self) -> Optional[Dict[str, Any]]:
+        """Read the next ``{"type":"permission_response",...}`` frame from stdin.
+
+        Blocks until a frame arrives (or EOF). Returns the parsed object, or
+        ``None`` at EOF.
+
+        Only meaningful when ``ctx.permission`` is True — in the default
+        ``permission: false`` mode the bridge closes stdin after the turn
+        line, so this returns ``None`` immediately.
+        """
+        try:
+            line = sys.stdin.readline()
+        except Exception:
+            return None
+        if not line:
+            return None
+        try:
+            v = json.loads(line.rstrip("\r\n"))
+        except json.JSONDecodeError:
+            return None
+        if isinstance(v, dict):
+            return v
+        return None
+
 
 @dataclass
 class AgentResult:

@@ -44,6 +44,26 @@ const handlers = {
     ctx.sendPartial('sync chunk');
     return 'done';
   },
+
+  // Exercises the permission channel end-to-end at the SDK level:
+  //   1. handler sends a {"type":"permission_request"} to the bridge
+  //   2. handler reads the {"type":"permission_response"} frame the bridge
+  //      writes back on stdin
+  //   3. handler echoes the decision as the reply body so the conformance
+  //      test can assert what the SDK saw.
+  // Pins that readTurn no longer deadlocks when stdin stays open for
+  // permission traffic (the pre-fix fs.readFileSync(0) would block here).
+  async_permission_roundtrip: async (ctx) => {
+    ctx.sendPermissionRequest({
+      request_id: 'r1',
+      tool_name: 'Bash',
+      input: { command: 'echo ok' },
+      description: 'echo',
+    });
+    const resp = ctx.readPermissionResponse();
+    const behavior = (resp && resp.behavior) || 'none';
+    return `perm=${behavior}`;
+  },
 };
 
 const kind = process.argv[2];

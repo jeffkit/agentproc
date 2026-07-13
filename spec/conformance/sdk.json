@@ -52,6 +52,20 @@
       "turn": { "message": "hi", "session_id": "", "session_name": "default" },
       "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"partial\",\"text\":\"thinking...\",\"role\":\"thinking\"}", "{\"type\":\"text\",\"text\":\"answer\"}"] },
       "note": "Pins the optional `role` field on partial events across both SDKs."
+    },
+    {
+      "name": "async-permission-roundtrip",
+      "handler": "async_permission_roundtrip",
+      "turn": { "message": "hi", "session_id": "", "session_name": "default", "permission": true },
+      "stdin_after_turn": ["{\"type\":\"permission_response\",\"request_id\":\"r1\",\"behavior\":\"allow\"}"],
+      "expect": {
+        "exit": 0,
+        "stdout_lines": [
+          "{\"type\":\"permission_request\",\"request_id\":\"r1\",\"tool_name\":\"Bash\",\"input\":{\"command\":\"echo ok\"},\"description\":\"echo\"}",
+          "{\"type\":\"text\",\"text\":\"perm=allow\"}"
+        ]
+      },
+      "note": "Exercises the SDK-side permission channel: handler sends a permission_request frame, reads back the permission_response frame the test pipes in on stdin after the turn, and reflects the decision in its reply. Pre-fix Node used fs.readFileSync(0) for the turn which deadlocked here because it read until EOF — the bridge must keep stdin open for permission traffic. Both SDKs now read exactly one line for the turn."
     }
   ]
 }

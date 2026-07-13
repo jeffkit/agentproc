@@ -42,10 +42,14 @@ def _run_scenario(scenario: dict) -> subprocess.CompletedProcess:
         "PYTHONPATH": str(SRC_DIR),
     }
     turn_line = json.dumps(scenario["turn"]) + "\n"
+    # Scenarios that exercise the optional permission channel follow the turn
+    # with one or more {"type":"permission_response",...} frames the harness
+    # reads via ctx.read_permission_response().
+    extra = "".join(line + "\n" for line in scenario.get("stdin_after_turn", []))
     return subprocess.run(
         [sys.executable, str(HARNESS), scenario["handler"]],
         env=env,
-        input=turn_line,
+        input=turn_line + extra,
         capture_output=True,
         text=True,
     )

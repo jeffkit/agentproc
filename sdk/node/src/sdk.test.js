@@ -35,10 +35,15 @@ function runScenario(scenario) {
     LANG: process.env.LANG,
     TERM: process.env.TERM,
   };
+  // The turn line always goes first. Scenarios that exercise the optional
+  // permission channel (turn.permission: true) follow up with one or more
+  // {"type":"permission_response",...} frames on stdin — the harness's
+  // ctx.readPermissionResponse() consumes them.
   const turnLine = JSON.stringify(scenario.turn) + '\n';
+  const extra = (scenario.stdin_after_turn || []).map(l => l + '\n').join('');
   return spawnSync(process.execPath, [HARNESS, scenario.handler], {
     env,
-    input: turnLine,
+    input: turnLine + extra,
     encoding: 'utf8',
   });
 }

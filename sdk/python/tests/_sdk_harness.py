@@ -53,6 +53,24 @@ def sync_partial_bare(ctx):
     return "done"
 
 
+async def async_permission_roundtrip(ctx):
+    # Exercises the permission channel end-to-end at the SDK level:
+    #   1. handler sends a {"type":"permission_request"} to the bridge
+    #   2. handler reads the {"type":"permission_response"} frame the bridge
+    #      writes back on stdin
+    #   3. handler echoes the decision as the reply body so the conformance
+    #      test can assert what the SDK saw.
+    ctx.send_permission_request({
+        "request_id": "r1",
+        "tool_name": "Bash",
+        "input": {"command": "echo ok"},
+        "description": "echo",
+    })
+    resp = ctx.read_permission_response()
+    behavior = (resp.get("behavior") if isinstance(resp, dict) else None) or "none"
+    return f"perm={behavior}"
+
+
 HANDLERS = {
     "async_string": async_string,
     "async_result": async_result,
@@ -62,6 +80,7 @@ HANDLERS = {
     "async_partial_with_role": async_partial_with_role,
     "sync_string": sync_string,
     "sync_partial_bare": sync_partial_bare,
+    "async_permission_roundtrip": async_permission_roundtrip,
 }
 
 
