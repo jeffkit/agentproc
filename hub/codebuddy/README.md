@@ -62,7 +62,7 @@ agentproc hub run codebuddy -p "reply with exactly: codebuddy ok"
 Expected output (on stderr / stdout):
 
 ```
-AGENT_SESSION:53bb6352-4b47-43fc-bce6-eaf808d419da
+{"type":"session","id":"53bb6352-4b47-43fc-bce6-eaf808d419da"}
 codebuddy ok
 ```
 
@@ -71,10 +71,7 @@ codebuddy ok
 
 ```bash
 cd hub/codebuddy
-AGENT_MESSAGE="reply with exactly: codebuddy ok" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="0" \
-python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: codebuddy ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
 ```
 
 </details>
@@ -100,7 +97,7 @@ Same shape as [claude-code](../claude-code/#how-it-works), with these deltas:
 
 ## Optional tool permission
 
-**Not supported.** CodeBuddy's headless docs mark `--permission-prompt-tool` as unsupported. If you set `permission: true` (or inject `AGENT_PERMISSION=1`), this bridge exits with `AGENT_ERROR` instead of silently falling back to `--dangerously-skip-permissions`.
+**Not supported.** CodeBuddy's headless docs mark `--permission-prompt-tool` as unsupported. If you set `permission: true` in the profile, this bridge emits a `{"type":"error"}` event instead of silently falling back to `--dangerously-skip-permissions`.
 
 For mid-turn IM tool authorization, use [claude-code](../claude-code/) (`permission: true`) or [codex](../codex/) (`permission: true` via Codex `PermissionRequest` hooks). See [PERMISSIONS.md](../PERMISSIONS.md).
 

@@ -1,23 +1,28 @@
 """AgentProc runner — the canonical bridge-side engine.
 
 This module is the canonical implementation of the AgentProc bridge-side
-contract (spec/protocol.md, wire protocol 0.2). The CLI (cli.py) is a thin
+contract (spec/protocol.md, wire protocol 0.3). The CLI (cli.py) is a thin
 wrapper around it.
+
+Wire 0.3 is NDJSON in both directions:
+  - stdin:  one {"type":"turn",...} line, then optional
+            {"type":"permission_response",...} lines when permission is on.
+  - stdout: one JSON object per line, discriminated by `type`:
+            partial | text | session | error | permission_request.
 
 Responsibilities:
   - Parse and validate a profile dict
-  - Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}} placeholders
-  - Inject AGENT_* env vars + profile env block
-  - Spawn the agent command (no shell)
-  - Read stdout line by line, classify protocol lines vs reply body
-  - Forward AGENT_PARTIAL: in real time (via on_partial callback)
-  - Capture the last AGENT_SESSION: line (last-wins rule)
-  - Honor AGENT_ERROR: lines
-  - Optional tool permission (profile.permission): keep stdin open, honor
-    AGENT_PERMISSION_REQUEST: / write AGENT_PERMISSION_RESPONSE:
+  - Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders
+  - Build the child env (infra set + profile env block + CLI --env extras)
+  - Spawn the agent command (no shell); command is always argv[0], never split
+  - Write the turn object to the agent's stdin (and keep stdin open when
+    profile.permission is true, for permission_response traffic)
+  - Read stdout line by line, parse each line as a JSON event
+  - Forward {"type":"partial"} in real time (via on_partial callback)
+  - Capture the last {"type":"session"} event (last-wins rule)
+  - Honor {"type":"error"} events
+  - Optional tool permission: honor permission_request / write permission_response
   - Enforce timeout_secs with SIGTERM → kill_grace_secs → SIGKILL
-  - Write message to stdin and close (when profile.stdin == 'message'
-    and permission is off)
   - Return RunResult(reply, session_id, error, exit_code, timed_out)
 """
 
@@ -33,7 +38,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 __all__ = [
     "PROTOCOL_VERSION",
@@ -52,9 +57,8 @@ __all__ = [
     "run",
     "normalize_profile",
     "classify_line",
+    "parse_json_line",
     "is_valid_session_id",
-    "decode_json_value",
-    "decode_json_object",
     "format_permission_response",
     "is_valid_permission_request",
     "substitute",
@@ -64,17 +68,11 @@ __all__ = [
     "diagnose_stderr_failure",
 ]
 
-PROTOCOL_VERSION = "0.2"
+PROTOCOL_VERSION = "0.3"
 
 DEFAULT_TIMEOUT_SECS = 1800
 DEFAULT_KILL_GRACE_SECS = 5
 DEFAULT_MAX_REPLY_CHARS = 8000
-
-PREFIX_SESSION = "AGENT_SESSION:"
-PREFIX_PARTIAL = "AGENT_PARTIAL:"
-PREFIX_ERROR = "AGENT_ERROR:"
-PREFIX_PERMISSION_REQUEST = "AGENT_PERMISSION_REQUEST:"
-PREFIX_PERMISSION_RESPONSE = "AGENT_PERMISSION_RESPONSE:"
 
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
@@ -84,18 +82,16 @@ EXIT_SIGTERM = 143
 
 
 # ---------------------------------------------------------------------------
-# Environment inheritance policy
+# Environment composition policy (wire 0.3)
 # ---------------------------------------------------------------------------
-
-# Default: the child does NOT inherit the bridge's environment wholesale.
-# Undeclared secrets must not reach the agent just because the bridge process
-# happens to hold them. The child env is built from: (1) this minimal INFRA
-# set (copied from ``os.environ`` when present), (2) the profile ``env`` block
-# (${VAR} expanded; optionally allowlist-filtered), (3) the injected
-# ``AGENT_*`` vars, (4) ``extra_env`` from the CLI ``--env`` flag.
-# Escape hatch: ``env_inherit: all`` restores full ``os.environ`` inheritance
-# (legacy trust-the-profile behaviour). ``env_allowlist`` only gates ${VAR}
-# expansion — it no longer doubles as the inheritance switch.
+#
+# The child env is built from exactly three layers (later overrides earlier):
+#   (1) this minimal INFRA set (copied from ``os.environ`` when present),
+#   (2) the profile ``env`` block (${VAR} expanded; optionally allowlist-filtered),
+#   (3) ``extra_env`` from the CLI ``--env`` flag.
+# The per-turn request does NOT travel in env (it travels on stdin as the
+# turn object), so there are no ``AGENT_*`` injections. There is no
+# ``env_inherit: all`` escape hatch in 0.3 — the infra set is always the base.
 ENV_INFRA_VARS = (
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
     "LC_MESSAGES", "TERM", "TMPDIR", "TZ", "PWD",
@@ -106,15 +102,8 @@ ENV_INFRA_VARS = (
 )
 
 
-def build_base_env(env_inherit: str = "minimal") -> Dict[str, str]:
-    """Build the child process base env per the inheritance policy.
-
-    ``env_inherit == "all"`` → full ``os.environ`` inheritance (escape hatch).
-    Otherwise (default ``"minimal"``) → only the infra vars, ready for
-    profile.env / AGENT_* / extra_env to be layered on.
-    """
-    if env_inherit == "all":
-        return dict(os.environ)
+def build_base_env() -> Dict[str, str]:
+    """Build the child process base env — the infra set, always."""
     base: Dict[str, str] = {}
     for name in ENV_INFRA_VARS:
         if name in os.environ:
@@ -143,8 +132,7 @@ class RunOptions:
     from_user: str = ""
     streaming: Optional[bool] = None
     extra_env: Dict[str, str] = field(default_factory=dict)
-    image_url: str = ""
-    file_url: str = ""
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
     cwd: Optional[str] = None
     profile_dir: Optional[str] = None
     timeout_secs: Optional[int] = None
@@ -154,7 +142,6 @@ class RunOptions:
     on_protocol_line: Optional[Callable[[str], None]] = None
     on_stderr: Optional[Callable[[str], None]] = None
     on_permission: Optional[Callable[[Dict[str, Any]], Any]] = None
-    forward_stdin: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,28 +159,16 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(command, str) or not command.strip():
         raise ValueError("profile.command must be a non-empty string")
 
-    has_args_field = "args" in src and src["args"] is not None
     args_value = src.get("args") or []
     if not isinstance(args_value, list):
         raise ValueError("profile.args must be a list")
 
-    # Per spec: `command` is argv[0]; `args` is argv[1..]. Two mutually
-    # exclusive forms:
-    #   (a) `args` absent + command has whitespace → split command into argv
-    #       (the legacy shorthand: `command: python3 ./bridge.py`)
-    #   (b) `args` present (even empty `[]`) → command is a single token,
-    #       never split. This is the escape hatch for paths with whitespace:
-    #         command: "/path with spaces/my agent"
-    #         args: []
-    # `args: []` (explicit empty list) is DISTINCT from "args absent": the
-    # explicit form means "do not split command"; the absent form falls back
-    # to the whitespace-splitting shorthand.
-    if has_args_field:
-        argv = [command.strip()]
-    else:
-        argv = command.strip().split()
-    if not argv or not argv[0]:
-        raise ValueError("profile.command produced empty argv")
+    # Wire 0.3: `command` is always argv[0], a single token, NEVER split —
+    # even if it contains whitespace. `args` is argv[1..], a YAML list of
+    # tokens, defaulting to []. The 0.2 "args absent ⇒ split command on
+    # whitespace" shorthand is removed. Paths with whitespace are carried
+    # whole by YAML quoting and passed to execve as one token.
+    argv = [command.strip()]
 
     cwd_value = src.get("cwd")
     env_value = src.get("env") or {}
@@ -202,8 +177,7 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     # env_allowlist (optional): when present, ${VAR} references in the env
     # block whose name is NOT in the list expand to empty + a stderr warning.
-    # Absent ⇒ expand against the full bridge environment (inheritance is
-    # controlled separately by env_inherit).
+    # Absent ⇒ expand against the full bridge environment.
     allowlist_raw = src.get("env_allowlist")
     if allowlist_raw is None:
         env_allowlist: Optional[set] = None
@@ -212,25 +186,14 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
     else:
         raise ValueError("profile.env_allowlist must be a list")
 
-    # env_inherit: "minimal" (default) | "all". Controls child base-env
-    # inheritance only — not ${VAR} expansion.
-    env_inherit_raw = src.get("env_inherit")
-    if env_inherit_raw is None:
-        env_inherit = "minimal"
-    else:
-        env_inherit = str(env_inherit_raw)
-        if env_inherit not in ("minimal", "all"):
-            raise ValueError("profile.env_inherit must be 'minimal' or 'all'")
-
     return {
+        "command": command.strip(),
         "argv": argv,
         "args": [str(a) for a in args_value],
         "cwd": expand_path(str(cwd_value)) if cwd_value else None,
         "env": env_value,
         "env_allowlist": env_allowlist,
-        "env_inherit": env_inherit,
-        "stdin": "message" if src.get("stdin") == "message" else "none",
-        # Opt-in tool-authorization channel (wire 0.2). Default False.
+        # Opt-in tool-authorization channel (wire 0.3). Default False.
         "permission": src.get("permission") is True,
         "timeout_secs": (
             int(src["timeout_secs"]) if _is_int_like(src.get("timeout_secs"))
@@ -244,6 +207,8 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
             int(src["max_reply_chars"]) if _is_int_like(src.get("max_reply_chars"))
             else DEFAULT_MAX_REPLY_CHARS
         ),
+        # Bridge-side hint: when False, the runner ignores {"type":"partial"}
+        # events and assembles the reply from {"type":"text"} events only.
         "streaming": src.get("streaming", True) is not False,
     }
 
@@ -411,27 +376,12 @@ def diagnose_stderr_failure(stderr_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Line classification (per spec)
+# Event parsing (wire 0.3 — every stdout line is a JSON object)
 # ---------------------------------------------------------------------------
 
-def decode_json_value(raw: str) -> str:
-    text = raw.strip()
-    if not text:
-        return ""
-    try:
-        v = json.loads(text)
-    except json.JSONDecodeError:
-        return text
-    # Only JSON strings are meaningful payloads — a sentinel's value is text
-    # for the user. Non-string JSON (number/bool/null/array/object) means the
-    # agent misused the API; fall back to the raw text so the result is
-    # language-independent (str(True) != String(true) across runtimes).
-    return v if isinstance(v, str) else text
-
-
-def decode_json_object(raw: str) -> Optional[Dict[str, Any]]:
-    """Parse a JSON object payload (permission frames). None on failure."""
-    text = str(raw).strip()
+def parse_json_line(line: str) -> Optional[Dict[str, Any]]:
+    """Parse one stdout line as a JSON object. None on failure."""
+    text = line.strip()
     if not text:
         return None
     try:
@@ -443,9 +393,39 @@ def decode_json_object(raw: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def classify_line(line: str) -> Dict[str, Any]:
+    """Classify one stdout line into a typed event.
+
+    Returns a dict with ``kind``:
+      session | partial | text | error | permission_request | malformed
+    """
+    obj = parse_json_line(line)
+    if not obj or not isinstance(obj.get("type"), str):
+        return {"kind": "malformed", "value": line}
+    t = obj["type"]
+    if t == "session":
+        return {"kind": "session", "value": obj.get("id") if isinstance(obj.get("id"), str) else ""}
+    if t == "partial":
+        out: Dict[str, Any] = {
+            "kind": "partial",
+            "value": obj.get("text") if isinstance(obj.get("text"), str) else "",
+        }
+        if isinstance(obj.get("role"), str):
+            out["role"] = obj.get("role")
+        return out
+    if t == "text":
+        return {"kind": "text", "value": obj.get("text") if isinstance(obj.get("text"), str) else ""}
+    if t == "error":
+        return {"kind": "error", "value": obj.get("message") if isinstance(obj.get("message"), str) else ""}
+    if t == "permission_request":
+        return {"kind": "permission_request", "value": obj}
+    return {"kind": "malformed", "value": line}
+
+
 def format_permission_response(decision: Dict[str, Any]) -> str:
-    """Format an AGENT_PERMISSION_RESPONSE: line for stdin."""
+    """Format a {"type":"permission_response",...} line for stdin."""
     payload: Dict[str, Any] = {
+        "type": "permission_response",
         "request_id": str(decision["request_id"]),
         "behavior": "allow" if decision.get("behavior") == "allow" else "deny",
     }
@@ -455,7 +435,7 @@ def format_permission_response(decision: Dict[str, Any]) -> str:
     message = decision.get("message")
     if message is not None and message != "":
         payload["message"] = str(message)
-    return PREFIX_PERMISSION_RESPONSE + json.dumps(payload, ensure_ascii=False)
+    return json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
 
 
 def is_valid_permission_request(obj: Any) -> bool:
@@ -475,34 +455,26 @@ def is_valid_permission_request(obj: Any) -> bool:
     return True
 
 
-def classify_line(line: str) -> Dict[str, Any]:
-    if line.startswith(PREFIX_SESSION):
-        return {"kind": "session", "value": line[len(PREFIX_SESSION):].strip()}
-    if line.startswith(PREFIX_PARTIAL):
-        return {"kind": "partial", "value": decode_json_value(line[len(PREFIX_PARTIAL):])}
-    if line.startswith(PREFIX_ERROR):
-        return {"kind": "error", "value": decode_json_value(line[len(PREFIX_ERROR):])}
-    if line.startswith(PREFIX_PERMISSION_REQUEST):
-        return {
-            "kind": "permission_request",
-            "value": decode_json_object(line[len(PREFIX_PERMISSION_REQUEST):]),
-        }
-    return {"kind": "body", "value": line}
+# Wire 0.3: the session id is an arbitrary JSON string on the wire (no
+# colon/whitespace restriction — that was an artifact of the 0.2
+# colon-delimited prefix). The only remaining constraint is STORAGE safety:
+# the SDK history helpers store each session as <id>.jsonl, so an id
+# containing a path separator (/ or \), a NUL / control char, or equal to
+# ``.`` / ``..`` would path-traverse out of the sessions directory. The
+# runner rejects such ids (preserving the previously captured id + a stderr
+# warning) so they do not round-trip. Colons, spaces, ``+``, and unicode are
+# all fine.
+_SESSION_ID_RE = re.compile(r"[\/\\\x00-\x1f]")
 
 
-# Per spec: session id is opaque but MUST NOT contain whitespace, control
-# characters, or colons. Valid: base64url alphabet (A-Z a-z 0-9 - _) plus
-# . ~ = ; non-empty. `/` and `+` are deliberately excluded — `/` makes the id
-# unsafe as a filename component (the SDK history helpers store <id>.jsonl,
-# and a `/`-bearing id would path-traverse). A session line whose value
-# fails this is ignored (previous id preserved).
-_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._~=-]+$")
-
-
-def is_valid_session_id(value: str) -> bool:
-    """True if ``value`` is a spec-compliant session id (non-empty, no
-    whitespace / control chars / colons)."""
-    return bool(value) and bool(_SESSION_ID_RE.fullmatch(value))
+def is_valid_session_id(value: Any) -> bool:
+    """True if ``value`` is a storage-safe session id (non-empty, no path
+    separators or control chars, not ``.`` or ``..``)."""
+    if not isinstance(value, str) or not value:
+        return False
+    if value in (".", ".."):
+        return False
+    return not _SESSION_ID_RE.search(value)
 
 
 # ---------------------------------------------------------------------------
@@ -533,14 +505,13 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         "profile_dir": options.profile_dir or "",
     }
 
-    # Substitute placeholders in argv (command) too, not just args — so
-    # `command: python3 {{PROFILE_DIR}}/bridge.py` resolves correctly.
+    # Substitute placeholders in argv (command) too, not just args.
     argv = [substitute(a, subst_ctx) for a in profile["argv"]]
     for a in profile["args"]:
         argv.append(substitute(a, subst_ctx))
 
     allowlist = profile["env_allowlist"]
-    env = build_base_env(profile["env_inherit"])
+    env = build_base_env()
     for k, v in profile["env"].items():
         env[k] = expand_env_ref(
             substitute(str(v), subst_ctx),
@@ -556,33 +527,27 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     for k, v in options.extra_env.items():
         env[k] = str(v)
 
-    env["AGENT_MESSAGE"] = options.message
-    env["AGENT_SESSION_ID"] = options.session_id
-    env["AGENT_SESSION_NAME"] = options.session_name
-    env["AGENT_FROM_USER"] = options.from_user
-    env["AGENT_STREAMING"] = "1" if streaming else "0"
-    env["AGENT_PROTOCOL_VERSION"] = PROTOCOL_VERSION
-    # Single-attachment passthrough. Only inject when non-empty so that an
-    # unset variable stays unset (matches the spec's "set when present" rule;
-    # an agent can distinguish "no image" from "image URL is empty string").
-    if options.image_url:
-        env["AGENT_IMAGE_URL"] = options.image_url
-    if options.file_url:
-        env["AGENT_FILE_URL"] = options.file_url
+    # Build the turn object (wire 0.3 stdin payload). No AGENT_* env in 0.3.
+    turn: Dict[str, Any] = {
+        "type": "turn",
+        "message": options.message,
+        "session_id": options.session_id,
+        "session_name": options.session_name,
+        "from_user": options.from_user,
+        "protocol_version": PROTOCOL_VERSION,
+    }
+    # attachments: include the key when the caller provided a list
+    # (presence-as-feature); omit otherwise.
+    if options.attachments:
+        turn["attachments"] = options.attachments
     if profile["permission"]:
-        env["AGENT_PERMISSION"] = "1"
-
-    # Stdin is a pipe when we need to write the message and/or keep the
-    # channel open for mid-turn AGENT_PERMISSION_RESPONSE: lines.
-    write_message = profile["stdin"] == "message" or bool(options.forward_stdin)
-    need_stdin_pipe = profile["permission"] or write_message
-    stdin_payload = options.message if write_message else None
+        turn["permission"] = True
 
     result = RunResult()
-    body_lines: List[str] = []
+    text_chunks: List[str] = []
     pending_permission_ids: set = set()
     stdin_lock = threading.Lock()
-    stdin_closed = not need_stdin_pipe
+    stdin_closed = False
     # Streaming partial truncation tracking — see matching comment in runner.js.
     _cumulative_partial_chars = 0
     _partials_truncated = False
@@ -624,7 +589,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             argv,
             cwd=cwd,
             env=env,
-            stdin=subprocess.PIPE if need_stdin_pipe else subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -678,17 +643,16 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             except (BrokenPipeError, ValueError, OSError):
                 pass
 
-    if need_stdin_pipe:
-        if stdin_payload is not None:
-            try:
-                with stdin_lock:
-                    if proc.stdin is not None and not proc.stdin.closed:
-                        proc.stdin.write(stdin_payload)
-                        proc.stdin.flush()
-            except (BrokenPipeError, ValueError, OSError):
-                pass
-        if not profile["permission"]:
-            _close_stdin()
+    # Write the turn line; keep stdin open only when permission is on.
+    try:
+        with stdin_lock:
+            if proc.stdin is not None and not proc.stdin.closed:
+                proc.stdin.write(json.dumps(turn, ensure_ascii=False, separators=(',', ':')) + "\n")
+                proc.stdin.flush()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+    if not profile["permission"]:
+        _close_stdin()
 
     def _drain_stderr() -> None:
         assert proc.stderr is not None
@@ -707,13 +671,14 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         nonlocal _cumulative_partial_chars, _partials_truncated
         line = raw_line.rstrip("\r")
         c = classify_line(line)
-        if c["kind"] == "session":
+        kind = c["kind"]
+        if kind == "session":
             if not is_valid_session_id(c["value"]):
                 if options.on_stderr:
                     options.on_stderr(
-                        f"[agentproc runner] ignoring invalid AGENT_SESSION value "
-                        f"{c['value']!r} (must be non-empty, no whitespace/"
-                        "control chars/colons); previous session id preserved"
+                        f"[agentproc runner] ignoring invalid session id "
+                        f"{c['value']!r} (must be non-empty, no path separators "
+                        "or control chars); previous session id preserved"
                     )
                 if options.on_protocol_line:
                     options.on_protocol_line(line)
@@ -723,7 +688,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                     options.on_session(c["value"])
                 if options.on_protocol_line:
                     options.on_protocol_line(line)
-        elif c["kind"] == "partial":
+        elif kind == "partial":
             if streaming and options.on_partial and not _partials_truncated:
                 remaining = _max_chars - _cumulative_partial_chars
                 if len(c["value"]) >= remaining:
@@ -737,18 +702,22 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                     _cumulative_partial_chars += len(c["value"])
             if options.on_protocol_line:
                 options.on_protocol_line(line)
-        elif c["kind"] == "error":
+        elif kind == "text":
+            text_chunks.append(c["value"])
+            if options.on_protocol_line:
+                options.on_protocol_line(line)
+        elif kind == "error":
             result.error = c["value"]
             if options.on_error:
                 options.on_error(c["value"])
             if options.on_protocol_line:
                 options.on_protocol_line(line)
             pending_permission_ids.clear()
-        elif c["kind"] == "permission_request":
+        elif kind == "permission_request":
             if not profile["permission"]:
                 if options.on_stderr:
                     options.on_stderr(
-                        "[agentproc runner] ignoring AGENT_PERMISSION_REQUEST: "
+                        '[agentproc runner] ignoring {"type":"permission_request"} '
                         "(profile.permission is not true)"
                     )
                 if options.on_protocol_line:
@@ -756,8 +725,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             elif not is_valid_permission_request(c["value"]):
                 if options.on_stderr:
                     options.on_stderr(
-                        "[agentproc runner] malformed AGENT_PERMISSION_REQUEST: "
-                        f"{line[:200]!r}"
+                        f"[agentproc runner] malformed permission_request: {line[:200]!r}"
                     )
                 rid = ""
                 if isinstance(c["value"], dict):
@@ -808,7 +776,13 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                         })
                 # No on_permission: leave the agent blocked until turn timeout.
         else:
-            body_lines.append(line)
+            # malformed: log + ignore (not forwarded as body in 0.3).
+            if options.on_stderr:
+                options.on_stderr(
+                    f"[agentproc runner] ignoring malformed stdout line: {line[:200]!r}"
+                )
+            if options.on_protocol_line:
+                options.on_protocol_line(line)
 
     def _drain_stdout() -> None:
         assert proc.stdout is not None
@@ -887,12 +861,13 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         if options.on_stderr:
             options.on_stderr("[agentproc runner] warning: stderr drain timed out; diagnosis may be incomplete")
 
-    result.reply = "\n".join(body_lines)
+    # Reply body = concatenation of {"type":"text"} events (direct, no separator).
+    result.reply = "".join(text_chunks)
     if len(result.reply) > profile["max_reply_chars"]:
         suffix = "\n\n…(truncated)" if profile["max_reply_chars"] == DEFAULT_MAX_REPLY_CHARS else ""
         result.reply = result.reply[: profile["max_reply_chars"]] + suffix
 
-    # If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
+    # If the agent exited non-zero with no error event, peek at its stderr for
     # common "command/file not found" patterns and surface a friendly hint.
     # Uses the head-capped stderr_full (1 MB) — the interpreter-startup errors
     # these patterns target land in the first bytes, well within the cap.

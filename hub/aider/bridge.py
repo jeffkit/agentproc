@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AgentProc bridge for the `aider` AI coding assistant.
+AgentProc bridge for the `aider` AI coding assistant (wire 0.3).
 
 Invokes:
     aider --message <message> --yes-always --no-show-release-notes --no-stream
@@ -8,27 +8,33 @@ Invokes:
 
 aider modifies files in the working directory and may make git commits.
 The stdout output (a human-readable summary of what was done) is forwarded
-as the AgentProc reply body. No AGENT_SESSION: line is emitted — aider uses
-git history for context continuity, not an explicit session id.
+as the AgentProc reply body (a single {"type":"text"} event). No session id
+is emitted — aider uses git history for context continuity, not an explicit
+session id.
 
-Env vars:
-    AGENT_MESSAGE          User message
-    AGENT_STREAMING        Ignored — aider --no-stream returns full text
-    AIDER_MODEL            Optional model override (e.g. "claude-opus-4-5")
-    AIDER_TIMEOUT          Process timeout in seconds (default 600)
+Per-CLI config (read from the process env the runner injects):
+    AIDER_MODEL   Optional model override (e.g. "claude-opus-4-5")
+    AIDER_TIMEOUT Process timeout in seconds (default 600)
 """
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 import sys
+
+_HUB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _HUB_DIR not in sys.path:
+    sys.path.insert(0, _HUB_DIR)
+
+from _shared.stream_utils import run_plain_cli  # noqa: E402
+
+CLI_NAME = "aider"
+INSTALL_HINT = "Install: pip install aider-chat"
 
 
 def build_args(message: str) -> list[str]:
     args = [
-        "aider",
+        CLI_NAME,
         "--message", message,
         "--yes-always",
         "--no-show-release-notes",
@@ -40,48 +46,6 @@ def build_args(message: str) -> list[str]:
     return args
 
 
-def emit(line: str) -> None:
-    sys.stdout.write(line + "\n")
-    sys.stdout.flush()
-
-
-def main() -> int:
-    message = os.environ.get("AGENT_MESSAGE", "")
-    if not message:
-        emit(f"AGENT_ERROR:{json.dumps('AGENT_MESSAGE env var is required')}")
-        return 1
-    args = build_args(message)
-    try:
-        proc = subprocess.run(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=int(os.environ.get("AIDER_TIMEOUT", "600")),
-        )
-    except FileNotFoundError:
-        emit(f"AGENT_ERROR:{json.dumps('aider not found. Install: pip install aider-chat')}")
-        return 1
-    except subprocess.TimeoutExpired:
-        emit(f"AGENT_ERROR:{json.dumps('aider timed out')}")
-        return 124
-
-    if proc.returncode != 0:
-        msg = f"aider exited with {proc.returncode}"
-        stderr = (proc.stderr or "").strip()
-        if stderr:
-            msg += f": {stderr[:500]}"
-        emit(f"AGENT_ERROR:{json.dumps(msg, ensure_ascii=False)}")
-        return 1
-
-    text = (proc.stdout or "").strip()
-    if text:
-        emit(text)
-    else:
-        emit(f"AGENT_ERROR:{json.dumps('aider returned empty output')}")
-        return 1
-    return 0
-
-
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(run_plain_cli(CLI_NAME, INSTALL_HINT, build_args,
+                           timeout_env="AIDER_TIMEOUT", default_timeout=600))

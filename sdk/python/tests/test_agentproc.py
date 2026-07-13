@@ -1,4 +1,4 @@
-"""Tests for the agentproc SDK.
+"""Tests for the agentproc SDK (agent-side entry, wire 0.3).
 
 Run with: `pytest -q`
 
@@ -8,8 +8,9 @@ awkward to test in-process. So we split into two groups:
   1. Pure-function tests (session_file_path, load_history, append_history) —
      call in-process, assert on return values.
 
-  2. create_profile end-to-end tests — drive create_profile in a subprocess
-     with AGENT_* env vars set, capture stdout / exit code.
+  2. create_profile end-to-end tests — drive create_profile in a subprocess,
+     writing a {"type":"turn",...} object to its stdin, and capture the NDJSON
+     events on stdout / exit code.
 """
 
 from __future__ import annotations
@@ -44,7 +45,6 @@ SDK_SRC = SDK_DIR / "src"
 
 class TestSessionFilePath:
     def test_under_default_dir(self, monkeypatch, tmp_path):
-        # Point HOME at a tmp path so we don't touch the real home dir.
         monkeypatch.setenv("HOME", str(tmp_path))
         p = session_file_path("abc123")
         assert p.name == "abc123.jsonl"
@@ -66,17 +66,11 @@ class TestSessionFilePath:
             session_file_path("")
 
     def test_rejects_path_traversal_ids(self):
-        # Defense in depth: the bridge rejects `/`-bearing ids, but a handler
-        # can call session_file_path with any string. Reject path separators
-        # and `..` so a malicious id can't escape the sessions directory.
         for bad in ["a/b", "a\\b", "..", "../../tmp/x"]:
             with pytest.raises(ValueError, match="safe filename component"):
                 session_file_path(bad)
 
     def test_accepts_dot_dot_inside_id(self, tmp_path):
-        # `a..b` is a valid session id (charset allows `.`) and not a traversal
-        # — the filename is `a..b.jsonl`. Pre-fix the `".." in session_id` guard
-        # rejected it; the unified check only rejects the exact `.`/`..`.
         p = session_file_path("a..b", str(tmp_path))
         assert p == tmp_path / "a..b.jsonl"
 
@@ -121,30 +115,44 @@ class TestLoadAppendHistory:
         assert loaded[1].content == "still ok"
 
 
-class TestParseAttachments:
-    def test_removed_from_sdk(self):
-        # AGENT_ATTACHMENTS was removed in SDK 0.5.0; ensure the public surface
-        # no longer exposes Attachment / _parse_attachments.
+class TestAttachmentsSurface:
+    def test_no_legacy_attachment_helpers_exported(self):
+        # Wire 0.3 carries attachments as `turn.attachments` (read by
+        # create_profile from stdin); there is no separate parser helper.
         assert not hasattr(agentproc, "Attachment")
         assert not hasattr(agentproc, "_parse_attachments")
         assert not hasattr(agentproc, "parseAttachments")
 
 
-def test_protocol_version_is_0_1():
-    assert agentproc.PROTOCOL_VERSION == "0.2"
+def test_protocol_version_is_0_3():
+    assert agentproc.PROTOCOL_VERSION == "0.3"
 
 
 # ---------------------------------------------------------------------------
 # 2. create_profile end-to-end tests
-# ---------------------------------------------------------------- ...
+# ---------------------------------------------------------------------------
 
-def _run_agent(env: dict, handler_src: str, is_async: bool = True) -> tuple[str, str, int]:
+def _turn(**extra) -> dict:
+    base = {
+        "type": "turn",
+        "message": "hi",
+        "session_id": "",
+        "session_name": "default",
+        "from_user": "",
+        "protocol_version": "0.3",
+    }
+    base.update(extra)
+    return base
+
+
+def _run_agent(turn: dict, handler_src: str, is_async: bool = True) -> tuple[str, str, int]:
     """Run a handler under create_profile in a subprocess.
 
-    handler_src is the body of a function(ctx) -> ...; it is dedented
-    and re-indented to exactly 4 spaces to fit inside the handler. By default
-    the handler is wrapped as ``async def``; pass ``is_async=False`` for a
-    sync handler (the body must then not ``await``).
+    The turn object is written to the subprocess's stdin as one NDJSON line.
+    handler_src is the body of a function(ctx) -> ...; it is dedented and
+    re-indented to exactly 4 spaces to fit inside the handler. By default the
+    handler is wrapped as ``async def``; pass ``is_async=False`` for a sync
+    handler (the body must then not ``await``).
     """
     body = textwrap.indent(textwrap.dedent(handler_src).strip(), "    ")
     decl = "async def handler(ctx):" if is_async else "def handler(ctx):"
@@ -158,10 +166,12 @@ def _run_agent(env: dict, handler_src: str, is_async: bool = True) -> tuple[str,
         "\n"
         "agentproc.create_profile(handler)\n"
     )
-    proc_env = {**os.environ, **env, "PYTHONPATH": str(SDK_SRC)}
+    proc_env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""),
+                "PYTHONPATH": str(SDK_SRC)}
     result = subprocess.run(
         [sys.executable, "-c", program],
         env=proc_env,
+        input=json.dumps(turn) + "\n",
         capture_output=True,
         text=True,
     )
@@ -172,25 +182,25 @@ class TestCreateProfileE2E:
 
     def test_string_response(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "return 'You said: ' + ctx.message",
         )
         assert code == 0, f"stderr={err}"
-        assert "You said: hi\n" in out
+        assert '{"type":"text","text":"You said: hi"}\n' in out
 
     def test_session_id_emitted(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "from agentproc import AgentResult; "
             "return AgentResult(response='ok', session_id='sess-123')",
         )
         assert code == 0, f"stderr={err}"
-        assert "AGENT_SESSION:sess-123\n" in out
-        assert "ok\n" in out
+        assert '{"type":"session","id":"sess-123"}\n' in out
+        assert '{"type":"text","text":"ok"}\n' in out
 
     def test_send_partial(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "1"},
+            _turn(),
             """
             await ctx.send_partial('chunk 1')
             await ctx.send_partial('chunk 2')
@@ -199,48 +209,57 @@ class TestCreateProfileE2E:
             """,
         )
         assert code == 0, f"stderr={err}"
-        assert 'AGENT_PARTIAL:"chunk 1"\n' in out
-        assert 'AGENT_PARTIAL:"chunk 2"\n' in out
-        assert "AGENT_SESSION:s1\n" in out
+        assert '{"type":"partial","text":"chunk 1"}\n' in out
+        assert '{"type":"partial","text":"chunk 2"}\n' in out
+        assert '{"type":"session","id":"s1"}\n' in out
+
+    def test_send_partial_with_role(self):
+        out, err, code = _run_agent(
+            _turn(),
+            """
+            await ctx.send_partial('thinking...', role='thinking')
+            return 'answer'
+            """,
+        )
+        assert code == 0, f"stderr={err}"
+        assert '{"type":"partial","text":"thinking...","role":"thinking"}\n' in out
+        assert '{"type":"text","text":"answer"}\n' in out
 
     def test_send_error(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "await ctx.send_error('rate limited; retry in 60s')",
         )
-        # When handler returns None, SDK exits 0 — the error line is what matters.
         assert code == 0, f"stderr={err}"
-        assert 'AGENT_ERROR:"rate limited; retry in 60s"\n' in out
+        assert '{"type":"error","message":"rate limited; retry in 60s"}\n' in out
 
     def test_protocol_error_exception(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "from agentproc import ProtocolError\n"
             "raise ProtocolError('bad input')",
         )
         assert code == 1, f"stderr={err}"
-        assert 'AGENT_ERROR:"bad input"\n' in out
+        assert '{"type":"error","message":"bad input"}\n' in out
 
     def test_handler_exception(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "raise RuntimeError('boom')",
         )
         assert code == 1
         assert "boom" in err
-        assert "AGENT_ERROR" not in out  # generic exceptions don't surface to user
+        # Generic exceptions are NOT mapped to a {"type":"error"} event.
+        assert '"type":"error"' not in out
 
-    def test_context_carries_env(self):
+    def test_context_carries_turn_fields(self):
         out, err, code = _run_agent(
-            {
-                "AGENT_MESSAGE": "hello",
-                "AGENT_SESSION_ID": "prev-sess",
-                "AGENT_SESSION_NAME": "work",
-                "AGENT_FROM_USER": "u123",
-                "AGENT_STREAMING": "0",
-                "AGENT_IMAGE_URL": "https://x/img.png",
-                "AGENT_FILE_URL": "https://y/file.pdf",
-            },
+            _turn(
+                session_id="prev-sess",
+                session_name="work",
+                from_user="u123",
+                attachments=[{"kind": "image", "url": "https://x/img.png"}],
+            ),
             """
             import json
             return json.dumps({
@@ -248,77 +267,69 @@ class TestCreateProfileE2E:
                 "sid": ctx.session_id,
                 "sname": ctx.session_name,
                 "from": ctx.from_user,
-                "stream": ctx.streaming,
-                "img": ctx.image_url,
-                "file": ctx.file_url,
+                "pv": ctx.protocol_version,
+                "atts": [a["kind"] + ":" + a["url"] for a in (ctx.attachments or [])],
             })
             """,
         )
         assert code == 0, f"stderr={err}"
-        parsed = json.loads(out.strip())
-        assert parsed["msg"] == "hello"
-        assert parsed["sid"] == "prev-sess"
-        assert parsed["sname"] == "work"
-        assert parsed["from"] == "u123"
-        assert parsed["stream"] is False
-        assert parsed["img"] == "https://x/img.png"
-        assert parsed["file"] == "https://y/file.pdf"
+        # The returned JSON string is wrapped in a {"type":"text"} event.
+        text_line = next(ln for ln in out.splitlines() if '"type":"text"' in ln)
+        ctx = json.loads(json.loads(text_line)["text"])
+        assert ctx["msg"] == "hi"
+        assert ctx["sid"] == "prev-sess"
+        assert ctx["sname"] == "work"
+        assert ctx["from"] == "u123"
+        assert ctx["pv"] == "0.3"
+        assert ctx["atts"] == ["image:https://x/img.png"]
 
     def test_default_protocol_version(self):
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "return 'pv=' + ctx.protocol_version",
         )
         assert code == 0
-        assert "pv=0.2" in out
+        assert "pv=0.3" in out
 
-    def test_session_line_handles_colons_in_id(self):
-        # The spec says session IDs are opaque strings without whitespace.
-        # Make sure we don't accidentally split or json-encode them.
+    def test_session_id_with_colons_emitted_verbatim(self):
+        # Wire 0.3: session ids are opaque JSON strings; colons are fine and
+        # must not be split or re-encoded.
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "0"},
+            _turn(),
             "from agentproc import AgentResult; "
-            "return AgentResult(response='ok', session_id='cli-handle-abc123')",
+            "return AgentResult(response='ok', session_id='thread:abc')",
         )
         assert code == 0
-        assert "AGENT_SESSION:cli-handle-abc123\n" in out
+        assert '{"type":"session","id":"thread:abc"}\n' in out
 
     def test_handler_can_return_none(self):
-        # Handler signaled everything via send_partial; returns None.
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "1"},
+            _turn(),
             "await ctx.send_partial('only partial')",
         )
         assert code == 0, f"stderr={err}"
-        assert 'AGENT_PARTIAL:"only partial"\n' in out
-        # No traceback leaked.
+        assert '{"type":"partial","text":"only partial"}\n' in out
         assert "Traceback" not in err
 
     def test_sync_handler_returning_string(self):
-        # A plain (non-async) handler returning a string must work, matching
-        # the Node SDK which accepts sync or async.
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "1"},
+            _turn(),
             "return 'sync reply'",
             is_async=False,
         )
         assert code == 0, f"stderr={err}"
-        assert "sync reply\n" in out
+        assert '{"type":"text","text":"sync reply"}\n' in out
         assert "Traceback" not in err
 
     def test_sync_handler_send_partial_bare(self):
-        # A sync handler calling send_partial WITHOUT await must still emit the
-        # chunk — send_partial writes at call time and returns a no-op
-        # awaitable, so a bare call works.
         out, err, code = _run_agent(
-            {"AGENT_MESSAGE": "hi", "AGENT_STREAMING": "1"},
+            _turn(),
             "ctx.send_partial('bare chunk')\nreturn 'final'",
             is_async=False,
         )
         assert code == 0, f"stderr={err}"
-        assert 'AGENT_PARTIAL:"bare chunk"\n' in out
-        assert "final\n" in out
-        # No "coroutine was never awaited" warning leaked.
+        assert '{"type":"partial","text":"bare chunk"}\n' in out
+        assert '{"type":"text","text":"final"}\n' in out
         assert "never awaited" not in err
 
 

@@ -62,16 +62,16 @@ env:
 ## How it works
 
 ```
-AGENT_MESSAGE, AGENT_SESSION_ID
+turn.message, turn.session_id
   ↓
 bridge.py / bridge.js
   ↓ qwen -p <message> --output-format stream-json --yolo [--resume <id>]
 qwen CLI
   ↓ NDJSON stream: init / message / error / result events (gemini-cli shape)
 bridge.py / bridge.js
-  ↓ AGENT_SESSION:<id>   (session_id from init event)
-  ↓ AGENT_PARTIAL:"..."   (assistant message deltas)
-  ↓ AGENT_ERROR:"..."      (on error or result.status=error)
+  ↓ {"type":"session","id":"<id>"}   (session_id from init event)
+  ↓ {"type":"partial","text":"..."}   (assistant message deltas)
+  ↓ {"type":"error","message":"..."}      (on error or result.status=error)
 ```
 
 ## Environment variables
@@ -86,7 +86,7 @@ bridge.py / bridge.js
 
 - `--yolo` (auto-approve tool calls) is set unconditionally — same rationale as the gemini-cli profile.
 - Schema is inherited from gemini-cli (Qwen Code is a fork). If qwen diverges in a future release, this bridge needs an update — please open an issue.
-- `error` events with `severity: warning` are ignored. Only `severity: error`, or a `result` event with `status: error`, surfaces as `AGENT_ERROR:`.
+- `error` events with `severity: warning` are ignored. Only `severity: error`, or a `result` event with `status: error`, surfaces as `{"type":"error"}`.
 
 ## License
 

@@ -4,17 +4,17 @@ cli: claude
 cli_install: |
   npm install -g @anthropic-ai/claude-code
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your
   # current directory (so `claude` runs against your project); you can also
   # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
   # bridge script regardless of cwd.
   timeout_secs: 600
   streaming: true
-  # Opt-in mid-turn tool authorization (wire 0.2). Default false keeps the
-  # unattended --dangerously-skip-permissions path. Set true (or pass
-  # AGENT_PERMISSION=1 via a wrapper) to translate Claude Code
-  # control_request ↔ AGENT_PERMISSION_REQUEST / RESPONSE.
+  # Opt-in mid-turn tool authorization (wire 0.3). Default false keeps the
+  # unattended --dangerously-skip-permissions path. Set true to translate
+  # Claude Code control_request ↔ {"type":"permission_request"} / RESPONSE.
   # permission: true
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
@@ -29,5 +29,5 @@ notes: |
   Default: `claude -p … --output-format stream-json --dangerously-skip-permissions`.
   With `permission: true`, the bridge uses `--permission-prompt-tool stdio` and
   translates Claude `control_request` / `control_response` to AgentProc
-  `AGENT_PERMISSION_REQUEST` / `AGENT_PERMISSION_RESPONSE`. AskUserQuestion
+  `{"type":"permission_request"}` / `{"type":"permission_response"}`. AskUserQuestion
   stays disallowed either way — clarifying questions belong in the reply body.

@@ -16,20 +16,20 @@ async def handler(ctx):
     # ctx.session_id        — previous session id (empty = new session)
     # ctx.session_name      — human-readable session name
     # ctx.from_user         — sender identifier
-    # ctx.streaming         — True if bridge expects streaming output
-    # ctx.protocol_version  — protocol version string (e.g. "0.1")
-    # ctx.image_url         — image attachment URL (empty if none)
-    # ctx.file_url          — file attachment URL (empty if none)
+    # ctx.protocol_version  — protocol version string (e.g. "0.3")
+    # ctx.attachments       — list of {kind, url, ...} dicts (empty = none)
+    # ctx.permission        — True if the bridge enabled the permission channel
     reply = await my_llm(ctx.message)
     return reply
 
 create_profile(handler)
 ```
 
-Save as `agent.py`, then in your profile YAML:
+The SDK reads the `{"type":"turn",...}` object from stdin, calls your handler, and writes NDJSON events to stdout. Save as `agent.py`, then in your profile YAML:
 
 ```yaml
-command: python3 ./agent.py
+command: python3
+args: ["./agent.py"]
 timeout_secs: 60
 ```
 
@@ -47,9 +47,11 @@ async def handler(ctx):
 create_profile(handler)
 ```
 
+The SDK emits a `{"type":"session","id":...}` event (then a `{"type":"text"}` event for the reply). The bridge passes the session id back as `session_id` on the next turn.
+
 ## Streaming
 
-Use `ctx.send_partial()` to send chunks immediately without waiting for the full response:
+Use `ctx.send_partial()` to send chunks immediately without waiting for the full response. The bridge forwards them in real time when the profile's `streaming: true`:
 
 ```python
 from agentproc import create_profile, AgentResult
@@ -58,14 +60,21 @@ async def handler(ctx):
     session_id = ctx.session_id
     async for chunk, session_id in stream_llm(ctx.message, ctx.session_id):
         await ctx.send_partial(chunk)
+    # response="" — all content was already streamed via send_partial.
     return AgentResult(response="", session_id=session_id)
 
 create_profile(handler)
 ```
 
+`send_partial` accepts an optional `role` (`"output"` | `"thinking"`):
+
+```python
+await ctx.send_partial("reasoning...", role="thinking")
+```
+
 ## Error handling
 
-Surface a user-readable error via `AGENT_ERROR:`. Two equivalent forms:
+Surface a user-readable error via a `{"type":"error"}` event. Two equivalent forms:
 
 ```python
 from agentproc import create_profile, AgentResult, ProtocolError
@@ -76,7 +85,7 @@ async def handler(ctx):
         await ctx.send_error("rate limited; retry in 60s")
         return                       # bridge discards any reply body
 
-    # Form 2: raise ProtocolError — SDK emits AGENT_ERROR: and exits 1
+    # Form 2: raise ProtocolError — SDK emits {"type":"error"} and exits 1
     if bad_input(ctx.message):
         raise ProtocolError("bad input")
 
@@ -85,7 +94,18 @@ async def handler(ctx):
 create_profile(handler)
 ```
 
-`ProtocolError` is the exception form; the SDK serializes its message as an `AGENT_ERROR:` line and exits non-zero. Any other uncaught exception is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
+`ProtocolError` is the exception form; the SDK serializes its message as a `{"type":"error"}` event and exits non-zero. Any other uncaught exception is logged to stderr and exits 1 without an `error` event.
+
+## Attachments
+
+Read `ctx.attachments` — a list of `{kind, url, ...}` dicts:
+
+```python
+async def handler(ctx):
+    images = [a for a in ctx.attachments if a.get("kind") == "image"]
+    reply = await my_vision(ctx.message, [a["url"] for a in images])
+    return reply
+```
 
 ## Conversation history
 
@@ -124,7 +144,8 @@ agentproc --profile ./myagent.yaml --prompt "hello"
 Save this as `myagent.yaml` next to your agent:
 
 ```yaml
-command: python3 ./agent.py
+command: python3
+args: ["./agent.py"]
 timeout_secs: 60
 ```
 :::
@@ -132,16 +153,10 @@ timeout_secs: 60
 <details>
 <summary>Prefer to drive the script directly?</summary>
 
-Set the env vars the bridge would inject. This is exactly what the CLI does internally:
+Write the turn object to stdin the way the bridge does:
 
 ```bash
-AGENT_MESSAGE="hello" \
-AGENT_SESSION_ID="" \
-AGENT_SESSION_NAME="default" \
-AGENT_FROM_USER="test" \
-AGENT_STREAMING="1" \
-AGENT_PROTOCOL_VERSION="0.1" \
-python3 ./agent.py
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./agent.py
 ```
 
 Useful when debugging the script in isolation.

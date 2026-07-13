@@ -10,6 +10,7 @@ Mock-based — no real network access. Covers:
 from __future__ import annotations
 
 import json
+import shutil
 import time
 from pathlib import Path
 from typing import Any, Dict, List
@@ -272,6 +273,24 @@ class TestFetchProfile:
             hub_mod.fetch_profile("echo-agent")  # should hit cache
             assert call_count["json"] == first_json
             assert call_count["text"] == first_text
+
+    def test_cache_hit_repopulates_missing_shared(self, isolated_cache):
+        """When profile cache is fresh but _shared/ was removed, fetch_profile
+        should re-populate it (regression: early return was skipping
+        _ensure_shared_cached, so the bridge would fail with ImportError)."""
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.fetch_profile("echo-agent")
+        shared_dir = hub_mod._cache_root() / "_shared"
+        assert (shared_dir / "stream_utils.py").exists()
+        shutil.rmtree(str(shared_dir))
+        assert not shared_dir.exists()
+        # Second call hits the cache-hit early-return path.
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.fetch_profile("echo-agent")
+        assert (shared_dir / "stream_utils.py").exists(), \
+            "_shared/ should be re-populated when profile cache is fresh"
 
     def test_refresh_forces_refetch(self, isolated_cache):
         call_count = {"text": 0}

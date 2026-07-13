@@ -69,10 +69,10 @@ and maps the event stream to AgentProc:
 
 | Event | What the bridge does |
 |-------|----------------------|
-| `partial_token` | Emits `AGENT_PARTIAL:` with the delta (streaming mode) |
-| `assistant_text` | Emits `AGENT_PARTIAL:` (non-streaming), or as a fallback when a step produced no streamed deltas |
+| `partial_token` | Emits `{"type":"partial"}` with the delta (streaming mode) |
+| `assistant_text` | Emits `{"type":"partial"}` (non-streaming), or as a fallback when a step produced no streamed deltas |
 | `turn_finished` | Terminal — the bridge stops after EOF |
-| non-zero exit + no reply | Emits `AGENT_ERROR:` with the stderr tail |
+| non-zero exit + no reply | Emits `{"type":"error"}` with the stderr tail |
 
 ### Multi-turn continuity
 
@@ -80,7 +80,7 @@ recursive records each run as a session directory (under `~/.recursive/workspace
 
 The bridge:
 
-1. **Mints an opaque id** (`rc-<uuid>`) and emits it as `AGENT_SESSION:` (recursive's `--json` stream does not surface a session id, so the bridge owns the AgentProc-level handle).
+1. **Mints an opaque id** (`rc-<uuid>`) and emits it as `{"type":"session"}` (recursive's `--json` stream does not surface a session id, so the bridge owns the AgentProc-level handle).
 2. **Turn 1:** runs `recursive run`, captures the recursive session directory from stderr, and persists it keyed by the opaque id (a `<state_dir>/<id>.session` file containing the dir path).
 3. **Turn N:** loads the stored session directory and runs `recursive resume --from-file <dir> -p <new message>`.
 
@@ -138,7 +138,7 @@ agentproc hub run recursive -p "reply with exactly: recursive ok" \
 Expected (stderr / stdout):
 
 ```
-AGENT_SESSION:rc-<uuid>
+{"type":"session","id":"rc-<uuid>"}
 recursive ok
 ```
 
@@ -157,7 +157,7 @@ agentproc hub run recursive -p "what word did I ask you to remember?" --session 
 `_shared/stream_utils` helper the other NDJSON profiles use, because recursive
 needs cross-turn transcript state that helper doesn't model). A cross-language
 parity fixture at `tests/parity.json` drives both bridges' pure helpers
-(argument building from `RECURSIVE_*` / `AGENT_STREAMING` env, the
+(argument building from `RECURSIVE_*` / `streaming` env, the
 `session: recording to <dir>` stderr parse, and the last-assistant-turn
 transcript read) through identical cases, so the two stay observably aligned.
 Run locally:

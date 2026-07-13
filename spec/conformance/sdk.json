@@ -1,50 +1,57 @@
 {
-  "description": "SDK entry (createProfile / create_profile) conformance scenarios. Each scenario drives the SDK entry point as a subprocess with a given AGENT_* env and a handler of a named 'kind', then asserts the exact stdout lines and exit code. Both reference SDKs run the same fixture (Node: sdk/node/src/sdk.test.js, Python: sdk/python/tests/test_sdk.py) so the user-facing SDK contract cannot drift between languages. Handler kinds are implemented per-language in sdk_harness.js / _sdk_harness.py. Both SDKs accept async and sync handlers; the sync kinds pin that parity (a sync handler can return a value and can call send_partial / send_error bare).",
+  "description": "SDK entry (createProfile / create_profile) conformance scenarios. Each scenario drives the SDK entry point as a subprocess: the test writes the listed `turn` object as a single NDJSON line to the harness's stdin, and a handler of the named `kind` runs under create_profile / createProfile. Both reference SDKs run the same fixture (Node: sdk/node/src/sdk.test.js, Python: sdk/python/tests/test_sdk.py) and assert the exact stdout NDJSON event lines and exit code, so the user-facing SDK contract cannot drift between languages. Handler kinds are implemented per-language in sdk_harness.js / _sdk_harness.py. Both SDKs accept async and sync handlers; the sync kinds pin that parity (a sync handler can return a value and can call send_partial / send_error bare). Wire 0.3: input is a turn object on stdin, output is NDJSON events on stdout (no AGENT_* env, no sentinel prefixes).",
   "scenarios": [
     {
       "name": "async-returns-string",
       "handler": "async_string",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_STREAM_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 0, "stdout_lines": ["hello world"] }
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"text\",\"text\":\"hello world\"}"] }
     },
     {
       "name": "async-returns-agent-result",
       "handler": "async_result",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_SESSION_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 0, "stdout_lines": ["AGENT_SESSION:sess-abc", "hi there"] }
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"session\",\"id\":\"sess-abc\"}", "{\"type\":\"text\",\"text\":\"hi there\"}"] }
     },
     {
       "name": "async-returns-none-after-partial",
       "handler": "async_none_partial",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_SESSION_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 0, "stdout_lines": ["AGENT_PARTIAL:\"streaming chunk\""] }
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"partial\",\"text\":\"streaming chunk\"}"] }
     },
     {
       "name": "async-raises-protocol-error",
       "handler": "async_protocol_error",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_SESSION_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 1, "stdout_lines": ["AGENT_ERROR:\"bad thing\""] }
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 1, "stdout_lines": ["{\"type\":\"error\",\"message\":\"bad thing\"}"] }
     },
     {
       "name": "async-send-error-then-return",
       "handler": "async_send_error_then_return",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_SESSION_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 0, "stdout_lines": ["AGENT_ERROR:\"warn\"", "after"] },
-      "note": "Pins that send_error is non-terminal in both SDKs — the handler may continue and return a body. The bridge decides what to do with an AGENT_ERROR line + body; the SDK does not force-exit on sendError (only on a thrown ProtocolError)."
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"error\",\"message\":\"warn\"}", "{\"type\":\"text\",\"text\":\"after\"}"] },
+      "note": "Pins that send_error is non-terminal in both SDKs — the handler may continue and return a body. The bridge decides what to do with an error event + text; the SDK does not force-exit on sendError (only on a thrown ProtocolError)."
     },
     {
       "name": "sync-returns-string",
       "handler": "sync_string",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_SESSION_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 0, "stdout_lines": ["hello from sync"] },
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"text\",\"text\":\"hello from sync\"}"] },
       "note": "Pins that a plain (non-async) handler returning a string works on both SDKs. Pre-fix Python required async; now it accepts sync too, matching Node."
     },
     {
       "name": "sync-uses-send-partial-bare",
       "handler": "sync_partial_bare",
-      "env": { "AGENT_MESSAGE": "hi", "AGENT_SESSION_ID": "", "AGENT_SESSION_NAME": "default", "AGENT_STREAMING": "1" },
-      "expect": { "exit": 0, "stdout_lines": ["AGENT_PARTIAL:\"sync chunk\"", "done"] },
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"partial\",\"text\":\"sync chunk\"}", "{\"type\":\"text\",\"text\":\"done\"}"] },
       "note": "Pins that a sync handler can call send_partial / sendPartial without awaiting and the chunk is still emitted. Python's send_partial now writes at call time and returns a no-op awaitable so `await ctx.send_partial(...)` (async) and `ctx.send_partial(...)` (sync) both work."
+    },
+    {
+      "name": "async-returns-partial-with-role",
+      "handler": "async_partial_with_role",
+      "turn": { "message": "hi", "session_id": "", "session_name": "default" },
+      "expect": { "exit": 0, "stdout_lines": ["{\"type\":\"partial\",\"text\":\"thinking...\",\"role\":\"thinking\"}", "{\"type\":\"text\",\"text\":\"answer\"}"] },
+      "note": "Pins the optional `role` field on partial events across both SDKs."
     }
   ]
 }

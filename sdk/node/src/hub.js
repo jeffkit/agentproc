@@ -443,6 +443,7 @@ async function fetchProfile(name, opts = {}) {
 
   if (!refresh && age !== null && age < HUB_CACHE_TTL_SECS && fs.existsSync(profileYaml)) {
     if (onLog) onLog(`using cached profile: ${dir} (age ${Math.floor(age)}s)`);
+    await ensureSharedCached({ refresh: false, onLog });
     return dir;
   }
 

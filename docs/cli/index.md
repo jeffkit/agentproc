@@ -102,7 +102,7 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 | `--cwd <path>` | Override `profile.cwd`. Relative paths resolve against the profile's directory. In `hub run`, defaults to your current directory. |
 | `--env KEY=VALUE` | Extra env var (repeatable) |
 | `--timeout <secs>` | Override `profile.timeout_secs` |
-| `--no-stream` | Set `AGENT_STREAMING=0` |
+| `--no-stream` | Disable streaming (ignore `{"type":"partial"}` events) |
 
 ### Output
 
@@ -126,8 +126,8 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 
 | Stream | Content |
 |--------|---------|
-| stderr | Protocol lines (`AGENT_PARTIAL:`, `AGENT_SESSION:`, `AGENT_ERROR:`) in real time |
-| stdout | Final reply body (non-protocol lines), printed after the agent exits |
+| stderr | NDJSON events (`{"type":"partial"}`, `{"type":"session"}`, `{"type":"error"}`) in real time |
+| stdout | Final reply body (assembled from `{"type":"text"}` events), printed after the agent exits |
 | exit | `0` success · `1` error · `124` timeout (per spec) |
 
 The final session id is also printed on stderr as `agentproc:session:<id>`, so shell scripts can capture it:
@@ -187,10 +187,10 @@ The CLI is a thin wrapper over the SDK's `run()` function in [`sdk/node/src/runn
 - **Profile parsing**: accepts both top-level form (`command:` at root) and hub form (`command:` nested under `agentproc:`).
 - **Placeholder substitution**: `{{MESSAGE}}`, `{{SESSION_ID}}`, `{{SESSION_NAME}}`, `{{PROFILE_DIR}}` in `command`, `args`, `cwd`, and `env` values — no shell involved.
 - **Relative `cwd`**: when `cwd` is a relative path and `{{PROFILE_DIR}}` is known (i.e. the CLI was invoked with a profile path), it resolves against the profile's directory rather than the process cwd.
-- **Env injection**: `AGENT_MESSAGE`, `AGENT_SESSION_ID`, `AGENT_SESSION_NAME`, `AGENT_FROM_USER`, `AGENT_STREAMING`, `AGENT_PROTOCOL_VERSION`, plus `${VAR}` expansion in `profile.env`.
-- **stdout classification**: `AGENT_SESSION:` (last wins), `AGENT_PARTIAL:` (JSON lenient mode), `AGENT_ERROR:`, everything else = reply body.
-- **stdin contract**: writes the message then EOF when `profile.stdin: message`.
+- **Turn input (stdin)**: writes one `{"type":"turn",...}` NDJSON line to the agent's stdin (`message`, `session_id`, `session_name`, `from_user`, `attachments`, `permission`, `protocol_version`), then EOF — unless `permission: true`, in which case stdin stays open for `{"type":"permission_response"}` frames. The per-turn request does **not** travel in env vars.
+- **Env injection**: the profile `env` block (with `${VAR}` expansion gated by `env_allowlist`) plus a fixed infra set (`PATH`/`HOME`/`TERM`/…). `--env KEY=VALUE` adds per-run extras.
+- **stdout classification**: each line is a JSON object dispatched on `type` — `{"type":"session"}` (last wins), `{"type":"partial"}` (forwarded when `streaming: true`), `{"type":"text"}` (reply body, concatenated), `{"type":"error"}` (fails the turn). Non-JSON / unknown `type` lines are logged and ignored.
 - **Timeout handling**: SIGTERM → `kill_grace_secs` (default 5s) → SIGKILL. Exit code 124.
-- **Exit codes**: 0 success · 1 error (including when `AGENT_ERROR:` was emitted) · 124 timeout.
+- **Exit codes**: 0 success · 1 error (including when `{"type":"error"}` was emitted) · 124 timeout.
 
 If you're writing your own bridge in another language, [`runner.js`](https://github.com/jeffkit/agentproc/blob/main/sdk/node/src/runner.js) is the spec in code form.

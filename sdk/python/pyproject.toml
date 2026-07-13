@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentproc"
-version = "0.6.1"
+version = "0.7.0"
 description = "AgentProc Protocol SDK + CLI — connect any Agent CLI to a messaging platform"
 readme = "README.md"
 license = { text = "MIT" }

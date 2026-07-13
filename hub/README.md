@@ -65,7 +65,7 @@ Pick whichever bridge language you prefer — both produce identical AgentProc o
 
 ### Shared bridge utilities
 
-NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text profiles (`agy`, `echo-agent`) and `recursive` (which needs cross-turn transcript state the shared helper doesn't model) keep bespoke bridges.
+NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-code`, `cursor`, `opencode`, `kimi-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text one-shot profiles (`aider`, `pi`, `deepseek`, `agy`, `echo-agent`) use the shared `run_plain_cli` / `runPlainCli` helper; `recursive` (which needs cross-turn transcript state the shared helper doesn't model) keeps a bespoke bridge.
 
 ## How to use a profile
 
@@ -74,18 +74,18 @@ NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-
 3. **Adjust** `cwd:` in the profile to point at your project.
 4. **Point your bridge** at the profile YAML. The exact command depends on your bridge.
 
-Example with the Python SDK's bare runner:
+Example with the Python SDK's bare runner (wire 0.3 — the turn object arrives on stdin as one NDJSON line):
 
 ```bash
 cd hub/claude-code
-AGENT_MESSAGE="hello" AGENT_STREAMING="1" python3 bridge.py
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
 ```
 
-You should see AgentProc protocol output on stdout:
+You should see AgentProc protocol output on stdout (one NDJSON event per line):
 
 ```
-AGENT_PARTIAL:"Hi! How can I help?"
-AGENT_SESSION:cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c
+{"type":"partial","text":"Hi! How can I help?"}
+{"type":"session","id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
 ```
 
 ## Design principles
@@ -116,8 +116,9 @@ description: <one-line>
 cli: <command-name>             # the executable this wraps
 cli_install: |                  # how to install the CLI itself
   npm install -g ...
-agentproc:                      # the actual AgentProc P0 profile
-  command: python3 {{PROFILE_DIR}}/bridge.py  # or: node {{PROFILE_DIR}}/bridge.js
+agentproc:                      # the actual AgentProc P0 profile (wire 0.3)
+  command: python3              # argv[0] — always a single token, never split
+  args: ["{{PROFILE_DIR}}/bridge.py"]  # argv[1..]; or: ["{{PROFILE_DIR}}/bridge.js"] for node
   # cwd intentionally omitted: `hub run` defaults it to the user's
   # current directory. Bridge script is located via {{PROFILE_DIR}}.
   timeout_secs: 600

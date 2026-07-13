@@ -79,23 +79,20 @@ agentproc hub run cursor -p "say hi in 5 words"
 Expected output (streaming mode):
 
 ```
-AGENT_SESSION:f47ac10b-58cc-4372-a567-0e02b2c3d479
-AGENT_PARTIAL:"Hi"
-AGENT_PARTIAL:" there"
-AGENT_PARTIAL,", how can I help?"
+{"type":"session","id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+{"type":"partial","text":"Hi"}
+{"type":"partial","text":" there"}
+{"type":"partial","text":", how can I help?"}
 ```
 
-The session id is emitted by `agent`'s `system/init` event up-front, so `AGENT_SESSION:` typically appears before the partials.
+The session id is emitted by `agent`'s `system/init` event up-front, so `{"type":"session"}` typically appears before the partials.
 
 <details>
 <summary>Drive the bridge script directly (without the CLI)</summary>
 
 ```bash
 cd hub/cursor
-AGENT_MESSAGE="say hi in 5 words" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="1" \
-python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
 ```
 
 </details>
@@ -103,23 +100,23 @@ python3 bridge.py
 ## How it works
 
 ```
-AGENT_MESSAGE, AGENT_SESSION_ID
+turn.message, turn.session_id
   ↓
 bridge.py / bridge.js
   ↓ agent -p <message> --output-format stream-json --stream-partial-output --yolo [--resume <id>]
 agent CLI
   ↓ NDJSON stream: system/init / assistant / result events
 bridge.py / bridge.js
-  ↓ AGENT_SESSION:<id>   (session_id from system/init event)
-  ↓ AGENT_PARTIAL:"..."   (assistant text deltas)
-  ↓ AGENT_ERROR:"..."      (on result.is_error)
+  ↓ {"type":"session","id":"<id>"}   (session_id from system/init event)
+  ↓ {"type":"partial","text":"..."}   (assistant text deltas)
+  ↓ {"type":"error","message":"..."}      (on result.is_error)
 ```
 
-The session ID is opaque — `agent` emits it in the `system/init` event on its first turn, and the bridge forwards it via `AGENT_SESSION:`. On subsequent turns, your bridge passes it back as `AGENT_SESSION_ID`, and this bridge replays it as `--resume <id>`. Cursor calls sessions "chats" but the id format is the same UUID.
+The session ID is opaque — `agent` emits it in the `system/init` event on its first turn, and the bridge forwards it via `{"type":"session"}`. On subsequent turns, your bridge passes it back as `turn.session_id`, and this bridge replays it as `--resume <id>`. Cursor calls sessions "chats" but the id format is the same UUID.
 
 ### Duplicate-suppression
 
-When `--stream-partial-output` is on, Cursor streams N delta chunks AND THEN emits a final `assistant` event with the **full assembled text** — which would duplicate what was already streamed. The bridge tracks the accumulated emitted text and drops any `assistant` event whose text equals the accumulation. This keeps `AGENT_PARTIAL:` clean without losing the final assembled text (which is still captured from the `result` event for non-streaming mode).
+When `--stream-partial-output` is on, Cursor streams N delta chunks AND THEN emits a final `assistant` event with the **full assembled text** — which would duplicate what was already streamed. The bridge tracks the accumulated emitted text and drops any `assistant` event whose text equals the accumulation. This keeps `{"type":"partial"}` clean without losing the final assembled text (which is still captured from the `result` event for non-streaming mode).
 
 ## Environment variables
 

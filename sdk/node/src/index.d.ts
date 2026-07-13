@@ -1,5 +1,5 @@
 // Type declarations for agentproc
-// Protocol version: 0.1 (see spec/protocol.md)
+// Protocol version: 0.3 (see spec/protocol.md)
 
 declare module 'agentproc' {
 
@@ -7,25 +7,23 @@ declare module 'agentproc' {
 
   /** Input context passed to the agent handler. */
   export interface AgentContext {
-    /** User message text (AGENT_MESSAGE). */
+    /** User message text (turn.message). */
     message: string;
     /** Session ID from the previous turn. Empty = new session. */
     sessionId: string;
-    /** Human-readable session name (AGENT_SESSION_NAME). */
+    /** Human-readable session name (turn.session_name). */
     sessionName: string;
-    /** Sender identifier (AGENT_FROM_USER). */
+    /** Sender identifier (turn.from_user). */
     fromUser: string;
-    /** Whether the bridge expects streaming output. */
-    streaming: boolean;
-    /** Protocol version the bridge implements. */
+    /** Protocol version the bridge implements (turn.protocol_version). */
     protocolVersion: string;
-    /** Image attachment URL. Empty if no image. */
-    imageUrl: string;
-    /** File attachment URL. Empty if no file. */
-    fileUrl: string;
+    /** Attachment list (turn.attachments). Empty array = no attachments. */
+    attachments: Array<{ kind: string; url: string; [key: string]: unknown }>;
+    /** True when the bridge enabled the optional permission channel. */
+    permission: boolean;
 
-    /** Send a streaming chunk to the user immediately. */
-    sendPartial(text: string): void;
+    /** Send a streaming chunk to the user immediately. Optional `role` ("output" | "thinking"). */
+    sendPartial(text: string, role?: string): void;
     /** Send an error message to the user. Honored regardless of streaming mode. */
     sendError(text: string): void;
   }
@@ -63,7 +61,7 @@ declare module 'agentproc' {
   /** Resolve the JSONL history file path for a session. Throws if sessionId is empty. */
   export function sessionFilePath(sessionId: string, sessionDir?: string): string;
 
-  /** Reject with a user-readable error; surfaced via AGENT_ERROR.
+  /** Reject with a user-readable error; surfaced via a {"type":"error"} event.
    *  Throw the returned instance (or a `ProtocolError`) from a handler. */
   export class ProtocolError extends Error {
     isProtocolError: boolean;

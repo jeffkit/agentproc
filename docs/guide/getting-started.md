@@ -4,32 +4,39 @@ Get an AgentProc-compatible agent running in 5 minutes.
 
 ::: tip Two paths — pick one
 - **Just want to use a popular AI CLI (claude, codex, codebuddy, …)?** You don't need this page. Go to the [homepage](/) and use `agentproc hub run <name>` — it's zero-config.
-- **Want to write your own agent script from scratch?** This page is for you. You'll write a 3-line script, a 2-line profile YAML, and run it through the same `agentproc` CLI.
+- **Want to write your own agent script from scratch?** This page is for you. You'll write a tiny script, a 2-line profile YAML, and run it through the same `agentproc` CLI.
 :::
 
 ## Step 1: Write your agent script
 
-The simplest possible agent reads `AGENT_MESSAGE` and writes a reply to stdout.
+The simplest possible agent reads the `{"type":"turn",...}` object from stdin and writes one NDJSON event to stdout.
 
 ::: code-group
 
 ```bash [bash]
 #!/usr/bin/env bash
-# echo_agent.sh — replies with whatever the user sent
-echo "You said: $AGENT_MESSAGE"
+# echo_agent.sh — reads the turn from stdin, echoes the message back
+read -r turn
+message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]
 #!/usr/bin/env python3
 # echo_agent.py
-import os
-print(f"You said: {os.environ['AGENT_MESSAGE']}")
+import json, sys
+turn = json.loads(sys.stdin.readline() or "{}")
+msg = turn.get("message", "") if isinstance(turn.get("message"), str) else ""
+sys.stdout.write(json.dumps({"type": "text", "text": f"You said: {msg}"}, separators=(",", ":")) + "\n")
 ```
 
 ```js [node]
 #!/usr/bin/env node
 // echo_agent.js
-console.log(`You said: ${process.env.AGENT_MESSAGE}`);
+const fs = require('node:fs');
+const raw = fs.readFileSync(0, 'utf8');
+const turn = JSON.parse(raw.split('\n')[0] || '{}');
+process.stdout.write(JSON.stringify({ type: 'text', text: `You said: ${turn.message || ''}` }) + '\n');
 ```
 
 :::
@@ -38,7 +45,8 @@ console.log(`You said: ${process.env.AGENT_MESSAGE}`);
 
 ```yaml
 # myagent.yaml
-command: bash ./echo_agent.sh
+command: bash
+args: ["./echo_agent.sh"]
 timeout_secs: 10
 ```
 
@@ -51,20 +59,15 @@ agentproc --profile ./myagent.yaml --prompt "hello"
 # → You said: hello
 ```
 
-Protocol lines (if any) appear on stderr; the reply body on stdout. The CLI's exit code matches what a bridge would see: `0` success, `1` error, `124` timeout.
+NDJSON events (`{"type":"partial"}`, `{"type":"session"}`, `{"type":"error"}`) appear on stderr; the reply body (assembled from `{"type":"text"}` events) on stdout. The CLI's exit code matches what a bridge would see: `0` success, `1` error, `124` timeout.
 
 <details>
 <summary>Prefer to test without the CLI?</summary>
 
-You can also drive the script directly by setting the env vars yourself. This is what the CLI does internally:
+You can also drive the script directly by piping the turn object yourself. This is what the CLI does internally:
 
 ```bash
-AGENT_MESSAGE="hello" \
-AGENT_SESSION_ID="" \
-AGENT_SESSION_NAME="default" \
-AGENT_FROM_USER="test" \
-AGENT_STREAMING="1" \
-bash ./echo_agent.sh
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | bash ./echo_agent.sh
 ```
 
 Useful when debugging the script in isolation, but for end-to-end behavior prefer the `agentproc --profile ...` form above.
@@ -78,18 +81,20 @@ Point your bridge at the profile YAML. The exact steps depend on which bridge yo
 
 ## Error handling
 
-When something goes wrong, emit an `AGENT_ERROR:` line to send the user a readable message. The bridge forwards it as an error reply and discards any reply body emitted alongside.
+When something goes wrong, emit a `{"type":"error"}` event to send the user a readable message. The bridge forwards it as an error reply and discards any reply body emitted alongside.
 
 ::: code-group
 
 ```bash [bash]
 #!/usr/bin/env bash
 # error_agent.sh
-if [ -z "$AGENT_MESSAGE" ]; then
-  echo 'AGENT_ERROR:"message is required"'
+read -r turn
+message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
+if [ -z "$message" ]; then
+  echo '{"type":"error","message":"message is required"}'
   exit 1
 fi
-echo "You said: $AGENT_MESSAGE"
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]
@@ -112,7 +117,7 @@ const { createProfile, protocolError } = require('agentproc');
 
 createProfile(async (ctx) => {
   if (!ctx.message.trim()) {
-    throw await protocolError('message is required');
+    throw protocolError('message is required');
   }
   return { response: `You said: ${ctx.message}` };
 });
@@ -120,7 +125,7 @@ createProfile(async (ctx) => {
 
 :::
 
-Both the SDK form (raising `ProtocolError` / throwing `protocolError(...)`) and the bare `echo 'AGENT_ERROR:"..."'` form produce the same wire output. Either way, exit non-zero after emitting the line.
+Both the SDK form (raising `ProtocolError` / throwing `protocolError(...)`) and the bare `echo '{"type":"error","message":"..."}'` form produce the same wire output. Either way, exit non-zero after emitting the event.
 
 ---
 

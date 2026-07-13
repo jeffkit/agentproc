@@ -4,28 +4,33 @@
  * protocol-compliant agent invocation.
  *
  * This module is the canonical implementation of the AgentProc bridge-side
- * contract (spec/protocol.md, wire protocol 0.2). The CLI (cli.js) is a thin wrapper around it.
+ * contract (spec/protocol.md, wire protocol 0.3). The CLI (cli.js) is a thin wrapper around it.
+ *
+ * Wire 0.3 is NDJSON in both directions:
+ *   - stdin:  one {"type":"turn",...} line, then optional
+ *             {"type":"permission_response",...} lines when permission is on.
+ *   - stdout: one JSON object per line, discriminated by `type`:
+ *             partial | text | session | error | permission_request.
  *
  * Responsibilities:
  *   - Parse and validate a profile object
- *   - Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}} placeholders
- *   - Inject AGENT_* env vars + profile env block
- *   - Spawn the agent command (no shell)
- *   - Read stdout line by line, classify protocol lines vs reply body
- *   - Forward AGENT_PARTIAL: in real time (via onPartial callback)
- *   - Capture the last AGENT_SESSION: line (last-wins rule)
- *   - Honor AGENT_ERROR: lines
- *   - Optional tool permission (profile.permission): keep stdin open, honor
- *     AGENT_PERMISSION_REQUEST: / write AGENT_PERMISSION_RESPONSE:
+ *   - Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders
+ *   - Build the child env (infra set + profile env block + CLI --env extras)
+ *   - Spawn the agent command (no shell); command is always argv[0], never split
+ *   - Write the turn object to the agent's stdin (and keep stdin open when
+ *     profile.permission is true, for permission_response traffic)
+ *   - Read stdout line by line, parse each line as a JSON event
+ *   - Forward {"type":"partial"} in real time (via onPartial callback)
+ *   - Capture the last {"type":"session"} event (last-wins rule)
+ *   - Honor {"type":"error"} events
+ *   - Optional tool permission: honor permission_request / write permission_response
  *   - Enforce timeout_secs with SIGTERM → kill_grace_secs → SIGKILL
- *   - Write message to stdin and close (when profile.stdin === 'message'
- *     and permission is off)
  *   - Return { reply, sessionId, error, exitCode }
  *
  * Exports:
  *   run(profile, options) -> Promise<RunResult>
- *   parseProfileYaml(yamlString) -> Profile
- *   classifyLine(line) -> { kind: 'session'|'partial'|'error'|'permission_request'|'body', value }
+ *   parseProfileYaml(yamlString) -> Profile   (re-exported from yaml.js where used)
+ *   classifyLine(line) -> { kind: 'session'|'partial'|'text'|'error'|'permission_request'|'malformed', value }
  */
 
 const { spawn } = require('node:child_process');
@@ -37,17 +42,11 @@ const os = require('node:os');
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION = '0.2';
+const PROTOCOL_VERSION = '0.3';
 
 const DEFAULT_TIMEOUT_SECS = 1800;
 const DEFAULT_KILL_GRACE_SECS = 5;
 const DEFAULT_MAX_REPLY_CHARS = 8000;
-
-const PREFIX_SESSION = 'AGENT_SESSION:';
-const PREFIX_PARTIAL = 'AGENT_PARTIAL:';
-const PREFIX_ERROR = 'AGENT_ERROR:';
-const PREFIX_PERMISSION_REQUEST = 'AGENT_PERMISSION_REQUEST:';
-const PREFIX_PERMISSION_RESPONSE = 'AGENT_PERMISSION_RESPONSE:';
 
 // Exit codes per spec
 const EXIT_SUCCESS = 0;
@@ -57,19 +56,16 @@ const EXIT_SIGINT = 130;
 const EXIT_SIGTERM = 143;
 
 // ---------------------------------------------------------------------------
-// Environment inheritance policy
+// Environment composition policy (wire 0.3)
 // ---------------------------------------------------------------------------
-
-// Default: the child does NOT inherit the bridge's environment wholesale.
-// Undeclared secrets (cloud tokens, API keys) must not reach the agent just
-// because the bridge process happens to hold them. The child env is built from:
+//
+// The child env is built from exactly three layers (later overrides earlier):
 //   (1) this minimal INFRA set (copied from process.env when present),
 //   (2) the profile `env` block (${VAR} expanded; optionally allowlist-filtered),
-//   (3) the AGENT_* vars the bridge injects,
-//   (4) extraEnv from the CLI --env flag.
-// Escape hatch: `env_inherit: all` restores full process.env inheritance
-// (legacy trust-the-profile behaviour). `env_allowlist` only gates ${VAR}
-// expansion — it no longer doubles as the inheritance switch.
+//   (3) extraEnv from the CLI --env flag.
+// The per-turn request does NOT travel in env (it travels on stdin as the
+// turn object), so there are no AGENT_* injections. There is no
+// `env_inherit: all` escape hatch in 0.3 — the infra set is always the base.
 const ENV_INFRA_VARS = [
   'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE',
   'LC_MESSAGES', 'TERM', 'TMPDIR', 'TZ', 'PWD',
@@ -79,8 +75,7 @@ const ENV_INFRA_VARS = [
   'PROCESSOR_ARCHITECTURE', 'OS',
 ];
 
-function buildBaseEnv(envInherit) {
-  if (envInherit === 'all') return { ...process.env };
+function buildBaseEnv() {
   const base = {};
   for (const name of ENV_INFRA_VARS) {
     if (process.env[name] !== undefined) base[name] = process.env[name];
@@ -106,69 +101,48 @@ function normalizeProfile(raw) {
   }
   // Accept either a top-level profile (spec form: command, args, ...)
   // or a hub form ({ agentproc: { command, ... } }).
-  const p = raw.agentproc ? { ...raw.agentproc } : { ...raw };
+  const src = raw.agentproc && typeof raw.agentproc === 'object' ? raw.agentproc : raw;
 
-  if (typeof p.command !== 'string' || p.command.trim() === '') {
+  if (typeof src.command !== 'string' || src.command.trim() === '') {
     throw new Error('profile.command must be a non-empty string');
   }
 
-  // Per spec: `command` is argv[0]; `args` is argv[1..]. Two mutually
-  // exclusive forms:
-  //   (a) `args` absent + command has whitespace → split command into argv
-  //       (the legacy shorthand: `command: python3 ./bridge.py`)
-  //   (b) `args` present (even empty `[]`) → command is a single token,
-  //       never split. Lets paths with spaces stay whole:
-  //         command: "/path with spaces/my agent"
-  //         args: []
-  // `args: []` (explicit empty array) is DISTINCT from "args absent": the
-  // explicit form means "do not split command"; the absent form falls back
-  // to the whitespace-splitting shorthand.
-  const argsFieldPresent = raw.agentproc
-    ? (Object.prototype.hasOwnProperty.call(raw.agentproc, 'args') && raw.agentproc.args != null)
-    : (Object.prototype.hasOwnProperty.call(raw, 'args') && raw.args != null);
-  const argv = argsFieldPresent ? [p.command.trim()] : p.command.trim().split(/\s+/);
-  if (argv.length === 0 || argv[0] === '') {
-    throw new Error('profile.command produced empty argv');
-  }
+  // Wire 0.3: `command` is always argv[0], a single token, NEVER split —
+  // even if it contains whitespace. `args` is argv[1..], a YAML list of
+  // tokens, defaulting to []. The 0.2 "args absent ⇒ split command on
+  // whitespace" shorthand is removed. Paths with whitespace are carried whole
+  // by YAML quoting and passed to execve as one token.
+  const command = src.command.trim();
+  const argsValue = Array.isArray(src.args) ? src.args.map(String) : [];
+  const argv = [command];
 
   // env_allowlist (optional): when present, ${VAR} references in the env
   // block whose name is NOT in the list expand to empty + a stderr warning.
-  // Absent ⇒ expand against the full bridge environment (inheritance is
-  // controlled separately by env_inherit).
+  // Absent ⇒ expand against the full bridge environment.
   let envAllowlist = null;
-  if (p.env_allowlist !== undefined && p.env_allowlist !== null) {
-    if (!Array.isArray(p.env_allowlist)) {
+  if (src.env_allowlist !== undefined && src.env_allowlist !== null) {
+    if (!Array.isArray(src.env_allowlist)) {
       throw new Error('profile.env_allowlist must be a list');
     }
-    envAllowlist = new Set(p.env_allowlist.map(String));
-  }
-
-  // env_inherit: 'minimal' (default) | 'all'. Controls child base-env
-  // inheritance only — not ${VAR} expansion.
-  let envInherit = 'minimal';
-  if (p.env_inherit !== undefined && p.env_inherit !== null) {
-    const v = String(p.env_inherit);
-    if (v !== 'minimal' && v !== 'all') {
-      throw new Error("profile.env_inherit must be 'minimal' or 'all'");
-    }
-    envInherit = v;
+    envAllowlist = new Set(src.env_allowlist.map(String));
   }
 
   return {
+    command,
     argv,
-    args: Array.isArray(p.args) ? p.args.map(String) : [],
-    cwd: p.cwd ? expandPath(String(p.cwd)) : undefined,
-    env: p.env && typeof p.env === 'object' ? p.env : {},
+    args: argsValue,
+    cwd: src.cwd ? expandPath(String(src.cwd)) : undefined,
+    env: src.env && typeof src.env === 'object' ? src.env : {},
     env_allowlist: envAllowlist,
-    env_inherit: envInherit,
-    stdin: p.stdin === 'message' ? 'message' : 'none',
-    // Opt-in tool-authorization channel (wire 0.2). Default false — profiles
+    // Opt-in tool-authorization channel (wire 0.3). Default false — profiles
     // without mid-turn approval keep using CLI auto-approve / skip-permissions.
-    permission: p.permission === true,
-    timeout_secs: Number.isFinite(p.timeout_secs) ? p.timeout_secs : DEFAULT_TIMEOUT_SECS,
-    kill_grace_secs: Number.isFinite(p.kill_grace_secs) ? p.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
-    max_reply_chars: Number.isFinite(p.max_reply_chars) ? p.max_reply_chars : DEFAULT_MAX_REPLY_CHARS,
-    streaming: p.streaming !== false,
+    permission: src.permission === true,
+    timeout_secs: Number.isFinite(src.timeout_secs) ? src.timeout_secs : DEFAULT_TIMEOUT_SECS,
+    kill_grace_secs: Number.isFinite(src.kill_grace_secs) ? src.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
+    max_reply_chars: Number.isFinite(src.max_reply_chars) ? src.max_reply_chars : DEFAULT_MAX_REPLY_CHARS,
+    // Bridge-side hint: when false, the runner ignores {"type":"partial"} events
+    // and assembles the reply from {"type":"text"} events only. Not a wire field.
+    streaming: src.streaming !== false,
   };
 }
 
@@ -335,36 +309,15 @@ function expandEnvRef(value, env, allowlist = null, onBlocked = null) {
 }
 
 // ---------------------------------------------------------------------------
-// Line classification (per spec)
+// Event parsing (wire 0.3 — every stdout line is a JSON object)
 // ---------------------------------------------------------------------------
 
 /**
- * Try to JSON-decode a value after a prefix.
- * Lenient mode (default per spec): on failure, return the raw text.
+ * Parse one stdout line as a JSON object. Returns the object, or null on
+ * failure (not valid JSON, not an object).
  */
-function decodeJsonValue(raw) {
-  const text = raw.trim();
-  if (text === '') return '';
-  let v;
-  try {
-    v = JSON.parse(text);
-  } catch {
-    // Lenient: treat as plain string.
-    return text;
-  }
-  // Only JSON strings are meaningful payloads — a sentinel's value is text
-  // for the user. Non-string JSON (number/bool/null/array/object) means the
-  // agent misused the API; fall back to the raw text so the result is
-  // language-independent (String(true) != str(True) across runtimes).
-  return typeof v === 'string' ? v : text;
-}
-
-/**
- * Parse a JSON object payload (permission frames). Returns null on failure
- * or when the value is not a plain object.
- */
-function decodeJsonObject(raw) {
-  const text = String(raw).trim();
+function parseJsonLine(line) {
+  const text = line.trim();
   if (text === '') return null;
   try {
     const v = JSON.parse(text);
@@ -376,11 +329,48 @@ function decodeJsonObject(raw) {
 }
 
 /**
- * Format an AGENT_PERMISSION_RESPONSE: line for stdin.
+ * Classify one stdout line into a typed event.
+ * @param {string} line - Raw line, without trailing newline.
+ * @returns {{ kind: string, value: any, role?: string }}
+ *   kind is 'session' | 'partial' | 'text' | 'error' | 'permission_request' | 'malformed'.
+ *   - session: value is the id string.
+ *   - partial: value is the text string; role is the optional role string.
+ *   - text:    value is the text string.
+ *   - error:   value is the message string.
+ *   - permission_request: value is the parsed object (or null if malformed).
+ *   - malformed: the line was not a recognised event; the bridge logs + ignores.
+ */
+function classifyLine(line) {
+  const obj = parseJsonLine(line);
+  if (!obj || typeof obj.type !== 'string') {
+    return { kind: 'malformed', value: line };
+  }
+  switch (obj.type) {
+    case 'session':
+      return { kind: 'session', value: typeof obj.id === 'string' ? obj.id : '' };
+    case 'partial': {
+      const o = { kind: 'partial', value: typeof obj.text === 'string' ? obj.text : '' };
+      if (typeof obj.role === 'string') o.role = obj.role;
+      return o;
+    }
+    case 'text':
+      return { kind: 'text', value: typeof obj.text === 'string' ? obj.text : '' };
+    case 'error':
+      return { kind: 'error', value: typeof obj.message === 'string' ? obj.message : '' };
+    case 'permission_request':
+      return { kind: 'permission_request', value: obj };
+    default:
+      return { kind: 'malformed', value: line };
+  }
+}
+
+/**
+ * Format a {"type":"permission_response",...} line for stdin.
  * @param {{ request_id: string, behavior: 'allow'|'deny', updated_input?: object, message?: string }} decision
  */
 function formatPermissionResponse(decision) {
   const payload = {
+    type: 'permission_response',
     request_id: String(decision.request_id),
     behavior: decision.behavior === 'allow' ? 'allow' : 'deny',
   };
@@ -390,7 +380,7 @@ function formatPermissionResponse(decision) {
   if (decision.message != null && decision.message !== '') {
     payload.message = String(decision.message);
   }
-  return PREFIX_PERMISSION_RESPONSE + JSON.stringify(payload);
+  return JSON.stringify(payload);
 }
 
 function isValidPermissionRequest(obj) {
@@ -402,44 +392,20 @@ function isValidPermissionRequest(obj) {
   return true;
 }
 
-// Per spec: session id is opaque but MUST NOT contain whitespace, control
-// characters, or colons. Valid: base64url alphabet (A-Z a-z 0-9 - _) plus
-// . ~ = ; non-empty. `/` and `+` are deliberately excluded — `/` makes the id
-// unsafe as a filename component (the SDK history helpers store <id>.jsonl,
-// and a `/`-bearing id would path-traverse). A session line whose value
-// fails this is ignored (previous id preserved).
-const SESSION_ID_RE = /^[A-Za-z0-9._~=-]+$/;
+// Wire 0.3: the session id is an arbitrary JSON string on the wire (no
+// colon/whitespace restriction — that was an artifact of the 0.2
+// colon-delimited prefix). The only remaining constraint is STORAGE safety:
+// the SDK history helpers store each session as <id>.jsonl, so an id
+// containing a path separator (/ or \), a NUL / control char, or equal to
+// `.` / `..` would path-traverse out of the sessions directory. The runner
+// rejects such ids (preserving the previously captured id + a stderr warning)
+// so they do not round-trip. Colons, spaces, `+`, and unicode are all fine.
 function isValidSessionId(value) {
-  return typeof value === 'string' && value.length > 0 && SESSION_ID_RE.test(value);
-}
-
-/**
- * Classify one stdout line.
- * @param {string} line - Raw line, without trailing newline.
- * @returns {{ kind: string, value: string|object|null }}
- *   kind is 'session' | 'partial' | 'error' | 'permission_request' | 'body'.
- *   For permission_request, value is the parsed object or null if malformed.
- */
-function classifyLine(line) {
-  // Per spec: bridges MAY match against the stripped line to be tolerant
-  // of leading whitespace from heredocs. We match the raw line — agents
-  // that want their text to NOT be a protocol line should prefix with space.
-  if (line.startsWith(PREFIX_SESSION)) {
-    return { kind: 'session', value: line.slice(PREFIX_SESSION.length).trim() };
-  }
-  if (line.startsWith(PREFIX_PARTIAL)) {
-    return { kind: 'partial', value: decodeJsonValue(line.slice(PREFIX_PARTIAL.length)) };
-  }
-  if (line.startsWith(PREFIX_ERROR)) {
-    return { kind: 'error', value: decodeJsonValue(line.slice(PREFIX_ERROR.length)) };
-  }
-  if (line.startsWith(PREFIX_PERMISSION_REQUEST)) {
-    return {
-      kind: 'permission_request',
-      value: decodeJsonObject(line.slice(PREFIX_PERMISSION_REQUEST.length)),
-    };
-  }
-  return { kind: 'body', value: line };
+  if (typeof value !== 'string' || value.length === 0) return false;
+  if (value === '.' || value === '..') return false;
+  // Reject path separators and control chars (incl. NUL and newline).
+  if (/[\/\\\x00-\x1f]/.test(value)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -452,29 +418,28 @@ function classifyLine(line) {
  * @property {string} [sessionId] - Session id from the previous turn (empty = new).
  * @property {string} [sessionName] - Human-readable session name.
  * @property {string} [fromUser] - Sender identifier.
- * @property {boolean} [streaming] - Override profile.streaming.
+ * @property {boolean} [streaming] - Override profile.streaming (bridge-side hint).
  * @property {Object<string, string>} [extraEnv] - Additional env vars (CLI --env).
+ * @property {Array<{kind:string,url:string}>} [attachments] - Attachments for the turn.
  * @property {string} [cwd] - Override profile.cwd (CLI --cwd).
  * @property {number} [timeoutSecs] - Override profile.timeout_secs (CLI --timeout).
- * @property {function(string): void} [onPartial] - Streaming callback.
+ * @property {function(string, string=): void} [onPartial] - Streaming callback (text, role?).
  * @property {function(string): void} [onSession] - Called when session id captured.
- * @property {function(string): void} [onError] - Called on AGENT_ERROR:.
+ * @property {function(string): void} [onError] - Called on {"type":"error"}.
  * @property {function(object): (object|Promise<object>|void)} [onPermission] -
- *   Called on AGENT_PERMISSION_REQUEST: when profile.permission is true.
+ *   Called on {"type":"permission_request"} when profile.permission is true.
  *   Return (or resolve to) { behavior: 'allow'|'deny', updated_input?, message? }
- *   to write AGENT_PERMISSION_RESPONSE:; omit / return nothing to leave the
- *   agent blocked until timeout (or call writePermissionResponse later via
- *   the handle returned from a sync decision — prefer returning the decision).
+ *   to write a permission_response; omit / return nothing to leave the
+ *   agent blocked until timeout.
  * @property {function(string): void} [onProtocolLine] - Raw protocol line (verbose/debug).
  * @property {function(string): void} [onStderr] - Agent's stderr line.
- * @property {boolean} [forwardStdin] - If true, write message to stdin (override profile.stdin).
  */
 
 /**
  * @typedef {Object} RunResult
- * @property {string} reply - Concatenated reply body (non-protocol lines).
- * @property {string} sessionId - Final session id (last AGENT_SESSION: wins; '' if none).
- * @property {string} error - Error message from AGENT_ERROR:, or '' if none.
+ * @property {string} reply - Concatenated reply body (from {"type":"text"} events).
+ * @property {string} sessionId - Final session id (last {"type":"session"} wins; '' if none).
+ * @property {string} error - Error message from {"type":"error"}, or '' if none.
  * @property {number} exitCode - Process exit code (124 = timeout, etc.).
  * @property {boolean} timedOut - Whether the run was killed by timeout.
  */
@@ -508,10 +473,6 @@ async function run(profileRaw, options) {
   }
 
   // Build the substitution context for {{MESSAGE}} etc.
-  // {{PROFILE_DIR}} resolves to the directory the profile YAML lives in
-  // (passed by the CLI; undefined when run programmatically without it),
-  // letting profiles reference bundled scripts via absolute paths while
-  // still allowing the agent's cwd to be anywhere.
   const substCtx = {
     message: options.message,
     sessionId,
@@ -525,11 +486,10 @@ async function run(profileRaw, options) {
     argv.push(substitute(a, substCtx));
   }
 
-  // Build env per the inheritance policy (see buildBaseEnv). Default is
-  // minimal infra; `env_inherit: all` restores full process.env inheritance.
-  // `env_allowlist` only filters ${VAR} expansion in the profile env block.
+  // Build env per the composition policy (infra set + profile env + --env).
+  // No AGENT_* injections in 0.3 — the per-turn request travels on stdin.
   const allowlist = profile.env_allowlist;
-  const env = buildBaseEnv(profile.env_inherit);
+  const env = buildBaseEnv();
   for (const [k, v] of Object.entries(profile.env)) {
     env[k] = expandEnvRef(substitute(v, substCtx), process.env, allowlist, (name) => {
       if (options.onStderr) {
@@ -543,26 +503,25 @@ async function run(profileRaw, options) {
     }
   }
 
-  // Inject AGENT_* vars per spec.
-  env.AGENT_MESSAGE = options.message;
-  env.AGENT_SESSION_ID = sessionId;
-  env.AGENT_SESSION_NAME = sessionName;
-  env.AGENT_FROM_USER = options.fromUser || '';
-  env.AGENT_STREAMING = streaming ? '1' : '0';
-  env.AGENT_PROTOCOL_VERSION = PROTOCOL_VERSION;
-  // Single-attachment passthrough. Only inject when non-empty so an unset
-  // variable stays unset (spec: "set when present"); an agent can tell
-  // "no image" apart from "image URL is the empty string".
-  if (options.imageUrl) env.AGENT_IMAGE_URL = options.imageUrl;
-  if (options.fileUrl) env.AGENT_FILE_URL = options.fileUrl;
-  if (profile.permission) env.AGENT_PERMISSION = '1';
+  // Build the turn object (wire 0.3 stdin payload).
+  const turn = {
+    type: 'turn',
+    message: options.message,
+    session_id: sessionId,
+    session_name: sessionName,
+    from_user: options.fromUser || '',
+    protocol_version: PROTOCOL_VERSION,
+  };
+  // attachments: include the key when the caller provided an attachments
+  // array (presence-as-feature); omit otherwise.
+  if (Array.isArray(options.attachments)) {
+    turn.attachments = options.attachments;
+  }
+  if (profile.permission) turn.permission = true;
 
-  // Stdin is a pipe when we need to write the message and/or keep the channel
-  // open for mid-turn AGENT_PERMISSION_RESPONSE: lines.
-  const needStdinPipe =
-    profile.permission ||
-    profile.stdin === 'message' ||
-    !!options.forwardStdin;
+  // stdin is always a pipe: we always write the turn line. When permission is
+  // on, we keep stdin open afterwards for permission_response traffic.
+  const needStdinPipe = true;
 
   // Spawn — no shell. Cwd optional.
   const child = spawn(argv[0], argv.slice(1), {
@@ -584,11 +543,11 @@ async function run(profileRaw, options) {
     timedOut: false,
   };
 
-  const bodyLines = [];
+  const textChunks = [];
   let killed = false;
   /** @type {Set<string>} */
   const pendingPermissionIds = new Set();
-  let stdinClosed = !needStdinPipe;
+  let stdinClosed = false;
 
   function writePermissionResponse(decision) {
     if (stdinClosed || !child.stdin || child.stdin.destroyed) return false;
@@ -611,19 +570,17 @@ async function run(profileRaw, options) {
   }
 
   // ---- streaming partial truncation tracking ----
-  // max_reply_chars is applied to the reply body in non-streaming mode and to
-  // the cumulative partial length in streaming mode.  Without this second
-  // check, streaming mode silently bypasses the cap — forwarding many KB of
-  // AGENT_PARTIAL: chunks to the platform while a non-streaming caller at the
-  // same limit would get a truncated reply.  The two paths now agree: once the
-  // combined partial text exceeds max_reply_chars, we emit a truncation notice
-  // and drop further partials.
+  // max_reply_chars is applied to the assembled text body in non-streaming
+  // mode and to the cumulative partial length in streaming mode.  Without
+  // this second check, streaming mode silently bypasses the cap.  The two
+  // paths now agree: once the combined partial text exceeds max_reply_chars,
+  // we emit a truncation notice and drop further partials.
   let cumulativePartialChars = 0;
   let partialsTruncated = false;
   const maxChars = profile.max_reply_chars;
   const truncSuffix = maxChars === DEFAULT_MAX_REPLY_CHARS ? '\n\n…(truncated)' : '';
 
-  // ---- stdout: line-by-line classification ----
+  // ---- stdout: line-by-line event parsing ----
   let stdoutBuf = '';
   child.stdout.on('data', chunk => {
     stdoutBuf += chunk.toString();
@@ -642,7 +599,7 @@ async function run(profileRaw, options) {
     if (c.kind === 'session') {
       if (!isValidSessionId(c.value)) {
         if (options.onStderr) {
-          options.onStderr(`[agentproc runner] ignoring invalid AGENT_SESSION value ${JSON.stringify(c.value)} (must be non-empty, no whitespace/control chars/colons); previous session id preserved`);
+          options.onStderr(`[agentproc runner] ignoring invalid session id ${JSON.stringify(c.value)} (must be non-empty, no path separators or control chars); previous session id preserved`);
         }
         if (options.onProtocolLine) options.onProtocolLine(line);
       } else {
@@ -655,14 +612,17 @@ async function run(profileRaw, options) {
         const remaining = maxChars - cumulativePartialChars;
         if (c.value.length >= remaining) {
           // Emit whatever fits, then the truncation notice, then stop.
-          if (remaining > 0) options.onPartial(c.value.slice(0, remaining));
+          if (remaining > 0) options.onPartial(c.value.slice(0, remaining), c.role);
           if (truncSuffix) options.onPartial(truncSuffix);
           partialsTruncated = true;
         } else {
-          options.onPartial(c.value);
+          options.onPartial(c.value, c.role);
           cumulativePartialChars += c.value.length;
         }
       }
+      if (options.onProtocolLine) options.onProtocolLine(line);
+    } else if (c.kind === 'text') {
+      textChunks.push(c.value);
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'error') {
       result.error = c.value;
@@ -674,14 +634,14 @@ async function run(profileRaw, options) {
       if (!profile.permission) {
         if (options.onStderr) {
           options.onStderr(
-            '[agentproc runner] ignoring AGENT_PERMISSION_REQUEST: (profile.permission is not true)'
+            '[agentproc runner] ignoring {"type":"permission_request"} (profile.permission is not true)'
           );
         }
         if (options.onProtocolLine) options.onProtocolLine(line);
       } else if (!isValidPermissionRequest(c.value)) {
         if (options.onStderr) {
           options.onStderr(
-            `[agentproc runner] malformed AGENT_PERMISSION_REQUEST: ${JSON.stringify(line.slice(0, 200))}`
+            `[agentproc runner] malformed permission_request: ${JSON.stringify(line.slice(0, 200))}`
           );
         }
         // Spec: if we can still parse a request_id, SHOULD deny; else ignore.
@@ -728,7 +688,11 @@ async function run(profileRaw, options) {
         // No onPermission: leave the agent blocked until turn timeout (spec).
       }
     } else {
-      bodyLines.push(line);
+      // malformed: log + ignore (not forwarded as body in 0.3).
+      if (options.onStderr) {
+        options.onStderr(`[agentproc runner] ignoring malformed stdout line: ${JSON.stringify(line.slice(0, 200))}`);
+      }
+      if (options.onProtocolLine) options.onProtocolLine(line);
     }
   }
 
@@ -769,16 +733,10 @@ async function run(profileRaw, options) {
     }
   });
 
-  // ---- stdin ----
-  // permission: true → keep open for AGENT_PERMISSION_RESPONSE: (close on exit/timeout).
-  // stdin: message / forwardStdin → write message first; EOF only when permission is off.
-  if (needStdinPipe) {
-    if (profile.stdin === 'message' || options.forwardStdin) {
-      try { child.stdin.write(options.message); } catch {}
-    }
-    if (!profile.permission) {
-      closeStdin();
-    }
+  // ---- stdin: write the turn line; keep open only when permission is on ----
+  try { child.stdin.write(JSON.stringify(turn) + '\n'); } catch {}
+  if (!profile.permission) {
+    closeStdin();
   }
 
   // ---- timeout handling per spec: SIGTERM → grace → SIGKILL ----
@@ -836,7 +794,7 @@ async function run(profileRaw, options) {
         options.onStderr(`[agentproc runner] spawn error: ${err.message}`);
         if (tip) options.onStderr(`[agentproc runner] hint: ${tip}`);
       }
-      // Surface as an AGENT_ERROR so the user sees it on the bridge too.
+      // Surface as an error event so the user sees it on the bridge too.
       if (options.onError) {
         const msg = tip || err.message;
         options.onError(`failed to start agent: ${msg}`);
@@ -860,7 +818,7 @@ async function run(profileRaw, options) {
     if (options.onStderr) options.onStderr(stderrBuf.replace(/\r$/, ''));
   }
 
-  // If the agent exited non-zero with no AGENT_ERROR, peek at its stderr for
+  // If the agent exited non-zero with no error event, peek at its stderr for
   // common "command/file not found" patterns and surface a friendly hint.
   // Uses the FULL stderr — a noisy agent can fill the 8 KB window with
   // progress junk before the real error lands at the end.
@@ -872,7 +830,8 @@ async function run(profileRaw, options) {
     }
   }
 
-  result.reply = bodyLines.join('\n');
+  // Reply body = concatenation of {"type":"text"} events (direct, no separator).
+  result.reply = textChunks.join('');
   if (result.reply.length > profile.max_reply_chars) {
     const suffix = profile.max_reply_chars === DEFAULT_MAX_REPLY_CHARS
       ? '\n\n…(truncated)'
@@ -884,7 +843,7 @@ async function run(profileRaw, options) {
   if (killed) {
     result.exitCode = EXIT_TIMEOUT;
   } else if (result.error) {
-    // AGENT_ERROR was emitted — treat as failure even if exit was 0.
+    // An error event was emitted — treat as failure even if exit was 0.
     result.exitCode = exitCode === 0 ? EXIT_ERROR : exitCode;
   } else {
     result.exitCode = exitCode;
@@ -897,9 +856,8 @@ module.exports = {
   run,
   normalizeProfile,
   classifyLine,
+  parseJsonLine,
   isValidSessionId,
-  decodeJsonValue,
-  decodeJsonObject,
   formatPermissionResponse,
   isValidPermissionRequest,
   substitute,

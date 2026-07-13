@@ -1,6 +1,6 @@
 # opencode
 
-Wraps the [`opencode` CLI](https://github.com/anomalyco/opencode) as an AgentProc agent with **streaming** and **session continuity**. opencode emits NDJSON events via `--format json`; this bridge parses those events and re-emits them as `AGENT_PARTIAL:` and `AGENT_SESSION:` lines.
+Wraps the [`opencode` CLI](https://github.com/anomalyco/opencode) as an AgentProc agent with **streaming** and **session continuity**. opencode emits NDJSON events via `--format json`; this bridge parses those events and re-emits them as `{"type":"partial"}` and `{"type":"session"}` lines.
 
 ## Quick test (zero config)
 
@@ -51,17 +51,14 @@ env_allowlist: [OPENCODE_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/opencode
-AGENT_MESSAGE="reply with exactly: opencode ok" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="1" \
-python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
 ```
 
 Expected output (streaming):
 
 ```
-AGENT_PARTIAL:"opencode ok"
-AGENT_SESSION:ses_<opaque-id>
+{"type":"partial","text":"opencode ok"}
+{"type":"session","id":"ses_<opaque-id>"}
 ```
 
 <details>
@@ -69,10 +66,7 @@ AGENT_SESSION:ses_<opaque-id>
 
 ```bash
 cd hub/opencode
-AGENT_MESSAGE="reply with exactly: opencode ok" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="0" \
-python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
 ```
 
 </details>
@@ -80,22 +74,22 @@ python3 bridge.py
 ## How it works
 
 ```
-AGENT_MESSAGE / AGENT_SESSION_ID
+turn.message / turn.session_id
   ↓
 bridge.py / bridge.js
   ↓ opencode run <message> --auto --format json [--session <id>] [--model <m>]
 opencode CLI  (emits NDJSON events on stdout)
   ↓ step_start → sessionID captured
-  ↓ text       → AGENT_PARTIAL: (streaming) or accumulated for reply body
+  ↓ text       → {"type":"partial"} (streaming) or accumulated for reply body
   ↓ step_finish → turn complete
 bridge.py / bridge.js
-  ↓ AGENT_SESSION:<id>   (replayed as --session on next turn)
+  ↓ {"type":"session","id":"<id>"}   (replayed as --session on next turn)
   ↓ reply body            (non-streaming) or nothing (streaming used partials)
 ```
 
 ## Session continuity
 
-opencode's `--format json` emits a `sessionID` field (format `ses_XXX`) on every event. The bridge captures it and forwards it as `AGENT_SESSION:`. On the next turn, the SDK passes it back as `AGENT_SESSION_ID`, and the bridge replays it as `--session <id>` — enabling native multi-turn continuity backed by opencode's own session database.
+opencode's `--format json` emits a `sessionID` field (format `ses_XXX`) on every event. The bridge captures it and forwards it as `{"type":"session"}`. On the next turn, the SDK passes it back as `turn.session_id`, and the bridge replays it as `--session <id>` — enabling native multi-turn continuity backed by opencode's own session database.
 
 ## Environment variables
 

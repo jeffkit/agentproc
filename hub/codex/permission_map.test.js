@@ -12,7 +12,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 
 const {
-  permissionEnabled,
   buildArgs,
   buildPermissionArgs,
   parseEvent,
@@ -22,12 +21,6 @@ const {
 } = require(path.join(__dirname, 'permission_map.js'));
 
 const codebuddy = require(path.join(__dirname, '..', 'codebuddy', 'bridge.js'));
-
-test('permissionEnabled reads AGENT_PERMISSION', () => {
-  assert.strictEqual(permissionEnabled({}), false);
-  assert.strictEqual(permissionEnabled({ AGENT_PERMISSION: '1' }), true);
-  assert.strictEqual(permissionEnabled({ AGENT_PERMISSION: '0' }), false);
-});
 
 test('buildArgs default path has no approval/hook flags', () => {
   const args = buildArgs('hi', '', {});
@@ -167,7 +160,6 @@ test('permission_hook.py allow/deny via unix socket', async () => {
   });
 });
 
-test('codebuddy rejects AGENT_PERMISSION=1', () => {
-  assert.strictEqual(codebuddy.permissionEnabled({ AGENT_PERMISSION: '1' }), true);
+test('codebuddy advertises permission unsupported message', () => {
   assert.ok(codebuddy.PERMISSION_UNSUPPORTED.includes('not support'));
 });

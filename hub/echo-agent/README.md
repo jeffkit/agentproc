@@ -1,6 +1,6 @@
 # echo-agent
 
-The smallest valid AgentProc agent. Reads `AGENT_MESSAGE` and writes it back to stdout prefixed with "You said: ". Useful for verifying that your messaging bridge speaks the protocol correctly before plugging in a real AI CLI.
+The smallest valid AgentProc agent (wire 0.3). It reads the `{"type":"turn",...}` object from stdin and writes the message back to stdout as a `{"type":"text"}` event prefixed with "You said: ". Useful for verifying that your messaging bridge speaks the protocol correctly before plugging in a real AI CLI.
 
 Available in three languages — all produce identical output:
 
@@ -13,7 +13,8 @@ Available in three languages — all produce identical output:
 ## Profile
 
 ```yaml
-command: python3 {{PROFILE_DIR}}/bridge.py   # or: node {{PROFILE_DIR}}/bridge.js / bash {{PROFILE_DIR}}/bridge.sh
+command: python3              # argv[0] — a single token
+args: ["{{PROFILE_DIR}}/bridge.py"]   # or: node / bash + the bridge script
 # cwd intentionally omitted: hub run defaults to your current directory.
 timeout_secs: 10
 streaming: false
@@ -33,16 +34,16 @@ agentproc hub run echo-agent -p "hello"
 
 ```bash
 cd hub/echo-agent
-AGENT_MESSAGE="hello" AGENT_STREAMING="0" python3 bridge.py
-# → You said: hello
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+# → {"type":"text","text":"You said: hello"}
 ```
 
 </details>
 
 ## When to use
 
-- **Verifying a bridge implementation.** Before testing with claude-code or codex (which cost real API calls), run echo-agent to confirm your bridge correctly injects env vars and reads the reply.
-- **Learning the protocol.** The bridge scripts are 3–5 lines each — read them alongside [the spec](https://agentproc.dev/spec/) to see how the contract maps to actual code.
+- **Verifying a bridge implementation.** Before testing with claude-code or codex (which cost real API calls), run echo-agent to confirm your bridge correctly writes the turn object and reads the NDJSON reply.
+- **Learning the protocol.** The bridge scripts are a few lines each — read them alongside [the spec](https://agentproc.dev/spec/) to see how the contract maps to actual code.
 - **CI smoke tests.** A messaging bridge's test suite can spin up echo-agent as a stub agent.
 
 ## License

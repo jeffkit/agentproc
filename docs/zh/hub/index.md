@@ -16,7 +16,7 @@ agentproc hub run claude-code -p "what is this codebase?"
 2. 缓存到 `~/.agentproc/cache/hub/claude-code/`（24 小时 TTL）
 3. 把**你的当前目录**作为 agent 的 `cwd`（可用 `--cwd` 覆盖）
 4. 通过 `{{PROFILE_DIR}}` 占位符定位打包的 bridge 脚本——`cwd` 和脚本位置彻底解耦
-5. 转发 `AGENT_MESSAGE` 和你传的任何 `--env`
+5. 向 agent 的 stdin 写入一个 `{"type":"turn",...}` 对象，并转发你传的任何 `--env`
 
 ::: tip 遇到 GitHub 限流？
 匿名拉取每个 IP 每小时 ~60 次。设置 token 可以提到 5,000 次/小时：
@@ -131,7 +131,8 @@ cli: <command-name>             # 被包装的可执行文件
 cli_install: |                  # CLI 的安装方法
   npm install -g ...
 agentproc:                      # 真正的 AgentProc P0 profile
-  command: python3 {{PROFILE_DIR}}/bridge.py   # {{PROFILE_DIR}} 解析为 profile 自己所在目录
+  command: python3                          # argv[0]——单个 token，永不切分
+  args: ["{{PROFILE_DIR}}/bridge.py"]       # argv[1..]；{{PROFILE_DIR}} 解析为 profile 自己所在目录
   # cwd 故意不写：`hub run` 默认用用户当前目录
   # （让被包装的 CLI 在用户项目里跑）。bridge 脚本通过
   # {{PROFILE_DIR}} 定位，与 cwd 无关。

@@ -481,6 +481,7 @@ def fetch_profile(
     if not refresh and age is not None and age < HUB_CACHE_TTL_SECS and profile_yaml.exists():
         if on_log:
             on_log(f"using cached profile: {cached} (age {int(age)}s)")
+        _ensure_shared_cached(refresh=False, on_log=on_log)
         return cached
 
     # 1) Bundled fast path — zero network, the default for most users.

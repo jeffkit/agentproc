@@ -8,18 +8,18 @@ Invokes:
         [--model <model>]
 
 Parses the NDJSON stream and re-emits as AgentProc protocol output:
-    init    → captures session_id (forwarded as AGENT_SESSION:)
-    message → text delta or full text → AGENT_PARTIAL:
-    error   → AGENT_ERROR:
-    result  → terminal event (status=error → AGENT_ERROR:)
+    init    → captures session_id (forwarded as {"type":"session"})
+    message → text delta or full text → {"type":"partial"}
+    error   → {"type":"error"}
+    result  → terminal event (status=error → {"type":"error"})
 
 Gemini emits session_id up-front in `init`, so the bridge forwards it
 immediately. The "last wins" rule also tolerates a later session_id.
 
 Env vars:
-    AGENT_MESSAGE          User message
-    AGENT_SESSION_ID       Previous session id (empty = new session)
-    AGENT_STREAMING        "1" streaming mode, "0" one-shot
+    turn.message          User message
+    turn.session_id       Previous session id (empty = new session)
+    streaming        "1" streaming mode, "0" one-shot
     GEMINI_MODEL           Optional model override (e.g. "gemini-2.5-pro", "flash")
     GEMINI_SANDBOX         Optional: "false" disables --sandbox; default keeps gemini's default
 """

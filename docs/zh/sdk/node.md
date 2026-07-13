@@ -6,31 +6,29 @@
 npm install agentproc
 ```
 
-SDK 版本与协议版本对齐（当前 **0.1.0**），要求 Node.js 18+。
-
 ## 基础用法
 
 ```js
 const { createProfile } = require('agentproc');
 
 createProfile(async (ctx) => {
-  // ctx.message          — 用户消息文本
-  // ctx.sessionId        — 上一轮返回的 session ID（空 = 新会话）
-  // ctx.sessionName      — 会话可读名称
-  // ctx.fromUser         — 发送者标识符
-  // ctx.streaming        — 是否流式模式
-  // ctx.protocolVersion  — bridge 实现的协议版本（如 "0.1"）
-  // ctx.imageUrl         — 图片附件 URL（无则为空）
-  // ctx.fileUrl          — 文件附件 URL（无则为空）
+  // ctx.message           — 用户消息文本
+  // ctx.sessionId         — 上一轮返回的 session ID（空 = 新会话）
+  // ctx.sessionName       — 会话可读名称
+  // ctx.fromUser          — 发送者标识符
+  // ctx.protocolVersion   — bridge 实现的协议版本（如 "0.3"）
+  // ctx.attachments       — 附件数组，元素为 {kind, url, ...} 对象（空 = 无）
+  // ctx.permission        — bridge 是否开启了权限通道
   const reply = await myLLM(ctx.message);
   return { response: reply };
 });
 ```
 
-保存为 `agent.js`，在 profile YAML 中：
+SDK 从 stdin 读取 `{"type":"turn",...}` 对象，调用你的 handler，再把 NDJSON 事件写到 stdout。保存为 `agent.js`，在 profile YAML 中：
 
 ```yaml
-command: node ./agent.js
+command: node
+args: ["./agent.js"]
 timeout_secs: 60
 ```
 
@@ -43,9 +41,11 @@ createProfile(async ({ message, sessionId }) => {
 });
 ```
 
-SDK 会把 `AGENT_SESSION:` 行输出到 stdout 最后（spec 规定 session 行「最后一行生效」，所以在末尾输出是正确做法）。
+SDK 会输出 `{"type":"session","id":...}` 事件（随后是 `{"type":"text"}` 回复事件）。bridge 在下一轮把它作为 `sessionId` 传回。
 
 ## 流式输出
+
+用 `ctx.sendPartial()` 立即发送分片。当 profile 的 `streaming: true` 时，bridge 会实时转发：
 
 ```js
 createProfile(async (ctx) => {
@@ -54,62 +54,51 @@ createProfile(async (ctx) => {
     ctx.sendPartial(chunk);
     newSessionId = sid;
   }
+  // response: '' —— 内容已通过 sendPartial 全部流式发出。
   return { response: '', sessionId: newSessionId };
 });
 ```
 
-`ctx.sendPartial(text)` 写入一行 `AGENT_PARTIAL:<json>`。空字符串会被忽略。`streaming: false` 时 bridge 会忽略这些行，调用仍是安全的。
+`sendPartial` 可选 `role` 参数（`"output"` | `"thinking"`）：
+
+```js
+ctx.sendPartial('推理中...', 'thinking');
+```
 
 ## 错误透出
 
-当 agent 遇到需要告诉用户的错误（如限流、上游 API 失效），用 `AGENT_ERROR:` 让 bridge 转发一条有意义的消息——而不是 bridge 的通用模板。
-
-### 方式一：`ctx.sendError`
-
-```js
-createProfile(async (ctx) => {
-  try {
-    const reply = await myLLM(ctx.message);
-    return { response: reply };
-  } catch (err) {
-    if (err instanceof RateLimitError) {
-      ctx.sendError('被限流，60 秒后重试。');
-      return; // 输出 AGENT_ERROR: 后应立即返回；并发的回复正文会被 bridge 丢弃。
-    }
-    throw err;
-  }
-});
-```
-
-### 方式二：`throw await sdk.protocolError(...)`
-
-异常形式更符合控制流风格。SDK 会捕获标记为 `isProtocolError` 的异常，输出 `AGENT_ERROR:` 行并以退出码 1 退出。
+当 agent 遇到需要告诉用户的错误，用 `{"type":"error"}` 事件让 bridge 转发。两种等价形式：
 
 ```js
 const { createProfile, protocolError } = require('agentproc');
 
 createProfile(async (ctx) => {
-  if (!ctx.message.trim()) {
-    throw await protocolError('bad input: 消息不能为空');
+  // 方式一：调用 sendError，然后返回 / 抛出
+  if (rateLimited()) {
+    ctx.sendError('被限流，60 秒后重试。');
+    return;                          // bridge 会丢弃并发的回复正文
   }
-  // ...
+
+  // 方式二：抛一个 protocol error —— SDK 输出 {"type":"error"} 并以退出码 1 退出
+  if (badInput(ctx.message)) {
+    throw protocolError('消息不能为空');
+  }
+
+  return { response: await myLLM(ctx.message) };
 });
 ```
 
-两种方式都会让 bridge 视本次进程为失败（即使后续退出码为 0 也会被覆盖）。
+`protocolError(msg)` 返回一个带 `isProtocolError` 标记的 `ProtocolError` 实例；SDK 把它的消息序列化为 `{"type":"error"}` 事件并以退出码 1 退出。其他未捕获错误会打到 stderr，以退出码 1 退出但不输出 `error` 事件。
 
-## 协议版本
+## 附件
 
-`ctx.protocolVersion` 反映 bridge 实现的协议版本（来自 `AGENT_PROTOCOL_VERSION`）。当 bridge 未注入时，SDK 回退到自身的 `PROTOCOL_VERSION`（当前 `"0.1"`）。
+读 `ctx.attachments` —— 一个 `{kind, url, ...}` 对象数组：
 
 ```js
-const { createProfile, PROTOCOL_VERSION } = require('agentproc');
-
 createProfile(async (ctx) => {
-  if (ctx.protocolVersion !== PROTOCOL_VERSION) {
-    console.error(`warn: bridge=${ctx.protocolVersion}, sdk=${PROTOCOL_VERSION}`);
-  }
-  // ...
+  const images = ctx.attachments.filter(a => a.kind === 'image');
+  const reply = await myVision(ctx.message, images.map(a => a.url));
+  return { response: reply };
 });
 ```
 
@@ -120,11 +109,11 @@ const { createProfile, loadHistory, appendHistory } = require('agentproc');
 
 createProfile(async ({ message, sessionId }) => {
   const history = loadHistory(sessionId);
-  const messages = [
-    ...history.map(e => ({ role: e.role, content: e.content })),
-    { role: 'user', content: message },
-  ];
+  const messages = [...history.map(e => ({ role: e.role, content: e.content })),
+                    { role: 'user', content: message }];
+
   const reply = await callOpenAI(messages);
+
   appendHistory(sessionId, [
     { role: 'user', content: message },
     { role: 'assistant', content: reply },
@@ -137,22 +126,30 @@ createProfile(async ({ message, sessionId }) => {
 
 ## 本地测试
 
-不需要启动 bridge，手动设置环境变量即可测试：
+用 hub 同款 CLI 跑你的 agent —— 最忠实的端到端验证：
 
 ```bash
-AGENT_MESSAGE="你好" \
-AGENT_SESSION_ID="" \
-AGENT_SESSION_NAME="default" \
-AGENT_FROM_USER="test" \
-AGENT_STREAMING="1" \
-AGENT_PROTOCOL_VERSION="0.1" \
-node ./agent.js
+agentproc --profile ./myagent.yaml --prompt "hello"
 ```
 
-要模拟单附件场景：
+::: tip 还没有 profile YAML？
+在你 agent 旁边存一个 `myagent.yaml`：
+
+```yaml
+command: node
+args: ["./agent.js"]
+timeout_secs: 60
+```
+:::
+
+<details>
+<summary>想直接驱动脚本？</summary>
+
+像 bridge 那样把 turn 对象写进 stdin：
 
 ```bash
-AGENT_MESSAGE="看看这张图" \
-AGENT_IMAGE_URL="https://example.com/a.png" \
-node ./agent.js
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | node ./agent.js
 ```
+
+单独调试脚本时很有用。
+</details>

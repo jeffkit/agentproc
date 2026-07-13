@@ -55,6 +55,48 @@ def _read_pkg_version() -> str:
 PKG_VERSION = _read_pkg_version()
 
 
+def _build_attachments(opts) -> List[Dict[str, str]]:
+    """Build the turn's `attachments` array from --image-url / --file-url.
+
+    Wire 0.3 carries attachments as a single `attachments` list; there are no
+    separate AGENT_IMAGE_URL / AGENT_FILE_URL channels. Returns an empty list
+    when no attachment flags were given (the runner omits the key when empty).
+    """
+    a: List[Dict[str, str]] = []
+    if getattr(opts, "image_url", ""):
+        a.append({"kind": "image", "url": opts.image_url})
+    if getattr(opts, "file_url", ""):
+        a.append({"kind": "file", "url": opts.file_url})
+    return a
+
+
+def _make_permission_handler() -> Optional[object]:
+    """Interactive tool authorization for profiles that opt in.
+
+    On a TTY we prompt y/N; otherwise we deny (headless CI / pipes cannot
+    answer mid-turn). Mirrors the Node CLI's onPermission.
+    """
+    def on_permission(req: Dict[str, object]):
+        summary = req.get("description") or (
+            f"{req.get('tool_name', '')} {json.dumps(req.get('input') or {})[:120]}"
+        )
+        sys.stderr.write(
+            f"\n[agentproc] permission request {req.get('request_id')}: "
+            f"{req.get('tool_name', '')}\n  {summary}\n"
+        )
+        if not sys.stdin.isatty() or not sys.stderr.isatty():
+            sys.stderr.write("[agentproc] no TTY — denying permission request\n")
+            return {"behavior": "deny", "message": "no TTY for interactive approval"}
+        try:
+            answer = input("Allow? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            return {"behavior": "deny", "message": "denied by user"}
+        if re.match(r"^y(es)?$", (answer or "").strip(), re.IGNORECASE):
+            return {"behavior": "allow", "updated_input": req.get("input") or {}}
+        return {"behavior": "deny", "message": "denied by user"}
+    return on_permission
+
+
 # ---------------------------------------------------------------------------
 # Argparse setup
 # ---------------------------------------------------------------------------
@@ -122,20 +164,20 @@ Session:
   --from <user>             Sender identifier
 
 Attachments:
-  --image-url <url>         Image attachment URL (sets AGENT_IMAGE_URL)
-  --file-url <url>          File attachment URL (sets AGENT_FILE_URL)
+  --image-url <url>         Image attachment URL (carried in the turn's attachments)
+  --file-url <url>          File attachment URL (carried in the turn's attachments)
 
 Execution:
   --cwd <path>              Override profile.cwd (relative paths resolve
                             against the profile.yaml's directory)
   --env KEY=VALUE           Extra env var (repeatable)
   --timeout <secs>          Override profile.timeout_secs
-  --no-stream               Set AGENT_STREAMING=0
+  --no-stream               Disable streaming (ignore {"type":"partial"} events)
 
 Output:
   --verbose                 Forward protocol lines to stderr (default)
   --quiet                   Suppress protocol lines on stderr
-  --raw                     Don't parse stdout; forward agent output verbatim
+  --raw                     Quiet mode: only print the final reply body (no live events)
   --stdin                   Read prompt from stdin instead of --prompt
 
 Other:
@@ -143,8 +185,8 @@ Other:
   --help, -h                Show this help
 
 Output semantics:
-  stderr  → protocol lines (AGENT_PARTIAL:, AGENT_SESSION:, AGENT_ERROR:)
-  stdout  → final reply body (non-protocol lines)
+  stderr  → NDJSON events ({"type":"partial"/"session"/"error"})
+  stdout  → final reply body (assembled from {"type":"text"} events)
   exit    → 0 success · 1 error · 124 timeout (per spec)
 
 The final session id is printed on stderr as: agentproc:session:<id>
@@ -304,8 +346,8 @@ Hub run options (same as the regular --profile runner):
   --env KEY=VALUE              Extra env var (repeatable)
   --session <id>               Previous session id for multi-turn
   --from <user>                Sender identifier
-  --image-url <url>            Image attachment URL (sets AGENT_IMAGE_URL)
-  --file-url <url>             File attachment URL (sets AGENT_FILE_URL)
+  --image-url <url>            Image attachment URL (carried in the turn's attachments)
+  --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
@@ -372,8 +414,7 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
                 cwd=opts.cwd,
                 profile_dir=profile_dir,
                 extra_env=extra_env,
-                image_url=opts.image_url,
-                file_url=opts.file_url,
+                attachments=_build_attachments(opts),
                 timeout_secs=opts.timeout,
             ),
         )
@@ -383,6 +424,15 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
         return 0 if r.exit_code == 0 else 1
 
     verbose = opts.verbose or not opts.quiet
+
+    # Interactive tool authorization when the profile opts in.
+    profile_block = profile_raw.get("agentproc") if isinstance(
+        profile_raw.get("agentproc"), dict) else profile_raw
+    permission_on = bool(profile_block and profile_block.get("permission") is True)
+
+    def _emit(obj: Dict[str, object]) -> None:
+        if verbose:
+            sys.stderr.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
     r = run(
         profile_raw,
@@ -395,17 +445,13 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
             cwd=opts.cwd,
             profile_dir=profile_dir,
             extra_env=extra_env,
-            image_url=opts.image_url,
-            file_url=opts.file_url,
+            attachments=_build_attachments(opts),
             timeout_secs=opts.timeout,
-            on_partial=lambda t: verbose and sys.stderr.write(
-                f"AGENT_PARTIAL:{json.dumps(t, ensure_ascii=False)}\n"
-            ),
-            on_session=lambda sid: verbose and sys.stderr.write(f"AGENT_SESSION:{sid}\n"),
-            on_error=lambda msg: verbose and sys.stderr.write(
-                f"AGENT_ERROR:{json.dumps(msg, ensure_ascii=False)}\n"
-            ),
+            on_partial=lambda t: _emit({"type": "partial", "text": t}),
+            on_session=lambda sid: _emit({"type": "session", "id": sid}),
+            on_error=lambda msg: _emit({"type": "error", "message": msg}),
             on_stderr=lambda line: verbose and sys.stderr.write(f"[agent stderr] {line}\n"),
+            on_permission=_make_permission_handler() if permission_on else None,
         ),
     )
 

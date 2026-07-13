@@ -2,17 +2,17 @@
 /**
  * agentproc — AgentProc Protocol SDK (Node.js)
  *
- * Implements the AgentProc P0 protocol (spec/protocol.md, wire protocol 0.1).
+ * Implements the AgentProc P0 protocol (spec/protocol.md, wire protocol 0.3).
  *
- * Protocol contract:
- *   Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,
- *                      AGENT_FROM_USER, AGENT_STREAMING, AGENT_PROTOCOL_VERSION,
- *                      AGENT_IMAGE_URL, AGENT_FILE_URL
- *   Output — stdout (sentinel-prefixed lines):
- *              AGENT_SESSION:<opaque-id>     — declare session id (last wins)
- *              AGENT_PARTIAL:<json-string>   — streaming chunk
- *              AGENT_ERROR:<json-string>     — error message to forward to user
- *              everything else               = final reply body
+ * Protocol contract (wire 0.3, NDJSON both directions):
+ *   Input  — stdin: one {"type":"turn",...} line (message, session_id,
+ *                     session_name, from_user, attachments, permission,
+ *                     protocol_version). Secrets/config stay in env.
+ *   Output — stdout (one JSON object per line, discriminated by `type`):
+ *              {"type":"partial","text":...}     — streaming chunk
+ *              {"type":"text","text":...}        — final reply body
+ *              {"type":"session","id":...}       — declare session id (last wins)
+ *              {"type":"error","message":...}    — error message to forward to user
  *   Exit   — 0 success, 1 error, 124 timeout, 130 SIGINT, 143 SIGTERM
  *
  * @example
@@ -52,14 +52,13 @@ function sessionFilePath(sessionId, sessionDir) {
   if (!sessionId) {
     throw new Error('sessionId must be non-empty');
   }
-  // Defense in depth: the bridge validates AGENT_SESSION: values against
-  // SESSION_ID_RE (see isValidSessionId in runner.js), but a handler can call
-  // loadHistory with any string. Reject anything that isn't a spec-compliant
-  // session id (no path separators / whitespace / control / colon), plus the
-  // literal `.` and `..` which pass the charset (the regex allows `.`) but
-  // would path-traverse out of the sessions directory via `<id>.jsonl`.
-  // Legitimate ids like `a..b` are accepted — only exactly `.`/`..` traverse.
-  if (!isValidSessionId(sessionId) || sessionId === '.' || sessionId === '..') {
+  // Defense in depth: the bridge validates {"type":"session"} ids with
+  // isValidSessionId (see runner.js), which in 0.3 accepts any JSON string
+  // on the wire EXCEPT path separators / control chars / `.` / `..` (a
+  // storage-safety constraint, since we store each session as <id>.jsonl).
+  // A handler can call loadHistory with any string; reject anything that
+  // isn't a storage-safe filename component.
+  if (!isValidSessionId(sessionId)) {
     throw new Error(`sessionId is not a safe filename component: ${JSON.stringify(sessionId)}`);
   }
   return path.join(sessionDir || defaultSessionDir(), `${sessionId}.jsonl`);
@@ -116,30 +115,60 @@ function appendHistory(sessionId, entries, sessionDir) {
 }
 
 // ---------------------------------------------------------------------------
-// Env parsing helpers
+// Turn parsing — read the {"type":"turn",...} line from stdin
 // ---------------------------------------------------------------------------
 
-function contextFromEnv() {
+/**
+ * Read exactly one line from stdin (the turn object) and JSON-decode it.
+ * Synchronous read of fd 0 up to the first newline. Returns the parsed
+ * object, or an empty object on any failure (best-effort, fail-soft per spec).
+ */
+function readTurn() {
+  let raw = '';
+  try {
+    // Read available stdin up to the first newline. fs.readFileSync(0) reads
+    // until EOF when the bridge closed stdin (permission off); when stdin is
+    // kept open (permission on), the first line is the turn and the rest is
+    // permission_response traffic the agent-side SDK does not handle here.
+    const buf = fs.readFileSync(0, null);
+    raw = buf.toString('utf8');
+  } catch {
+    return {};
+  }
+  const nl = raw.indexOf('\n');
+  const line = nl >= 0 ? raw.slice(0, nl) : raw;
+  try {
+    const v = JSON.parse(line);
+    if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+  } catch {
+    // fall through
+  }
+  return {};
+}
+
+function contextFromTurn() {
+  const t = readTurn();
   return {
-    message: process.env.AGENT_MESSAGE || '',
-    sessionId: process.env.AGENT_SESSION_ID || '',
-    sessionName: process.env.AGENT_SESSION_NAME || 'default',
-    fromUser: process.env.AGENT_FROM_USER || '',
-    streaming: (process.env.AGENT_STREAMING || '1') !== '0',
-    protocolVersion: process.env.AGENT_PROTOCOL_VERSION || PROTOCOL_VERSION,
-    imageUrl: process.env.AGENT_IMAGE_URL || '',
-    fileUrl: process.env.AGENT_FILE_URL || '',
+    message: typeof t.message === 'string' ? t.message : '',
+    sessionId: typeof t.session_id === 'string' ? t.session_id : '',
+    sessionName: typeof t.session_name === 'string' ? t.session_name : 'default',
+    fromUser: typeof t.from_user === 'string' ? t.from_user : '',
+    protocolVersion: typeof t.protocol_version === 'string' ? t.protocol_version : PROTOCOL_VERSION,
+    attachments: Array.isArray(t.attachments) ? t.attachments : [],
+    permission: t.permission === true,
 
     /** Send a streaming chunk to the user immediately. */
-    sendPartial(text) {
+    sendPartial(text, role) {
       if (!text) return;
-      process.stdout.write(`AGENT_PARTIAL:${JSON.stringify(text)}\n`);
+      const evt = { type: 'partial', text };
+      if (role) evt.role = role;
+      process.stdout.write(JSON.stringify(evt) + '\n');
     },
 
     /** Send an error message to the user. Honored regardless of streaming mode. */
     sendError(text) {
       if (!text) return;
-      process.stdout.write(`AGENT_ERROR:${JSON.stringify(text)}\n`);
+      process.stdout.write(JSON.stringify({ type: 'error', message: text }) + '\n');
     },
   };
 }
@@ -154,7 +183,7 @@ function contextFromEnv() {
  * @param {(ctx: AgentContext) => Promise<AgentResult | string | void>} handler
  */
 function createProfile(handler) {
-  const ctx = contextFromEnv();
+  const ctx = contextFromTurn();
 
   Promise.resolve()
     .then(() => handler(ctx))
@@ -167,21 +196,20 @@ function createProfile(handler) {
       const newSessionId = typeof result === 'string' ? undefined : result.sessionId;
 
       if (newSessionId) {
-        process.stdout.write(`AGENT_SESSION:${newSessionId}\n`);
+        process.stdout.write(JSON.stringify({ type: 'session', id: newSessionId }) + '\n');
       }
       if (response) {
-        process.stdout.write(response);
-        if (!response.endsWith('\n')) process.stdout.write('\n');
+        process.stdout.write(JSON.stringify({ type: 'text', text: response }) + '\n');
       }
       process.exit(0);
     })
     .catch(err => {
       // A ProtocolError (thrown via sdk.protocolError) signals a user-facing
-      // error → emit AGENT_ERROR. The isProtocolError marker is set on the
+      // error → emit an error event. The isProtocolError marker is set on the
       // class, so legacy errors that only set the boolean still work too.
       if (err && err.isProtocolError) {
         const msg = String(err.message || 'unknown error');
-        process.stdout.write(`AGENT_ERROR:${JSON.stringify(msg)}\n`);
+        process.stdout.write(JSON.stringify({ type: 'error', message: msg }) + '\n');
         process.exit(1);
       }
       process.stderr.write(`[agentproc] handler error: ${err && err.stack || err}\n`);
@@ -190,7 +218,7 @@ function createProfile(handler) {
 }
 
 /**
- * Error surfaced to the user as an AGENT_ERROR: line. Throw an instance from
+ * Error surfaced to the user as an error event. Throw an instance from
  * a handler to report a user-readable error:
  *
  *   throw sdk.protocolError('API key expired');

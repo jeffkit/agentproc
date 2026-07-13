@@ -2,11 +2,26 @@
 
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
-- **Wire protocol** — the string injected as `AGENT_PROTOCOL_VERSION`. Currently `0.2`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `0.9`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.6.1`. Includes runner/CLI/SDK behaviour changes.
+- **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.3`. Only changes when bytes on stdin/stdout change.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.0`. Does not change the wire contract.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.7.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec / SDK 0.7.0 — wire `0.3`: full NDJSON, single-turn object I/O (doc `1.0`)
+
+A hard cutover that replaces the mixed 0.2 wire format (sentinel-prefixed stdout lines + free-text reply body + `AGENT_*` env-var input) with **NDJSON everywhere**. The "a bare `bash` echo script is a valid agent" baseline is retired: an agent now reads one `{"type":"turn",...}` object from stdin and emits typed JSON events on stdout.
+
+- **Input.** A single NDJSON line on stdin: `{"type":"turn","message","session_id","session_name","from_user","attachments","permission","protocol_version"}`. `attachments` is an array of `{type:"image"|"file", url, [filename], [mime]}`. The `AGENT_MESSAGE` / `AGENT_SESSION_ID` / `AGENT_IMAGE_URL` / `AGENT_FILE_URL` / `AGENT_PERMISSION` / `AGENT_PROTOCOL_VERSION` env vars are **removed**.
+- **Output.** Typed NDJSON events: `{"type":"partial","text"[,"role"]}`, `{"type":"text","text"}`, `{"type":"session","id"}`, `{"type":"error","message"}`, plus (when permission is on) `{"type":"permission_request",...}` / `{"type":"permission_response",...}`. The reply body is the concatenation of `{"type":"text"}` events. The `AGENT_PARTIAL:` / `AGENT_SESSION:` / `AGENT_ERROR:` / `AGENT_PERMISSION_REQUEST:` / `AGENT_PERMISSION_RESPONSE:` prefixes are gone; there is no implicit free-text body — every byte is a JSON event.
+- **Event vocabulary is closed.** No new `type`s are added without a spec revision. Malformed lines (non-JSON, non-object, no `type`, unknown `type`) are dropped, not appended to the reply.
+- **Profile.** `command` is always argv[0] (never split); `args` is an explicit list. `env_inherit` is removed — the child inherits the bridge's environment unchanged. `${VAR}` expansion is still gated by `env_allowlist`. Session ids are relaxed on the wire (any JSON string) but the SDK history helpers still require storage-safe ids.
+- **Hard cutover.** Runners only support 0.3; 0.2 is retired. There is no dual-mode fallback.
+- **Versions.** Wire protocol `0.2` → `0.3`. Spec document revision `0.9` → `1.0`. SDK packages `0.6.1` → `0.7.0` (Python + Node, breaking).
+- **Runners (Node + Python).** `normalizeProfile` / `normalize_profile` drop `env_inherit` and stop splitting `command`; `classifyLine` / `classify_line` now JSON-parse and dispatch on `type`; `run()` writes the turn object to the agent's stdin (one NDJSON line), injects no `AGENT_*` env, and forwards `{"type":"partial"}` only when the profile's `streaming` is true.
+- **SDK entry points.** `createProfile` / `create_profile` handlers receive a `turn` object (with `attachments`) instead of an `AgentContext`/`ctx` built from env; `sendPartial` / `send_partial` (optional `role`), `sendError` / `send_error`, session, and text events are emitted as compact NDJSON. Python serializes with `separators=(',',':')` so wire bytes match Node's `JSON.stringify`.
+- **Hub.** All 14 hub bridges (`bridge.py` + `bridge.js`) and `profile.yaml`s migrated: shared `stream_utils` reads the turn from stdin and emits NDJSON; new `run_plain_cli` / `runPlainCli` helper for one-shot CLIs (aider, pi, deepseek, agy); `claude-code`, `codex`, `codebuddy`, `recursive` carry their custom permission/session logic over to NDJSON permission events. `codex/permission_map.js` drops the `permissionEnabled` env-var probe.
+- **Examples.** `examples/bash/echo_agent.sh`, `examples/python/claude_bridge.py`, `examples/node/claude_bridge.js` rewritten for the turn-in / events-out wire.
 
 ### Spec / SDK 0.6.1 — secure-by-default env inheritance (doc `0.9`)
 

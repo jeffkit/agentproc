@@ -13,10 +13,9 @@ const {
   permissionResponseToControl,
   buildArgs,
   buildPermissionArgs,
-  permissionEnabled,
 } = require(path.join(__dirname, 'bridge.js'));
 
-test('control_request can_use_tool → AGENT_PERMISSION_REQUEST shape', () => {
+test('control_request can_use_tool → {"type":"permission_request"} shape', () => {
   const req = controlToPermissionRequest({
     type: 'control_request',
     request_id: '1f86c122-dbad-46bd-8be6-28f049772de9',
@@ -83,10 +82,4 @@ test('buildArgs uses skip-permissions; buildPermissionArgs uses stdio prompt too
   assert.ok(perm.includes('stdio'));
   assert.ok(!perm.includes('--dangerously-skip-permissions'));
   assert.ok(perm.includes('--input-format'));
-});
-
-test('permissionEnabled reads AGENT_PERMISSION', () => {
-  assert.strictEqual(permissionEnabled({ AGENT_PERMISSION: '1' }), true);
-  assert.strictEqual(permissionEnabled({ AGENT_PERMISSION: '0' }), false);
-  assert.strictEqual(permissionEnabled({}), false);
 });

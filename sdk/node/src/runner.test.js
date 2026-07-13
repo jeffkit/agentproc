@@ -1,14 +1,18 @@
 'use strict';
 /**
- * Tests for runner.js — the AgentProc canonical bridge implementation.
+ * Tests for runner.js — the AgentProc canonical bridge implementation (wire 0.3).
  *
  * Run with: `node --test src/runner.test.js`
  *
  * Strategy:
- *   1. Pure-function tests: classifyLine, decodeJsonValue, substitute,
- *      normalizeProfile, expandEnvRef — no subprocess.
- *   2. run() end-to-end tests: spawn a tiny bash/node helper script that
- *      emits protocol lines, assert the runner classifies them correctly.
+ *   1. Pure-function tests: classifyLine, substitute, expandEnvRef, expandPath,
+ *      normalizeProfile, isValidSessionId — no subprocess.
+ *   2. run() end-to-end tests: spawn a tiny bash/node helper script that emits
+ *      NDJSON events on stdout, assert the runner classifies them correctly.
+ *
+ * Wire 0.3: every agent stdout line is a JSON object (an NDJSON event); the
+ * per-turn request travels on stdin as a {"type":"turn",...} object (no
+ * AGENT_* env vars). `command` is always argv[0] and is never split.
  */
 
 const { test, describe } = require('node:test');
@@ -20,8 +24,6 @@ const path = require('node:path');
 const {
   run,
   classifyLine,
-  decodeJsonValue,
-  decodeJsonObject,
   formatPermissionResponse,
   isValidPermissionRequest,
   substitute,
@@ -37,61 +39,71 @@ const {
 // ---------------------------------------------------------------------------
 
 describe('classifyLine', () => {
-  test('identifies AGENT_SESSION:', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_SESSION:abc-123'), { kind: 'session', value: 'abc-123' });
+  test('identifies {"type":"session"}', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"session","id":"abc-123"}'), { kind: 'session', value: 'abc-123' });
   });
 
-  test('strips whitespace from session id', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_SESSION:  abc-123  '), { kind: 'session', value: 'abc-123' });
+  test('session missing id → empty string', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"session"}'), { kind: 'session', value: '' });
   });
 
-  test('identifies AGENT_PARTIAL: with JSON string', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_PARTIAL:"hello"'), { kind: 'partial', value: 'hello' });
+  test('session non-string id → empty string', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"session","id":123}'), { kind: 'session', value: '' });
   });
 
-  test('AGENT_PARTIAL: with newline in JSON', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_PARTIAL:"line1\\nline2"'), { kind: 'partial', value: 'line1\nline2' });
+  test('identifies {"type":"partial"}', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"partial","text":"hello"}'), { kind: 'partial', value: 'hello' });
   });
 
-  test('AGENT_PARTIAL: lenient on bad JSON — treats as raw text', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_PARTIAL:not json'), { kind: 'partial', value: 'not json' });
+  test('partial with newline in text', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"partial","text":"line1\\nline2"}'), { kind: 'partial', value: 'line1\nline2' });
   });
 
-  test('AGENT_PARTIAL: empty value', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_PARTIAL:'), { kind: 'partial', value: '' });
+  test('partial empty text', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"partial","text":""}'), { kind: 'partial', value: '' });
   });
 
-  test('identifies AGENT_ERROR:', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_ERROR:"rate limited"'), { kind: 'error', value: 'rate limited' });
+  test('partial with role carries role field', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"partial","text":"x","role":"thinking"}'), { kind: 'partial', value: 'x', role: 'thinking' });
   });
 
-  test('AGENT_ERROR: lenient on bad JSON', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_ERROR:boom'), { kind: 'error', value: 'boom' });
+  test('partial non-string role is dropped', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"partial","text":"y","role":42}'), { kind: 'partial', value: 'y' });
   });
 
-  test('identifies AGENT_PERMISSION_REQUEST:', () => {
-    const c = classifyLine('AGENT_PERMISSION_REQUEST:{"request_id":"1","tool_name":"Bash","input":{}}');
+  test('identifies {"type":"text"}', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"text","text":"hello world"}'), { kind: 'text', value: 'hello world' });
+  });
+
+  test('identifies {"type":"error"}', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"error","message":"rate limited"}'), { kind: 'error', value: 'rate limited' });
+  });
+
+  test('identifies {"type":"permission_request"}', () => {
+    const c = classifyLine('{"type":"permission_request","request_id":"1","tool_name":"Bash","input":{}}');
     assert.strictEqual(c.kind, 'permission_request');
-    assert.deepStrictEqual(c.value, { request_id: '1', tool_name: 'Bash', input: {} });
+    assert.deepStrictEqual(c.value, { type: 'permission_request', request_id: '1', tool_name: 'Bash', input: {} });
   });
 
-  test('AGENT_PERMISSION_REQUEST: malformed JSON → null value', () => {
-    const c = classifyLine('AGENT_PERMISSION_REQUEST:not-json');
-    assert.strictEqual(c.kind, 'permission_request');
-    assert.strictEqual(c.value, null);
+  test('plain text line → malformed', () => {
+    assert.deepStrictEqual(classifyLine('hello world'), { kind: 'malformed', value: 'hello world' });
   });
 
-  test('body line: anything else', () => {
-    assert.deepStrictEqual(classifyLine('hello world'), { kind: 'body', value: 'hello world' });
+  test('empty line → malformed', () => {
+    assert.deepStrictEqual(classifyLine(''), { kind: 'malformed', value: '' });
   });
 
-  test('body line: line starting with space is NOT a protocol line', () => {
-    // Per spec: agents that want their text to NOT be a protocol line should prefix with space.
-    assert.deepStrictEqual(classifyLine(' AGENT_SESSION:foo'), { kind: 'body', value: ' AGENT_SESSION:foo' });
+  test('valid JSON but not an object → malformed', () => {
+    assert.deepStrictEqual(classifyLine('42'), { kind: 'malformed', value: '42' });
+    assert.deepStrictEqual(classifyLine('[1,2,3]'), { kind: 'malformed', value: '[1,2,3]' });
   });
 
-  test('body line: prefix-like but not exact prefix', () => {
-    assert.deepStrictEqual(classifyLine('AGENT_SESSION'), { kind: 'body', value: 'AGENT_SESSION' });
+  test('object without type → malformed', () => {
+    assert.deepStrictEqual(classifyLine('{"foo":"bar"}'), { kind: 'malformed', value: '{"foo":"bar"}' });
+  });
+
+  test('unknown type → malformed', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"unknown"}'), { kind: 'malformed', value: '{"type":"unknown"}' });
   });
 });
 
@@ -112,56 +124,37 @@ describe('isValidSessionId', () => {
     assert.strictEqual(isValidSessionId(''), false);
   });
 
-  test('whitespace rejected', () => {
-    assert.strictEqual(isValidSessionId('has space'), false);
+  test('wire 0.3: spaces ARE allowed', () => {
+    // The 0.2 colon-delimited prefix banned whitespace; 0.3 has no such prefix,
+    // so a session id may contain spaces (only storage-safety rules remain).
+    assert.ok(isValidSessionId('has space'));
+  });
+
+  test('wire 0.3: colons ARE allowed', () => {
+    assert.ok(isValidSessionId('thread:abc'));
+  });
+
+  test('wire 0.3: plus IS allowed', () => {
+    assert.ok(isValidSessionId('a+b'));
+  });
+
+  test('control chars rejected (storage safety)', () => {
+    assert.strictEqual(isValidSessionId('ctrl\x07char'), false);
     assert.strictEqual(isValidSessionId('tab\there'), false);
   });
 
-  test('colon rejected', () => {
-    assert.strictEqual(isValidSessionId('thread:abc'), false);
-  });
-
-  test('control chars rejected', () => {
-    assert.strictEqual(isValidSessionId('ctrl\x07char'), false);
-  });
-
-  test('url-safe chars allowed (no / or +)', () => {
-    // Valid set: letters, digits, . _ ~ = -
-    assert.ok(isValidSessionId('a.b_c~d=e-h'));
-  });
-
   test('slash rejected (path-traversal vector)', () => {
-    // `/` is excluded so the id is safe as a <id>.jsonl filename component.
     assert.strictEqual(isValidSessionId('a/b'), false);
-    assert.strictEqual(isValidSessionId('../../tmp/x'), false);
+    assert.strictEqual(isValidSessionId('..\\..\\tmp'), false);
   });
 
-  test('plus rejected', () => {
-    // `+` is excluded to keep the "URL-safe" label honest (standard base64
-    // uses + and /; base64url uses - and _).
-    assert.strictEqual(isValidSessionId('a+b'), false);
-  });
-});
-
-describe('decodeJsonValue', () => {
-  test('JSON string', () => {
-    assert.strictEqual(decodeJsonValue('"hi"'), 'hi');
+  test('dot and dotdot rejected', () => {
+    assert.strictEqual(isValidSessionId('.'), false);
+    assert.strictEqual(isValidSessionId('..'), false);
   });
 
-  test('JSON string with newline', () => {
-    assert.strictEqual(decodeJsonValue('"a\\nb"'), 'a\nb');
-  });
-
-  test('empty', () => {
-    assert.strictEqual(decodeJsonValue(''), '');
-  });
-
-  test('lenient: non-JSON returns trimmed raw', () => {
-    assert.strictEqual(decodeJsonValue('  not json  '), 'not json');
-  });
-
-  test('JSON number becomes string', () => {
-    assert.strictEqual(decodeJsonValue('42'), '42');
+  test('legitimate ids that contain `..` are accepted (no false positive)', () => {
+    assert.ok(isValidSessionId('a..b'));
   });
 });
 
@@ -176,6 +169,10 @@ describe('substitute', () => {
 
   test('replaces SESSION_NAME', () => {
     assert.strictEqual(substitute('n={{SESSION_NAME}}', { sessionName: 'work' }), 'n=work');
+  });
+
+  test('replaces PROFILE_DIR', () => {
+    assert.strictEqual(substitute('d={{PROFILE_DIR}}', { profileDir: '/p' }), 'd=/p');
   });
 
   test('empty SESSION_ID when new session', () => {
@@ -217,7 +214,6 @@ describe('expandEnvRef', () => {
   });
 
   test('allowlist blocks unlisted var', () => {
-    // AWS_SECRET is in env but not in allowlist → blocked, expands to empty.
     assert.strictEqual(
       expandEnvRef('${AWS_SECRET_ACCESS_KEY}', { AWS_SECRET_ACCESS_KEY: 's3cr3t' }, new Set(['HOME'])),
       '',
@@ -255,16 +251,16 @@ describe('expandPath', () => {
 });
 
 describe('normalizeProfile', () => {
-  test('minimal valid profile', () => {
-    const p = normalizeProfile({ command: 'bash ./x.sh' });
-    assert.deepStrictEqual(p.argv, ['bash', './x.sh']);
-    assert.strictEqual(p.stdin, 'none');
+  test('minimal valid profile — command is argv[0], never split', () => {
+    const p = normalizeProfile({ command: 'bash' });
+    assert.deepStrictEqual(p.argv, ['bash']);
+    assert.deepStrictEqual(p.args, []);
     assert.strictEqual(p.streaming, true);
   });
 
   test('hub form: profile nested under agentproc:', () => {
-    const p = normalizeProfile({ agentproc: { command: 'node ./x.js' } });
-    assert.deepStrictEqual(p.argv, ['node', './x.js']);
+    const p = normalizeProfile({ agentproc: { command: 'node' } });
+    assert.deepStrictEqual(p.argv, ['node']);
   });
 
   test('rejects missing command', () => {
@@ -279,13 +275,11 @@ describe('normalizeProfile', () => {
     assert.throws(() => normalizeProfile(null), /must be an object/);
   });
 
-  test('argv splits on whitespace, multiple spaces', () => {
-    const p = normalizeProfile({ command: 'bash    ./spaced.sh' });
-    assert.deepStrictEqual(p.argv, ['bash', './spaced.sh']);
-  });
-
-  test('args field defaults to empty array', () => {
-    const p = normalizeProfile({ command: 'x' });
+  test('wire 0.3: command with whitespace is kept whole (no shorthand split)', () => {
+    // The 0.2 "args absent ⇒ split command" shorthand is gone. A command with
+    // spaces is argv[0] verbatim; use `args` for the rest.
+    const p = normalizeProfile({ command: 'python3 ./bridge.py' });
+    assert.deepStrictEqual(p.argv, ['python3 ./bridge.py']);
     assert.deepStrictEqual(p.args, []);
   });
 
@@ -294,37 +288,10 @@ describe('normalizeProfile', () => {
     assert.deepStrictEqual(p.args, ['--foo', '42']);
   });
 
-  test('command is split into argv when args is empty (legacy shorthand)', () => {
-    const p = normalizeProfile({ command: 'python3 ./bridge.py' });
-    assert.deepStrictEqual(p.argv, ['python3', './bridge.py']);
-  });
-
-  test('command is kept whole when args is non-empty (explicit form)', () => {
-    // Lets paths with whitespace stay whole as argv[0].
-    const p = normalizeProfile({
-      command: '/path with spaces/my agent',
-      args: ['--flag', 'value'],
-    });
-    assert.deepStrictEqual(p.argv, ['/path with spaces/my agent']);
-    assert.deepStrictEqual(p.args, ['--flag', 'value']);
-  });
-
-  test('command is kept whole when args is an explicit empty array', () => {
-    // `args: []` (present but empty) tells the bridge: do not split.
-    // Distinct from args being absent (which falls back to the shorthand).
-    const p = normalizeProfile({
-      command: '/path with spaces/my agent',
-      args: [],
-    });
-    assert.deepStrictEqual(p.argv, ['/path with spaces/my agent']);
-    assert.deepStrictEqual(p.args, []);
-  });
-
-  test('command is split when args is null (treated as absent)', () => {
-    // Hand-written YAML may parse `args:` with no value as null. Treat null
-    // the same as absent — fall back to the whitespace-splitting shorthand.
+  test('args null → empty array (treated as absent, NOT split)', () => {
     const p = normalizeProfile({ command: 'python3 ./bridge.py', args: null });
-    assert.deepStrictEqual(p.argv, ['python3', './bridge.py']);
+    assert.deepStrictEqual(p.argv, ['python3 ./bridge.py']);
+    assert.deepStrictEqual(p.args, []);
   });
 
   test('cwd ~ is expanded', () => {
@@ -332,11 +299,17 @@ describe('normalizeProfile', () => {
     assert.strictEqual(p.cwd, path.join(os.homedir(), 'proj'));
   });
 
-  test('stdin: message → message, anything else → none', () => {
-    assert.strictEqual(normalizeProfile({ command: 'x', stdin: 'message' }).stdin, 'message');
-    assert.strictEqual(normalizeProfile({ command: 'x', stdin: 'none' }).stdin, 'none');
-    assert.strictEqual(normalizeProfile({ command: 'x', stdin: 'bogus' }).stdin, 'none');
-    assert.strictEqual(normalizeProfile({ command: 'x' }).stdin, 'none');
+  test('wire 0.3: no `stdin` field on the normalized profile', () => {
+    const p = normalizeProfile({ command: 'x' });
+    assert.strictEqual(p.stdin, undefined);
+  });
+
+  test('wire 0.3: no `env_inherit` field on the normalized profile', () => {
+    const p = normalizeProfile({ command: 'x' });
+    assert.strictEqual(p.env_inherit, undefined);
+    // Even if a legacy profile supplies it, it is ignored (not honored).
+    const p2 = normalizeProfile({ command: 'x', env_inherit: 'all' });
+    assert.strictEqual(p2.env_inherit, undefined);
   });
 
   test('permission defaults false; true only when boolean true', () => {
@@ -354,24 +327,6 @@ describe('normalizeProfile', () => {
 
   test('env_allowlist absent → null', () => {
     assert.strictEqual(normalizeProfile({ command: 'x', env: { A: '1' } }).env_allowlist, null);
-  });
-
-  test('env_inherit defaults to minimal', () => {
-    assert.strictEqual(normalizeProfile({ command: 'x' }).env_inherit, 'minimal');
-  });
-
-  test('env_inherit: all accepted', () => {
-    assert.strictEqual(
-      normalizeProfile({ command: 'x', env_inherit: 'all' }).env_inherit,
-      'all',
-    );
-  });
-
-  test('env_inherit invalid value throws', () => {
-    assert.throws(
-      () => normalizeProfile({ command: 'x', env_inherit: 'everything' }),
-      /env_inherit/,
-    );
   });
 
   test('env_allowlist parsed to Set', () => {
@@ -397,37 +352,47 @@ function writeScript(content) {
   return file;
 }
 
+/** Write a Node agent that reads the turn from stdin and emits NDJSON events. */
+function writeNodeAgent(src) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-runner-'));
+  const file = path.join(dir, 'agent.js');
+  fs.writeFileSync(file, src);
+  return file;
+}
+
+/** Profile that runs a Node agent: { command: node, args: [script] }. */
+function nodeProfile(script) {
+  return { command: process.execPath, args: [script] };
+}
+
 describe('run() — end-to-end', () => {
-  test('simple reply body', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "hello"\n');
-    const r = await run(
-      { command: agent },
-      { message: 'hi' },
-    );
-    assert.strictEqual(r.reply.trim(), 'hello');
+  test('simple text event → reply', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\necho \'{"type":"text","text":"hello"}\'\n');
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'hello');
     assert.strictEqual(r.sessionId, '');
     assert.strictEqual(r.error, '');
     assert.strictEqual(r.exitCode, 0);
   });
 
-  test('AGENT_SESSION: last wins', async () => {
+  test('session last wins', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "AGENT_SESSION:first"\n' +
-      'echo "AGENT_SESSION:second"\n' +
-      'echo "done"\n'
+      'echo \'{"type":"session","id":"first"}\'\n' +
+      'echo \'{"type":"session","id":"second"}\'\n' +
+      'echo \'{"type":"text","text":"done"}\'\n'
     );
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.sessionId, 'second');
-    assert.strictEqual(r.reply.trim(), 'done');
+    assert.strictEqual(r.reply, 'done');
   });
 
-  test('AGENT_PARTIAL: triggers onPartial callback', async () => {
+  test('partial triggers onPartial callback', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "AGENT_PARTIAL:\\"chunk1\\""\n' +
-      'echo "AGENT_PARTIAL:\\"chunk2\\""\n' +
-      'echo "final"\n'
+      'echo \'{"type":"partial","text":"chunk1"}\'\n' +
+      'echo \'{"type":"partial","text":"chunk2"}\'\n' +
+      'echo \'{"type":"text","text":"final"}\'\n'
     );
     const partials = [];
     const r = await run(
@@ -435,14 +400,25 @@ describe('run() — end-to-end', () => {
       { message: 'hi', onPartial: (t) => partials.push(t) },
     );
     assert.deepStrictEqual(partials, ['chunk1', 'chunk2']);
-    assert.strictEqual(r.reply.trim(), 'final');
+    assert.strictEqual(r.reply, 'final');
   });
 
-  test('AGENT_PARTIAL: when streaming=false, onPartial NOT called', async () => {
+  test('partial role is passed to onPartial', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "AGENT_PARTIAL:\\"chunk1\\""\n' +
-      'echo "final"\n'
+      'echo \'{"type":"partial","text":"thinking...","role":"thinking"}\'\n' +
+      'echo \'{"type":"text","text":"ok"}\'\n'
+    );
+    const seen = [];
+    await run({ command: agent }, { message: 'hi', onPartial: (t, role) => seen.push({ t, role }) });
+    assert.deepStrictEqual(seen, [{ t: 'thinking...', role: 'thinking' }]);
+  });
+
+  test('streaming=false → onPartial NOT called, text still captured', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"partial","text":"chunk1"}\'\n' +
+      'echo \'{"type":"text","text":"final"}\'\n'
     );
     const partials = [];
     const r = await run(
@@ -450,15 +426,14 @@ describe('run() — end-to-end', () => {
       { message: 'hi', streaming: false, onPartial: (t) => partials.push(t) },
     );
     assert.deepStrictEqual(partials, []);
-    // partial lines are still NOT added to reply body (they're protocol lines)
-    assert.strictEqual(r.reply.trim(), 'final');
+    assert.strictEqual(r.reply, 'final');
   });
 
-  test('AGENT_ERROR: surfaces in result.error', async () => {
+  test('error event surfaces in result.error', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "AGENT_PARTIAL:\\"thinking...\\""\n' +
-      'echo "AGENT_ERROR:\\"rate limited\\""\n' +
+      'echo \'{"type":"partial","text":"thinking..."}\'\n' +
+      'echo \'{"type":"error","message":"rate limited"}\'\n' +
       'exit 1\n'
     );
     const r = await run({ command: agent }, { message: 'hi' });
@@ -466,10 +441,10 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.exitCode, 1);
   });
 
-  test('AGENT_ERROR: marks exit 1 even if process exits 0', async () => {
+  test('error event marks exit 1 even if process exits 0', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "AGENT_ERROR:\\"soft fail\\""\n' +
+      'echo \'{"type":"error","message":"soft fail"}\'\n' +
       'exit 0\n'
     );
     const r = await run({ command: agent }, { message: 'hi' });
@@ -477,15 +452,36 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.exitCode, 1);
   });
 
-  test('reply body lines are NOT prefixed with protocol markers', async () => {
+  test('multiple text events concatenate with no separator', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo " AGENT_SESSION:foo"\n' +  // leading space → body
-      'echo "real reply"\n'
+      'echo \'{"type":"text","text":"a"}\'\n' +
+      'echo \'{"type":"text","text":"b"}\'\n' +
+      'echo \'{"type":"text","text":"c"}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'abc');
+  });
+
+  test('text event preserves embedded newlines', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      "echo '{\"type\":\"text\",\"text\":\"line 1\\nline 2\\nline 3\"}'\n"
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'line 1\nline 2\nline 3');
+  });
+
+  test('malformed stdout lines are ignored, never appended to reply', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo " AGENT_SESSION:foo"\n' +   // plain text → malformed (leading space irrelevant)
+      'echo "not json"\n' +             // malformed
+      'echo \'{"type":"text","text":"real reply"}\'\n'
     );
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.sessionId, '');
-    assert.strictEqual(r.reply.trim().split('\n').length, 2);
+    assert.strictEqual(r.reply, 'real reply');
   });
 
   test('exit code propagates from agent', async () => {
@@ -494,95 +490,88 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.exitCode, 3);
   });
 
-  test('message is injected as AGENT_MESSAGE', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "got: $AGENT_MESSAGE"\n');
-    const r = await run({ command: agent }, { message: 'payload' });
-    assert.strictEqual(r.reply.trim(), 'got: payload');
-  });
-
-  test('AGENT_SESSION_ID injected from options.sessionId', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "prev: $AGENT_SESSION_ID"\n');
-    const r = await run({ command: agent }, { message: 'hi', sessionId: 'prev-123' });
-    assert.strictEqual(r.reply.trim(), 'prev: prev-123');
-  });
-
-  test('AGENT_PROTOCOL_VERSION injected', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "pv=$AGENT_PROTOCOL_VERSION"\n');
-    const r = await run({ command: agent }, { message: 'hi' });
-    assert.strictEqual(r.reply.trim(), `pv=${PROTOCOL_VERSION}`);
-  });
-
-  test('AGENT_STREAMING reflects streaming option', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "stream=$AGENT_STREAMING"\n');
-    const r1 = await run({ command: agent }, { message: 'hi' });
-    assert.strictEqual(r1.reply.trim(), 'stream=1');
-    const r2 = await run({ command: agent }, { message: 'hi', streaming: false });
-    assert.strictEqual(r2.reply.trim(), 'stream=0');
-  });
-
-  test('profile.env injects env vars with ${VAR} expansion', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "MY_KEY=$MY_KEY"\n');
-    const r = await run(
-      { command: agent, env: { MY_KEY: '${HOME}' } },
-      { message: 'hi' },
+  test('wire 0.3: AGENT_* env vars are NOT injected', async () => {
+    // The per-turn request travels on stdin, not env. An agent reading
+    // $AGENT_MESSAGE must see it unset.
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"m=<${AGENT_MESSAGE:-unset}>\\"}"\n'
     );
-    assert.strictEqual(r.reply.trim(), `MY_KEY=${process.env.HOME}`);
+    const r = await run({ command: agent }, { message: 'payload' });
+    assert.strictEqual(r.reply, 'm=<unset>');
+  });
+
+  test('the turn object is written to stdin (message, session, from_user, protocol_version)', async () => {
+    const agent = writeNodeAgent(
+      "const fs=require('fs');\n" +
+      "const line=fs.readFileSync(0,'utf8').split('\\n')[0];\n" +
+      "const t=JSON.parse(line);\n" +
+      "const out={type:'text',text:['msg='+t.message,'sid='+t.session_id,'sname='+t.session_name,'from='+t.from_user,'pv='+t.protocol_version].join('|')};\n" +
+      "process.stdout.write(JSON.stringify(out)+'\\n');\n"
+    );
+    const r = await run(
+      nodeProfile(agent),
+      { message: 'hello', sessionId: 'prev-123', sessionName: 'work', fromUser: 'u123' },
+    );
+    assert.strictEqual(r.reply, 'msg=hello|sid=prev-123|sname=work|from=u123|pv=' + PROTOCOL_VERSION);
+  });
+
+  test('attachments travel in the turn object on stdin', async () => {
+    const agent = writeNodeAgent(
+      "const fs=require('fs');\n" +
+      "const line=fs.readFileSync(0,'utf8').split('\\n')[0];\n" +
+      "const t=JSON.parse(line);\n" +
+      "const atts=(t.attachments||[]).map(a=>a.kind+':'+a.url).join(',');\n" +
+      "process.stdout.write(JSON.stringify({type:'text',text:'atts='+atts})+'\\n');\n"
+    );
+    const r = await run(
+      nodeProfile(agent),
+      {
+        message: 'hi',
+        attachments: [
+          { kind: 'image', url: 'https://example.com/a.png' },
+          { kind: 'file', url: 'https://example.com/b.pdf' },
+        ],
+      },
+    );
+    assert.strictEqual(r.reply, 'atts=image:https://example.com/a.png,file:https://example.com/b.pdf');
   });
 
   test('{{MESSAGE}} placeholder in args', async () => {
-    const agent = writeScript(
-      '#!/usr/bin/env bash\necho "args: $1"\n'
-    );
+    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"text\\",\\"text\\":\\"args:$1\\"}"\n');
     const r = await run(
       { command: agent, args: ['{{MESSAGE}}'] },
       { message: 'hello' },
     );
-    assert.strictEqual(r.reply.trim(), 'args: hello');
+    assert.strictEqual(r.reply, 'args:hello');
+  });
+
+  test('profile.env injects env vars with ${VAR} expansion', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"text\\",\\"text\\":\\"MY_KEY=$MY_KEY\\"}"\n');
+    const r = await run(
+      { command: agent, env: { MY_KEY: '${HOME}' } },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.reply, `MY_KEY=${process.env.HOME}`);
   });
 
   test('extraEnv from options is applied', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "x=$X"\n');
+    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"text\\",\\"text\\":\\"x=$X\\"}"\n');
     const r = await run(
       { command: agent },
       { message: 'hi', extraEnv: { X: 'extra' } },
     );
-    assert.strictEqual(r.reply.trim(), 'x=extra');
-  });
-
-  test('stdin: message — agent reads AGENT_MESSAGE from stdin', async () => {
-    const agent = writeScript(
-      '#!/usr/bin/env bash\nread line\necho "stdin: $line"\n'
-    );
-    const r = await run(
-      { command: agent, stdin: 'message' },
-      { message: 'via-stdin' },
-    );
-    assert.strictEqual(r.reply.trim(), 'stdin: via-stdin');
+    assert.strictEqual(r.reply, 'x=extra');
   });
 
   test('timeout kills long-running agent', async () => {
-    const agent = writeScript(
-      '#!/usr/bin/env bash\nsleep 30\necho "should not reach"\n'
-    );
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\necho "should not reach"\n');
     const r = await run(
       { command: agent, kill_grace_secs: 1 },
       { message: 'hi', timeoutSecs: 1 },
     );
     assert.strictEqual(r.timedOut, true);
     assert.strictEqual(r.exitCode, 124);
-  });
-
-  test('multiline reply body preserves newlines', async () => {
-    const agent = writeScript(
-      '#!/usr/bin/env bash\n' +
-      'echo "line 1"\n' +
-      'echo "line 2"\n' +
-      'echo "line 3"\n'
-    );
-    const r = await run({ command: agent }, { message: 'hi' });
-    // Lines are joined with \n; the trailing newline is the caller's responsibility
-    // (the CLI adds it when printing).
-    assert.strictEqual(r.reply, 'line 1\nline 2\nline 3');
   });
 
   test('spawn error (command not found) → exit 1', async () => {
@@ -598,8 +587,7 @@ describe('run() — end-to-end', () => {
     process.env.SECRET_KEY = 'top-secret';
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "ALLOWED=$ALLOWED_KEY"\n' +
-      'echo "SECRET=$SECRET_KEY"\n',
+      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"ALLOWED=$ALLOWED_KEY SECRET=$SECRET_KEY\\"}"\n',
     );
     try {
       const warnings = [];
@@ -615,7 +603,6 @@ describe('run() — end-to-end', () => {
         { message: 'hi', onStderr: (s) => warnings.push(s) },
       );
       assert.ok(r.reply.includes('ALLOWED=ok-val'), `reply was: ${r.reply}`);
-      // SECRET_KEY was blocked → expands to empty → agent sees empty value.
       assert.ok(r.reply.includes('SECRET='), `reply was: ${r.reply}`);
       assert.ok(!r.reply.includes('top-secret'), `secret leaked: ${r.reply}`);
       assert.ok(warnings.some((w) => w.includes('SECRET_KEY') && w.includes('allowlist')));
@@ -625,135 +612,57 @@ describe('run() — end-to-end', () => {
     }
   });
 
-  test('env_allowlist stops undeclared secrets from leaking via inheritance', async () => {
-    // A secret present in the bridge env but NOT referenced by the profile's
-    // env block must NOT reach the agent. Default inheritance is minimal infra,
-    // so undeclared secrets never leak via process.env wholesale.
-    process.env.BRIDGE_AWS_SECRET = 'aws-top-secret';
+  test('undeclared secrets do not leak (minimal infra base, no env_inherit: all)', async () => {
     process.env.BRIDGE_DB_PASSWORD = 'db-top-secret';
-    const agent = writeScript(
-      '#!/usr/bin/env bash\n' +
-      'echo "AWS=${BRIDGE_AWS_SECRET:-unset}"\n' +
-      'echo "DB=${BRIDGE_DB_PASSWORD:-unset}"\n' +
-      'echo "PATH_SET=${PATH:+yes}"\n',
-    );
-    try {
-      const r = await run(
-        {
-          command: agent,
-          // Profile declares AWS only; DB is left undeclared.
-          env: { BRIDGE_AWS_SECRET: '${BRIDGE_AWS_SECRET}' },
-          env_allowlist: ['BRIDGE_AWS_SECRET'],
-        },
-        { message: 'hi' },
-      );
-      // Declared + allowlisted → reaches the agent.
-      assert.ok(r.reply.includes('AWS=aws-top-secret'), `reply: ${r.reply}`);
-      // Undeclared secret must NOT leak via inheritance.
-      assert.ok(!r.reply.includes('db-top-secret'), `db leaked: ${r.reply}`);
-      assert.ok(r.reply.includes('DB=unset'), `db leaked: ${r.reply}`);
-      // Infra (PATH) still present so the agent can run.
-      assert.ok(r.reply.includes('PATH_SET=yes'), `PATH missing: ${r.reply}`);
-    } finally {
-      delete process.env.BRIDGE_AWS_SECRET;
-      delete process.env.BRIDGE_DB_PASSWORD;
-    }
-  });
-
-  test('default env_inherit=minimal → undeclared secrets do not leak', async () => {
     process.env.AGENTPROC_SECURE_DEFAULT_LEAK = 'should-not-leak';
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset}"\n' +
-      'echo "PATH_SET=${PATH:+yes}"\n',
+      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"DB=${BRIDGE_DB_PASSWORD:-unset} LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset} PATH_SET=${PATH:+yes}\\"}"\n',
     );
     try {
-      const r = await run({ command: agent }, { message: 'hi' });
+      const r = await run(
+        { command: agent, env: { BRIDGE_DB_PASSWORD: '${BRIDGE_DB_PASSWORD}' } },
+        { message: 'hi' },
+      );
+      // Declared (no allowlist ⇒ all permitted) → reaches the agent.
+      assert.ok(r.reply.includes('DB=db-top-secret'), `reply: ${r.reply}`);
+      // Undeclared secret never leaks via inheritance (infra base only).
       assert.ok(r.reply.includes('LEAK=unset'), `reply: ${r.reply}`);
       assert.ok(!r.reply.includes('should-not-leak'), `leaked: ${r.reply}`);
+      // Infra (PATH) still present so the agent can run.
       assert.ok(r.reply.includes('PATH_SET=yes'), `PATH missing: ${r.reply}`);
     } finally {
+      delete process.env.BRIDGE_DB_PASSWORD;
       delete process.env.AGENTPROC_SECURE_DEFAULT_LEAK;
     }
   });
 
-  test('env_inherit: all → child inherits full process.env', async () => {
-    // Escape hatch for legacy trust-the-profile behaviour.
-    process.env.AGENTPROC_BACKCOMPAT_LEAK = 'leaked-by-design';
+  test('invalid session id (path separator) ignored, preserves previous valid id', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "LEAK=${AGENTPROC_BACKCOMPAT_LEAK:-unset}"\n',
-    );
-    try {
-      const r = await run(
-        { command: agent, env_inherit: 'all' },
-        { message: 'hi' },
-      );
-      assert.ok(r.reply.includes('LEAK=leaked-by-design'), `reply: ${r.reply}`);
-    } finally {
-      delete process.env.AGENTPROC_BACKCOMPAT_LEAK;
-    }
-  });
-
-  test('attachment passthrough reaches agent env', async () => {
-    const agent = writeScript(
-      '#!/usr/bin/env bash\n' +
-      'echo "IMG=$AGENT_IMAGE_URL"\n' +
-      'echo "FILE=$AGENT_FILE_URL"\n',
-    );
-    const r = await run(
-      { command: agent },
-      {
-        message: 'hi',
-        imageUrl: 'https://example.com/a.png',
-        fileUrl: 'https://example.com/b.pdf',
-      },
-    );
-    assert.ok(r.reply.includes('IMG=https://example.com/a.png'), `reply: ${r.reply}`);
-    assert.ok(r.reply.includes('FILE=https://example.com/b.pdf'), `reply: ${r.reply}`);
-  });
-
-  test('attachment vars unset when options empty', async () => {
-    // When imageUrl/fileUrl are empty, the runner must NOT inject the env vars
-    // at all — an agent can then distinguish "no image" from "empty URL".
-    const agent = writeScript(
-      '#!/usr/bin/env bash\n' +
-      'echo "IMG=<${AGENT_IMAGE_URL:-unset}>"\n',
-    );
-    const r = await run({ command: agent }, { message: 'hi' });
-    assert.ok(r.reply.includes('IMG=<unset>'), `reply: ${r.reply}`);
-  });
-
-  test('invalid AGENT_SESSION ignored, preserves previous valid id', async () => {
-    const agent = writeScript(
-      '#!/usr/bin/env bash\n' +
-      'echo "AGENT_SESSION:valid-id-1"\n' +
-      'echo "AGENT_SESSION:bad:with:colons"\n' +
-      'echo "done"\n',
+      'echo \'{"type":"session","id":"valid-id-1"}\'\n' +
+      'echo \'{"type":"session","id":"bad/path"}\'\n' +
+      'echo \'{"type":"text","text":"done"}\'\n',
     );
     const warnings = [];
     const r = await run({ command: agent }, { message: 'hi', onStderr: (s) => warnings.push(s) });
     assert.strictEqual(r.sessionId, 'valid-id-1');
-    assert.strictEqual(r.reply.trim(), 'done');
-    assert.ok(warnings.some((w) => w.includes('invalid') && w.includes('AGENT_SESSION')));
+    assert.strictEqual(r.reply, 'done');
+    assert.ok(warnings.some((w) => w.includes('invalid') && w.includes('session id')));
   });
 
-  test('invalid AGENT_SESSION when no previous → session stays empty', async () => {
+  test('invalid session id when no previous → session stays empty', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "AGENT_SESSION:has space"\n' +
-      'echo "done"\n',
+      'echo \'{"type":"session","id":"bad/path"}\'\n' +
+      'echo \'{"type":"text","text":"done"}\'\n',
     );
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.sessionId, '');
-    assert.strictEqual(r.reply.trim(), 'done');
+    assert.strictEqual(r.reply, 'done');
   });
 
   test('stderr diagnosis survives a >1 MB noisy stderr (head cap keeps early signal)', async () => {
-    // The friendly hint pattern lands at the START of stderr; the rest is
-    // >2 MB of noise. The head-capped stderrFull (1 MB) must still contain
-    // the startup error so diagnosis fires — and the buffer must not grow
-    // unbounded with the noise.
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'echo "python3: can\'t open file \'/tmp/missing.py\': [Errno 2] No such file or directory" >&2\n' +
@@ -769,14 +678,18 @@ describe('run() — end-to-end', () => {
     );
   });
 
-  test('permission:true injects AGENT_PERMISSION=1 and allows via onPermission', async () => {
+  test('permission:true — turn carries permission:true, request → allow → response on stdin', async () => {
+    // The agent reads the turn line (discards it), emits a permission_request,
+    // then reads the permission_response line the runner writes back. We grep
+    // the response (it contains quotes, so we must not embed it raw into JSON)
+    // and emit a fixed text event reporting what we saw.
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "perm=$AGENT_PERMISSION"\n' +
-      'echo \'AGENT_PERMISSION_REQUEST:{"request_id":"r1","tool_name":"Bash","input":{"command":"true"}}\'\n' +
+      'read -r turn\n' +
+      'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{"command":"true"}}\'\n' +
       'IFS= read -r resp\n' +
-      'echo "got:$resp"\n' +
-      'echo "AGENT_SESSION:sess-perm-1"\n'
+      "if echo \"$resp\" | grep -q '\"behavior\":\"allow\"'; then echo '{\"type\":\"text\",\"text\":\"ALLOWED\"}'; fi\n" +
+      'echo \'{"type":"session","id":"sess-perm-1"}\'\n'
     );
     const seen = [];
     const r = await run(
@@ -791,19 +704,17 @@ describe('run() — end-to-end', () => {
     );
     assert.strictEqual(seen.length, 1);
     assert.strictEqual(seen[0].request_id, 'r1');
-    assert.ok(r.reply.includes('perm=1'));
-    assert.ok(r.reply.includes('got:AGENT_PERMISSION_RESPONSE:'));
-    assert.ok(r.reply.includes('"behavior":"allow"'));
+    assert.strictEqual(r.reply, 'ALLOWED');
     assert.strictEqual(r.sessionId, 'sess-perm-1');
     assert.strictEqual(r.exitCode, 0);
   });
 
-  test('permission:false ignores AGENT_PERMISSION_REQUEST (no AGENT_PERMISSION env)', async () => {
+  test('permission:false ignores permission_request (no onPermission call)', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "perm=<${AGENT_PERMISSION-unset}>"\n' +
-      'echo \'AGENT_PERMISSION_REQUEST:{"request_id":"r1","tool_name":"Bash","input":{}}\'\n' +
-      'echo "done"\n'
+      'read -r turn\n' +   // consume turn; runner closes stdin after (permission off)
+      'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{}}\'\n' +
+      'echo \'{"type":"text","text":"done"}\'\n'
     );
     const stderr = [];
     let called = false;
@@ -816,17 +727,18 @@ describe('run() — end-to-end', () => {
       },
     );
     assert.strictEqual(called, false);
-    assert.ok(r.reply.includes('perm=<unset>'));
-    assert.ok(r.reply.includes('done'));
-    assert.ok(stderr.some((l) => /ignoring AGENT_PERMISSION_REQUEST/.test(l)));
+    assert.strictEqual(r.reply, 'done');
+    assert.ok(stderr.some((l) => /ignoring .*permission_request/.test(l)));
   });
 
   test('permission deny is written when onPermission returns deny', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo \'AGENT_PERMISSION_REQUEST:{"request_id":"r2","tool_name":"Bash","input":{}}\'\n' +
+      'read -r turn\n' +
+      'echo \'{"type":"permission_request","request_id":"r2","tool_name":"Bash","input":{}}\'\n' +
       'IFS= read -r resp\n' +
-      'echo "got:$resp"\n'
+      "if echo \"$resp\" | grep -q '\"behavior\":\"deny\"'; then echo '{\"type\":\"text\",\"text\":\"DENIED\"}'; fi\n" +
+      "if echo \"$resp\" | grep -q 'not allowed'; then echo '{\"type\":\"text\",\"text\":\"HASMSG\"}'; fi\n"
     );
     const r = await run(
       { command: agent, permission: true },
@@ -835,19 +747,19 @@ describe('run() — end-to-end', () => {
         onPermission: () => ({ behavior: 'deny', message: 'not allowed' }),
       },
     );
-    assert.ok(r.reply.includes('"behavior":"deny"'));
-    assert.ok(r.reply.includes('not allowed'));
+    assert.ok(r.reply.includes('DENIED'), `reply: ${r.reply}`);
+    assert.ok(r.reply.includes('HASMSG'), `reply: ${r.reply}`);
   });
 });
 
 test('formatPermissionResponse / isValidPermissionRequest', () => {
   assert.strictEqual(
     formatPermissionResponse({ request_id: '1', behavior: 'allow', updated_input: { c: 'x' } }),
-    'AGENT_PERMISSION_RESPONSE:{"request_id":"1","behavior":"allow","updated_input":{"c":"x"}}',
+    '{"type":"permission_response","request_id":"1","behavior":"allow","updated_input":{"c":"x"}}',
   );
   assert.strictEqual(
     formatPermissionResponse({ request_id: '2', behavior: 'deny', message: 'nope' }),
-    'AGENT_PERMISSION_RESPONSE:{"request_id":"2","behavior":"deny","message":"nope"}',
+    '{"type":"permission_response","request_id":"2","behavior":"deny","message":"nope"}',
   );
   assert.ok(isValidPermissionRequest({ request_id: '1', tool_name: 'Bash', input: {} }));
   assert.ok(!isValidPermissionRequest({ request_id: '1', tool_name: 'Bash' }));
@@ -855,6 +767,6 @@ test('formatPermissionResponse / isValidPermissionRequest', () => {
   assert.ok(!isValidPermissionRequest(null));
 });
 
-test('PROTOCOL_VERSION is "0.2"', () => {
-  assert.strictEqual(PROTOCOL_VERSION, '0.2');
+test('PROTOCOL_VERSION is "0.3"', () => {
+  assert.strictEqual(PROTOCOL_VERSION, '0.3');
 });

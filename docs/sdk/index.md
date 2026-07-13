@@ -1,6 +1,6 @@
 # SDK Overview
 
-AgentProc SDKs remove the boilerplate of reading env vars and writing the stdout protocol, so you can focus on your agent logic.
+AgentProc SDKs remove the boilerplate of reading the turn object from stdin and writing NDJSON events to stdout, so you can focus on your agent logic.
 
 ## Available SDKs
 
@@ -11,7 +11,7 @@ AgentProc SDKs remove the boilerplate of reading env vars and writing the stdout
 
 ## Without an SDK
 
-You don't need an SDK. Any script that reads `AGENT_*` env vars and writes to stdout works. See [Bare script examples](/examples/bare).
+You don't need an SDK. Any script that reads a `{"type":"turn",...}` object from stdin and writes NDJSON events to stdout works. See [Bare script examples](/examples/bare).
 
 ## With an SDK
 

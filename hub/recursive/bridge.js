@@ -1,21 +1,20 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * AgentProc bridge for the `recursive` CLI (self-improving Rust coding agent).
+ * AgentProc bridge for the `recursive` CLI (self-improving Rust coding agent,
+ * wire 0.3).
  *
  * Parity implementation of hub/recursive/bridge.py. See that file for the
- * full design rationale; this file mirrors it line-for-line in behaviour.
+ * full design rationale; this file mirrors it in behaviour.
  *
- *   recursive --json [--stream] ... run <message>                       // turn 1
- *   recursive --json [--stream] ... resume --from-file <session-dir> \
- *       -p <message>                                                    // turn N+
+ *   recursive --json --stream ... run <message>                       // turn 1
+ *   recursive --json --stream ... resume --from-file <session-dir> \
+ *       -p <message>                                                   // turn N+
  *
- * Multi-turn continuity uses recursive's native session resume: turn 1 runs
- * `recursive run` and captures the session directory recursive logs on stderr
- * (`session: recording to <dir>`); turn N+ runs `recursive resume --from-file
- * <dir> -p <msg>`, which continues that session by appending <msg> as the next
- * user turn. No transcript-file replay, no --resume-from indexing, no
- * system-message stripping.
+ * The bridge always passes `--stream` and always emits {"type":"partial"}
+ * events; the runner forwards them only when the profile's streaming is true.
+ * A single {"type":"text"} event with the assembled reply is emitted at the
+ * end so the reply body is populated regardless of streaming mode.
  */
 
 const { spawn } = require('node:child_process');
@@ -23,6 +22,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
+
+const HUB_DIR = path.resolve(__dirname, '..');
+const { readTurn } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
 const CLI_NAME = 'recursive';
 const INSTALL_HINT =
@@ -33,23 +35,27 @@ const INSTALL_HINT =
 const SESSION_RECORDING_RE = /session: recording to (\S+)/;
 
 // ---------------------------------------------------------------------------
-// Emission helpers
+// NDJSON emission helpers
 // ---------------------------------------------------------------------------
 
-function emit(line) {
-  process.stdout.write(line + '\n');
+function emitObj(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
 function emitSession(sessionId) {
-  emit(`AGENT_SESSION:${sessionId}`);
+  emitObj({ type: 'session', id: sessionId });
 }
 
 function emitPartial(text) {
-  emit(`AGENT_PARTIAL:${JSON.stringify(text)}`);
+  emitObj({ type: 'partial', text });
+}
+
+function emitText(text) {
+  emitObj({ type: 'text', text });
 }
 
 function emitError(text) {
-  emit(`AGENT_ERROR:${JSON.stringify(text)}`);
+  emitObj({ type: 'error', message: text });
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +139,8 @@ function providerArgs() {
 }
 
 function globalArgs() {
-  const args = [CLI_NAME, '--json', '-H'];
-  if (env('AGENT_STREAMING') !== '0') args.push('--stream');
+  // Wire 0.3: always --stream. The runner filters partials by profile.streaming.
+  const args = [CLI_NAME, '--json', '-H', '--stream'];
   args.push('--permission-mode', env('RECURSIVE_PERMISSION_MODE') || 'auto');
   if (env('RECURSIVE_MAX_STEPS')) args.push('--max-steps', env('RECURSIVE_MAX_STEPS'));
   if (env('RECURSIVE_WORKSPACE')) args.push('--workspace', env('RECURSIVE_WORKSPACE'));
@@ -152,28 +158,21 @@ function buildResumeArgs(sessionDir, message) {
   return globalArgs().concat(['resume', '--from-file', sessionDir, '-p', message]);
 }
 
-function hasAttachment() {
-  return !!(env('AGENT_IMAGE_URL') || env('AGENT_FILE_URL'));
-}
-
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
-  const message = process.env.AGENT_MESSAGE || '';
-  if (!message && !hasAttachment()) {
-    emitError(
-      'AGENT_MESSAGE env var is required (or set ' +
-        'AGENT_IMAGE_URL / AGENT_FILE_URL)'
-    );
+async function main() {
+  const turn = await readTurn();
+  const message = (typeof turn.message === 'string') ? turn.message : '';
+  const attachments = Array.isArray(turn.attachments) ? turn.attachments : [];
+  if (!message && attachments.length === 0) {
+    emitError('turn.message is required (or include turn.attachments)');
     return 1;
   }
 
-  const streaming = env('AGENT_STREAMING') !== '0';
-
   // Resolve opaque session id + whether we resume an existing recursive session.
-  const givenSid = env('AGENT_SESSION_ID');
+  const givenSid = (typeof turn.session_id === 'string') ? turn.session_id : '';
   let resumeDir = null;
   let sid;
   if (givenSid) {
@@ -204,9 +203,10 @@ function main() {
     return 1;
   }
 
-  let sawPartial = false;
+  // Per-step text buffers (ordered) so we can assemble the final reply.
+  const stepOrder = [];
+  const stepBuffers = new Map();
   const stepsWithPartials = new Set();
-  const assistantTexts = [];
   let errorMessage = null;
   let stderrOutput = '';
 
@@ -240,13 +240,16 @@ function main() {
       if (etype === 'partial_token') {
         const text = event.text || '';
         if (!text) return;
-        if (event.step != null) stepsWithPartials.add(event.step);
-        if (streaming) {
-          emitPartial(text);
-          sawPartial = true;
-        } else {
-          assistantTexts.push(text);
+        const step = event.step;
+        if (step != null) {
+          stepsWithPartials.add(step);
+          if (!stepBuffers.has(step)) {
+            stepBuffers.set(step, []);
+            stepOrder.push(step);
+          }
+          stepBuffers.get(step).push(text);
         }
+        emitPartial(text);
         return;
       }
 
@@ -254,25 +257,28 @@ function main() {
         const text = event.text || '';
         if (!text) return;
         const step = event.step;
-        if (streaming) {
-          if (stepsWithPartials.has(step)) return; // duplicate of streamed deltas
-          emitPartial(text);
-          sawPartial = true;
-        } else {
-          assistantTexts.push(text);
+        // If this step already streamed deltas, they compose the step text —
+        // skip the duplicate full text. Otherwise this is our only chance.
+        if (step != null && stepsWithPartials.has(step)) return;
+        if (step != null) {
+          if (!stepBuffers.has(step)) {
+            stepBuffers.set(step, []);
+            stepOrder.push(step);
+          }
+          stepBuffers.get(step).push(text);
         }
+        emitPartial(text);
         return;
       }
 
       // turn_finished: terminal; keep draining until close.
     }
 
-    child.on('error', (err) => {
+    child.on('error', () => {
       // spawn-side ENOENT surfaces here on some platforms.
       if (!errorMessage) {
         errorMessage = `${CLI_NAME} CLI not found. ${INSTALL_HINT}`;
       }
-      // resolve below via close
     });
 
     child.on('close', (code) => {
@@ -283,41 +289,33 @@ function main() {
         if (captured) writeSessionDir(sid, captured);
       }
 
-      // Non-streaming: emit collected assistant text as the reply body.
-      if (!streaming && assistantTexts.length) {
-        const body = assistantTexts.join('').trim();
-        if (body) {
-          emit(body);
-          sawPartial = true;
-        }
-      }
+      let replyText = '';
+      for (const s of stepOrder) replyText += stepBuffers.get(s).join('');
+      replyText = replyText.trim();
 
       // Fallback: recover last assistant text from the session transcript.
-      if (!sawPartial && !errorMessage) {
+      if (!replyText && !errorMessage) {
         const sessDir = resumeDir || readSessionDir(sid);
         const recovered = lastAssistantText(sessDir);
-        if (recovered) {
-          if (streaming) emitPartial(recovered);
-          else emit(recovered);
-          sawPartial = true;
-        }
+        if (recovered) replyText = recovered.trim();
       }
 
       if (errorMessage) {
         emitError(errorMessage);
         return resolve(1);
       }
-      if (code !== 0 && !sawPartial) {
+      if (code !== 0 && !replyText) {
         let msg = `${CLI_NAME} exited with ${code}`;
         const tail = stderrOutput.trim();
         if (tail) msg += `: ${tail.slice(0, 500)}`;
         emitError(msg);
         return resolve(1);
       }
-      if (!sawPartial) {
+      if (!replyText) {
         emitError(`${CLI_NAME} produced no reply text`);
         return resolve(1);
       }
+      emitText(replyText);
       resolve(0);
     });
   });

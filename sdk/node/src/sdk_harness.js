@@ -32,6 +32,11 @@ const handlers = {
     return 'after';
   },
 
+  async_partial_with_role: async (ctx) => {
+    await ctx.sendPartial('thinking...', 'thinking');
+    return 'answer';
+  },
+
   sync_string: (ctx) => 'hello from sync',
 
   sync_partial_bare: (ctx) => {

@@ -1,5 +1,5 @@
 {
-  "description": "Cross-language parity fixture for hub/recursive/bridge.{py,js}. Both bridges are bespoke (they share no code with the _shared stream_utils), so this fixture guards the observable parity claim in hub/README.md ('both produce identical AgentProc output'). It exercises the pure, side-effect-free helpers that determine the bridge's observable behaviour: provider_args/providerArgs and _global_args/globalArgs (which RECURSIVE_* + AGENT_STREAMING env vars map to which CLI flags, in what order), extract_session_dir/extractSessionDir (parsing the 'session: recording to <dir>' stderr line), and _last_assistant_text/lastAssistantText (reading the last assistant turn from transcript.jsonl). The full NDJSON event classification (handleLine inside main) is not covered here — it is nested in main() and not yet refactored to an importable helper; that remains future parity work. Both bridge.py (importable via the __main__ guard) and bridge.js (importable via the require.main guard) are driven by the same cases, so a divergence shows up as one test failing against this shared expectation. For arg_cases, the test clears all RECURSIVE_* and AGENT_STREAMING vars, sets exactly the ones in `env`, then calls the builder.",
+  "description": "Cross-language parity fixture for hub/recursive/bridge.{py,js}. Both bridges are bespoke (they share no code with the _shared stream_utils), so this fixture guards the observable parity claim in hub/README.md ('both produce identical AgentProc output'). It exercises the pure, side-effect-free helpers that determine the bridge's observable behaviour: provider_args/providerArgs and _global_args/globalArgs (which RECURSIVE_* env vars map to which CLI flags, in what order), extract_session_dir/extractSessionDir (parsing the 'session: recording to <dir>' stderr line), and _last_assistant_text/lastAssistantText (reading the last assistant turn from transcript.jsonl). Wire 0.3: the bridge always passes --stream and always emits {\"type\":\"partial\"} events; the runner forwards them only when the profile's streaming is true. AGENT_STREAMING is no longer consulted, so the streaming-off case now expects --stream too. The full NDJSON event classification (handleLine inside main) is not covered here — it is nested in main() and not yet refactored to an importable helper; that remains future parity work. Both bridge.py (importable via the __main__ guard) and bridge.js (importable via the require.main guard) are driven by the same cases, so a divergence shows up as one test failing against this shared expectation. For arg_cases, the test clears all RECURSIVE_* vars, sets exactly the ones in `env`, then calls the builder.",
   "arg_cases": [
     {
       "name": "defaults-streaming-on",
@@ -8,9 +8,9 @@
       "expect_provider_args": []
     },
     {
-      "name": "streaming-off",
+      "name": "streaming-ignored-in-0.3",
       "env": { "AGENT_STREAMING": "0" },
-      "expect_global_args": ["recursive", "--json", "-H", "--permission-mode", "auto"],
+      "expect_global_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "auto"],
       "expect_provider_args": []
     },
     {

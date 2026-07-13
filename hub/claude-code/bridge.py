@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AgentProc bridge for the `claude` CLI (Anthropic Claude Code).
+AgentProc bridge for the `claude` CLI (Anthropic Claude Code, wire 0.3).
 
 Default (unattended) mode:
     claude -p <message> --output-format stream-json \\
@@ -8,14 +8,16 @@ Default (unattended) mode:
         --disallowed-tools AskUserQuestion \\
         [--resume <session_id>] [--model <model>]
 
-Permission mode (when AGENT_PERMISSION=1 / profile permission: true):
+Permission mode (when the turn carries permission: true, i.e. profile
+permission: true):
     claude --print --input-format stream-json --output-format stream-json \\
         --verbose --permission-prompt-tool stdio --permission-mode default \\
         --disallowed-tools AskUserQuestion \\
         [--resume <session_id>] [--model <model>]
 
-    Translates Claude Code control_request/control_response ↔
-    AgentProc AGENT_PERMISSION_REQUEST / AGENT_PERMISSION_RESPONSE.
+    Translates Claude Code control_request / control_response ↔
+    AgentProc {"type":"permission_request"} / {"type":"permission_response"}
+    NDJSON events.
 """
 
 from __future__ import annotations
@@ -37,15 +39,13 @@ from _shared.stream_utils import (  # noqa: E402
     emit_error,
     emit_partial,
     emit_session,
+    emit_text,
     main_entry,
+    read_turn,
 )
 
 CLI_NAME = "claude"
 INSTALL_HINT = "Install: npm install -g @anthropic-ai/claude-code"
-
-
-def _permission_enabled(env) -> bool:
-    return env.get("AGENT_PERMISSION", "").strip() == "1"
 
 
 def build_args(message: str, session_id: str, env) -> list[str]:
@@ -112,7 +112,7 @@ def parse_event(event: dict) -> Optional[EventResult]:
 
 
 def _control_to_permission_request(event: dict) -> Optional[Dict[str, Any]]:
-    """Map Claude control_request → AgentProc permission request payload."""
+    """Map Claude control_request → AgentProc permission_request payload."""
     if event.get("type") != "control_request":
         return None
     request = event.get("request") or {}
@@ -140,7 +140,7 @@ def _control_to_permission_request(event: dict) -> Optional[Dict[str, Any]]:
 
 
 def _permission_response_to_control(resp: dict, original_input: dict) -> dict:
-    """Map AgentProc AGENT_PERMISSION_RESPONSE → Claude control_response."""
+    """Map AgentProc {"type":"permission_response"} → Claude control_response."""
     request_id = str(resp.get("request_id", ""))
     behavior = resp.get("behavior")
     if behavior == "allow":
@@ -172,16 +172,14 @@ def _permission_response_to_control(resp: dict, original_input: dict) -> dict:
     }
 
 
-def run_permission_mode(env) -> int:
+def run_permission_mode(turn: dict, env) -> int:
     """Bidirectional Claude session with mid-turn tool authorization."""
-    message = env.get("AGENT_MESSAGE", "")
-    session_id = env.get("AGENT_SESSION_ID", "")
-    streaming = env.get("AGENT_STREAMING", "1") != "0"
+    message = turn.get("message") if isinstance(turn.get("message"), str) else ""
+    session_id = turn.get("session_id") if isinstance(turn.get("session_id"), str) else ""
+    attachments = turn.get("attachments") if isinstance(turn.get("attachments"), list) else []
 
-    if not message and not (
-        env.get("AGENT_IMAGE_URL", "").strip() or env.get("AGENT_FILE_URL", "").strip()
-    ):
-        emit_error("AGENT_MESSAGE env var is required (or set AGENT_IMAGE_URL / AGENT_FILE_URL)")
+    if not message and not attachments:
+        emit_error("turn.message is required (or include turn.attachments)")
         return 1
 
     args = build_permission_args(session_id, env)
@@ -223,18 +221,18 @@ def run_permission_mode(env) -> int:
     })
 
     def drain_bridge_stdin() -> None:
-        """Read AGENT_PERMISSION_RESPONSE: lines from the AgentProc runner."""
+        """Read {"type":"permission_response",...} NDJSON lines from the runner."""
         for raw in sys.stdin:
             if stop.is_set():
                 break
             line = raw.rstrip("\r\n")
-            if not line.startswith("AGENT_PERMISSION_RESPONSE:"):
+            if not line:
                 continue
             try:
-                payload = json.loads(line[len("AGENT_PERMISSION_RESPONSE:"):])
+                payload = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or payload.get("type") != "permission_response":
                 continue
             rid = payload.get("request_id")
             if not isinstance(rid, str) or not rid:
@@ -250,8 +248,8 @@ def run_permission_mode(env) -> int:
 
     found_session_id: Optional[str] = None
     last_final_text: Optional[str] = None
+    last_partial_text: Optional[str] = None
     error_message: Optional[str] = None
-    saw_any_partial = False
 
     for raw in proc.stdout:
         line = raw.strip()
@@ -270,7 +268,7 @@ def run_permission_mode(env) -> int:
                 pending_inputs[rid] = perm_req.get("input") or {}
                 ev = threading.Event()
                 response_events[rid] = ev
-            emit(f"AGENT_PERMISSION_REQUEST:{json.dumps(perm_req, ensure_ascii=False)}")
+            emit({"type": "permission_request", **perm_req})
             # Block this stdout reader until the runner answers (or process dies).
             while not ev.wait(timeout=0.5):
                 if proc.poll() is not None or stop.is_set():
@@ -300,12 +298,10 @@ def run_permission_mode(env) -> int:
         if result.error:
             error_message = result.error
         if result.partial_text:
-            if streaming:
-                emit_partial(result.partial_text)
-                saw_any_partial = True
+            emit_partial(result.partial_text)
+            last_partial_text = result.partial_text
         if result.final_text:
-            if not streaming or not saw_any_partial:
-                last_final_text = result.final_text
+            last_final_text = result.final_text
 
     stop.set()
     try:
@@ -329,19 +325,20 @@ def run_permission_mode(env) -> int:
 
     if found_session_id:
         emit_session(found_session_id)
-    if last_final_text and not streaming:
-        emit(last_final_text)
+    reply_text = last_final_text if last_final_text is not None else last_partial_text
+    if reply_text:
+        emit_text(reply_text)
     return 0
 
 
 def main() -> int:
-    env = os.environ
-    if _permission_enabled(env):
+    turn = read_turn()
+    if turn.get("permission") is True:
         try:
-            return run_permission_mode(env)
+            return run_permission_mode(turn, os.environ)
         except BrokenPipeError:
             return 1
-    return main_entry(CLI_NAME, INSTALL_HINT, build_args, parse_event)
+    return main_entry(CLI_NAME, INSTALL_HINT, build_args, parse_event, turn=turn)
 
 
 if __name__ == "__main__":

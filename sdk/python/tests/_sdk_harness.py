@@ -38,6 +38,11 @@ async def async_send_error_then_return(ctx):
     return "after"
 
 
+async def async_partial_with_role(ctx):
+    await ctx.send_partial("thinking...", role="thinking")
+    return "answer"
+
+
 def sync_string(ctx):
     return "hello from sync"
 
@@ -54,6 +59,7 @@ HANDLERS = {
     "async_none_partial": async_none_partial,
     "async_protocol_error": async_protocol_error,
     "async_send_error_then_return": async_send_error_then_return,
+    "async_partial_with_role": async_partial_with_role,
     "sync_string": sync_string,
     "sync_partial_bare": sync_partial_bare,
 }

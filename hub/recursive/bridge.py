@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-AgentProc bridge for the `recursive` CLI (self-improving Rust coding agent).
+AgentProc bridge for the `recursive` CLI (self-improving Rust coding agent,
+wire 0.3).
 
 recursive emits its lifecycle as NDJSON `AgentEvent` objects when run with
 `--json`. This bridge wraps:
 
-    recursive --json [--stream] ... run <message>                       # turn 1
-    recursive --json [--stream] ... resume --from-file <session-dir> \\
-        -p <message>                                                    # turn N+
+    recursive --json --stream ... run <message>                    # turn 1
+    recursive --json --stream ... resume --from-file <session-dir> \\
+        -p <message>                                               # turn N+
 
-and translates the event stream to AgentProc protocol output.
+and translates the event stream to AgentProc NDJSON output. The bridge always
+passes `--stream` and always emits {"type":"partial"} events; the runner
+forwards them only when the profile's streaming is true (and drops them
+otherwise). A single {"type":"text"} event with the assembled reply is emitted
+at the end so the reply body is populated regardless of streaming mode.
 
 Multi-turn continuity (native session resume)
 ----------------------------------------------
@@ -24,14 +29,7 @@ orthodox session-id resume. So the bridge:
   - Turn N: load the stored session directory and run
     `recursive resume --from-file <dir> -p <message>`.
 
-No transcript-file replay, no `--resume-from` indexing, no system-message
-stripping — recursive's own session writer keeps the transcript clean and
-uniquely numbered across turns.
-
-Env vars (in addition to the AGENT_* vars injected by the runner):
-    AGENT_MESSAGE             User message (required, or an attachment)
-    AGENT_SESSION_ID          Opaque id from the previous turn (empty = new)
-    AGENT_STREAMING           "1" streaming, "0" one-shot
+Per-CLI config (read from the process env the runner injects):
     RECURSIVE_API_KEY         Optional → `recursive --api-key`
     RECURSIVE_PROVIDER        Optional → `recursive --provider` (openai|anthropic)
     RECURSIVE_API_BASE        Optional → `recursive --api-base`
@@ -51,7 +49,13 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from typing import Optional
+from typing import Dict, List, Optional
+
+_HUB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _HUB_DIR not in sys.path:
+    sys.path.insert(0, _HUB_DIR)
+
+from _shared.stream_utils import read_turn  # noqa: E402
 
 CLI_NAME = "recursive"
 INSTALL_HINT = (
@@ -60,28 +64,32 @@ INSTALL_HINT = (
 
 # `session: recording to <abs-dir>` — recursive logs this to stderr when it
 # creates a session writer. The directory is the 4th whitespace token.
-_SESSIONRecording_RE = re.compile(r"session: recording to (\S+)")
+_SESSION_RECORDING_RE = re.compile(r"session: recording to (\S+)")
 
 
 # ---------------------------------------------------------------------------
-# Emission helpers
+# NDJSON emission helpers
 # ---------------------------------------------------------------------------
 
-def emit(line: str) -> None:
-    sys.stdout.write(line + "\n")
+def _emit_obj(obj: dict) -> None:
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
 
 def emit_session(session_id: str) -> None:
-    emit(f"AGENT_SESSION:{session_id}")
+    _emit_obj({"type": "session", "id": session_id})
 
 
 def emit_partial(text: str) -> None:
-    emit(f"AGENT_PARTIAL:{json.dumps(text, ensure_ascii=False)}")
+    _emit_obj({"type": "partial", "text": text})
+
+
+def emit_text(text: str) -> None:
+    _emit_obj({"type": "text", "text": text})
 
 
 def emit_error(text: str) -> None:
-    emit(f"AGENT_ERROR:{json.dumps(text, ensure_ascii=False)}")
+    _emit_obj({"type": "error", "message": text})
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +134,7 @@ def write_session_dir(sid: str, session_dir: str) -> None:
 
 
 def extract_session_dir(stderr: str) -> Optional[str]:
-    m = _SESSIONRecording_RE.search(stderr)
+    m = _SESSION_RECORDING_RE.search(stderr)
     return m.group(1) if m else None
 
 
@@ -148,9 +156,7 @@ def provider_args() -> list[str]:
 
 
 def _global_args() -> list[str]:
-    args: list[str] = [CLI_NAME, "--json", "-H"]
-    if os.environ.get("AGENT_STREAMING", "1") != "0":
-        args.append("--stream")
+    args: list[str] = [CLI_NAME, "--json", "-H", "--stream"]
     # Permission mode: default to auto (headless). The bridge runs
     # non-interactively, so prompt-based approval would hang.
     args += ["--permission-mode", _env("RECURSIVE_PERMISSION_MODE") or "auto"]
@@ -176,23 +182,16 @@ def build_resume_args(session_dir: str, message: str) -> list[str]:
 # Main
 # ---------------------------------------------------------------------------
 
-def _has_attachment() -> bool:
-    return bool(_env("AGENT_IMAGE_URL") or _env("AGENT_FILE_URL"))
-
-
 def main() -> int:
-    message = os.environ.get("AGENT_MESSAGE", "")
-    if not message and not _has_attachment():
-        emit_error(
-            "AGENT_MESSAGE env var is required (or set "
-            "AGENT_IMAGE_URL / AGENT_FILE_URL)"
-        )
+    turn = read_turn()
+    message = turn.get("message") if isinstance(turn.get("message"), str) else ""
+    attachments = turn.get("attachments") if isinstance(turn.get("attachments"), list) else []
+    if not message and not attachments:
+        emit_error("turn.message is required (or include turn.attachments)")
         return 1
 
-    streaming = os.environ.get("AGENT_STREAMING", "1") != "0"
-
     # Resolve opaque session id + whether we resume an existing recursive session.
-    given_sid = _env("AGENT_SESSION_ID")
+    given_sid = turn.get("session_id") if isinstance(turn.get("session_id"), str) else ""
     resume_dir: Optional[str] = None
     if given_sid:
         d = read_session_dir(given_sid)
@@ -227,9 +226,10 @@ def main() -> int:
         emit_error(f"{CLI_NAME} CLI not found. {INSTALL_HINT}")
         return 1
 
-    saw_partial = False
+    # Per-step text buffers (ordered) so we can assemble the final reply.
+    step_order: List[int] = []
+    step_buffers: Dict[int, List[str]] = {}
     steps_with_partials: set[int] = set()
-    assistant_texts: list[str] = []  # collected for non-streaming fallback
     error_message: Optional[str] = None
 
     assert proc.stdout is not None
@@ -249,11 +249,11 @@ def main() -> int:
                 step = event.get("step")
                 if step is not None:
                     steps_with_partials.add(step)
-                if streaming:
-                    emit_partial(text)
-                    saw_partial = True
-                else:
-                    assistant_texts.append(text)
+                    if step not in step_buffers:
+                        step_buffers[step] = []
+                        step_order.append(step)
+                    step_buffers[step].append(text)
+                emit_partial(text)
             continue
 
         if etype == "assistant_text":
@@ -261,17 +261,17 @@ def main() -> int:
             if not text:
                 continue
             step = event.get("step")
-            # In streaming mode recursive emits partial_token deltas AND a
-            # final assistant_text with the full step text — skip the
-            # duplicate unless this step had no deltas (provider didn't
-            # stream), in which case the full text is our only chance.
-            if streaming:
-                if step in steps_with_partials:
-                    continue
-                emit_partial(text)
-                saw_partial = True
-            else:
-                assistant_texts.append(text)
+            # If this step already streamed deltas, they compose the step text —
+            # skip the duplicate full text. Otherwise this is our only chance
+            # for the step text.
+            if step is not None and step in steps_with_partials:
+                continue
+            if step is not None:
+                if step not in step_buffers:
+                    step_buffers[step] = []
+                    step_order.append(step)
+                step_buffers[step].append(text)
+            emit_partial(text)
             continue
 
         if etype == "turn_finished":
@@ -288,39 +288,30 @@ def main() -> int:
         if captured:
             write_session_dir(sid, captured)
 
-    # Non-streaming: emit collected assistant text as the reply body (plain
-    # lines, no AGENT_ prefix — the runner treats them as the reply).
-    if not streaming and assistant_texts:
-        body = "".join(assistant_texts).strip()
-        if body:
-            emit(body)
-            saw_partial = True
+    reply_text = "".join("".join(step_buffers[s]) for s in step_order).strip()
 
-    # Fallback: if recursive produced no streamed/body text at all, try to
-    # recover the last assistant message from the session transcript.
-    if not saw_partial and not error_message:
+    # Fallback: if recursive produced no streamed text at all, try to recover
+    # the last assistant message from the session transcript.
+    if not reply_text and not error_message:
         sess_dir = resume_dir or read_session_dir(sid)
         recovered = _last_assistant_text(sess_dir) if sess_dir else None
         if recovered:
-            if streaming:
-                emit_partial(recovered)
-            else:
-                emit(recovered)
-            saw_partial = True
+            reply_text = recovered.strip()
 
     if error_message:
         emit_error(error_message)
         return 1
-    if proc.returncode != 0 and not saw_partial:
+    if proc.returncode != 0 and not reply_text:
         msg = f"{CLI_NAME} exited with {proc.returncode}"
         stderr_tail = stderr_output.strip()
         if stderr_tail:
             msg += f": {stderr_tail[:500]}"
         emit_error(msg)
         return 1
-    if not saw_partial:
+    if not reply_text:
         emit_error(f"{CLI_NAME} produced no reply text")
         return 1
+    emit_text(reply_text)
     return 0
 
 

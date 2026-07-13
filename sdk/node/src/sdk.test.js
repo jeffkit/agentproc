@@ -25,19 +25,20 @@ const HARNESS = path.resolve(__dirname, 'sdk_harness.js');
 const data = JSON.parse(fs.readFileSync(CASES_PATH, 'utf8'));
 
 function runScenario(scenario) {
-  // Start from a minimal infra env (no inherited AGENT_*), then layer the
-  // scenario's AGENT_* vars on top — so a leftover AGENT_SESSION_ID from the
-  // test runner's own environment can't contaminate the result.
+  // Minimal infra env (no AGENT_* — wire 0.3 input is the turn object on
+  // stdin, not env vars). A leftover AGENT_SESSION_ID from the test runner's
+  // own environment can't contaminate the result.
   const env = {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE,
     LANG: process.env.LANG,
     TERM: process.env.TERM,
-    ...scenario.env,
   };
+  const turnLine = JSON.stringify(scenario.turn) + '\n';
   return spawnSync(process.execPath, [HARNESS, scenario.handler], {
     env,
+    input: turnLine,
     encoding: 'utf8',
   });
 }

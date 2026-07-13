@@ -1,20 +1,22 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * AgentProc bridge for the `codebuddy` CLI (Tencent CodeBuddy).
+ * AgentProc bridge for the `codebuddy` CLI (Tencent CodeBuddy, wire 0.3).
  *
  * CodeBuddy's stream-json output schema is compatible with claude's.
  * Differences: command name `codebuddy`, resume flag `-r`, env prefix CODEBUDDY_*.
  *
  * Mid-turn AgentProc permission is NOT supported: CodeBuddy documents
- * `--permission-prompt-tool` as unsupported. If AGENT_PERMISSION=1, exit with
- * AGENT_ERROR rather than silently falling back to skip-permissions.
+ * `--permission-prompt-tool` as unsupported. If the turn carries
+ * `permission: true`, exit with an error rather than silently falling back
+ * to skip-permissions.
  */
 
 const path = require('node:path');
 const HUB_DIR = path.resolve(__dirname, '..');
 const {
   runBridge,
+  readTurn,
   emitError,
 } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
@@ -25,10 +27,6 @@ const PERMISSION_UNSUPPORTED =
   '(--permission-prompt-tool is documented as unsupported). ' +
   'Remove permission: true from the profile, or use hub/claude-code.';
 
-function permissionEnabled(env) {
-  return (env.AGENT_PERMISSION || '').trim() === '1';
-}
-
 function buildArgs(message, sessionId, env) {
   const args = [
     CLI_NAME, '-p', message,
@@ -36,16 +34,10 @@ function buildArgs(message, sessionId, env) {
     '--dangerously-skip-permissions',
   ];
   const disallow = (env.CODEBUDDY_DISALLOW_TOOLS || 'AskUserQuestion').trim();
-  if (disallow) {
-    args.push('--disallowedTools', disallow);
-  }
+  if (disallow) args.push('--disallowedTools', disallow);
   const model = (env.CODEBUDDY_MODEL || '').trim();
-  if (model) {
-    args.push('--model', model);
-  }
-  if (sessionId) {
-    args.push('-r', sessionId);
-  }
+  if (model) args.push('--model', model);
+  if (sessionId) args.push('-r', sessionId);
   return args;
 }
 
@@ -69,10 +61,11 @@ function parseEvent(event) {
   return null;
 }
 
-module.exports = { permissionEnabled, buildArgs, parseEvent, PERMISSION_UNSUPPORTED };
+module.exports = { buildArgs, parseEvent, PERMISSION_UNSUPPORTED };
 
 async function main() {
-  if (permissionEnabled(process.env)) {
+  const turn = await readTurn();
+  if (turn.permission === true) {
     emitError(PERMISSION_UNSUPPORTED);
     process.exit(1);
   }
@@ -81,6 +74,7 @@ async function main() {
     cliInstallHint: INSTALL_HINT,
     buildArgs,
     parseEvent,
+    turn,
   });
 }
 

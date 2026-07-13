@@ -4,32 +4,39 @@
 
 ::: tip 两条路径，选一条
 - **只是想用主流 AI CLI（claude、codex、codebuddy 等）？** 不用看本页。直接去[首页](/zh/)用 `agentproc hub run <name>`——零配置。
-- **想从零写一个自己的 agent 脚本？** 本页就是写给你的。你会写一个 3 行脚本、一个 2 行 profile YAML，然后用同一个 `agentproc` CLI 跑起来。
+- **想从零写一个自己的 agent 脚本？** 本页就是写给你的。你会写一个小脚本、一个 2 行 profile YAML，然后用同一个 `agentproc` CLI 跑起来。
 :::
 
 ## 第一步：写 agent 脚本
 
-最简单的 agent 读取 `AGENT_MESSAGE`，然后把回复写到 stdout。
+最简单的 agent 从 stdin 读取 `{"type":"turn",...}` 对象，向 stdout 写一个 NDJSON 事件。
 
 ::: code-group
 
 ```bash [bash]
 #!/usr/bin/env bash
-# echo_agent.sh — 把用户发的消息原样回复
-echo "你说：$AGENT_MESSAGE"
+# echo_agent.sh —— 从 stdin 读 turn，把消息原样回复
+read -r turn
+message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"你说：'"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]
 #!/usr/bin/env python3
 # echo_agent.py
-import os
-print(f"你说：{os.environ['AGENT_MESSAGE']}")
+import json, sys
+turn = json.loads(sys.stdin.readline() or "{}")
+msg = turn.get("message", "") if isinstance(turn.get("message"), str) else ""
+sys.stdout.write(json.dumps({"type": "text", "text": f"你说：{msg}"}, separators=(",", ":")) + "\n")
 ```
 
 ```js [node]
 #!/usr/bin/env node
 // echo_agent.js
-console.log(`你说：${process.env.AGENT_MESSAGE}`);
+const fs = require('node:fs');
+const raw = fs.readFileSync(0, 'utf8');
+const turn = JSON.parse(raw.split('\n')[0] || '{}');
+process.stdout.write(JSON.stringify({ type: 'text', text: `你说：${turn.message || ''}` }) + '\n');
 ```
 
 :::
@@ -38,7 +45,8 @@ console.log(`你说：${process.env.AGENT_MESSAGE}`);
 
 ```yaml
 # myagent.yaml
-command: bash ./echo_agent.sh
+command: bash
+args: ["./echo_agent.sh"]
 timeout_secs: 10
 ```
 
@@ -51,20 +59,15 @@ agentproc --profile ./myagent.yaml --prompt "你好"
 # → 你说：你好
 ```
 
-协议行（如果有）出现在 stderr，回复正文出现在 stdout。CLI 的退出码和 bridge 看到的一致：`0` 成功、`1` 错误、`124` 超时。
+NDJSON 事件（`{"type":"partial"}`、`{"type":"session"}`、`{"type":"error"}`）出现在 stderr，回复正文（由 `{"type":"text"}` 事件拼接）出现在 stdout。CLI 的退出码和 bridge 看到的一致：`0` 成功、`1` 错误、`124` 超时。
 
 <details>
 <summary>不想用 CLI 测试？</summary>
 
-也可以直接设环境变量驱动脚本。CLI 内部就是这么做的：
+也可以直接把 turn 对象 pipe 给脚本。CLI 内部就是这么做的：
 
 ```bash
-AGENT_MESSAGE="你好" \
-AGENT_SESSION_ID="" \
-AGENT_SESSION_NAME="default" \
-AGENT_FROM_USER="test" \
-AGENT_STREAMING="1" \
-bash ./echo_agent.sh
+echo '{"type":"turn","message":"你好","session_id":"","from_user":"test","protocol_version":"0.3"}' | bash ./echo_agent.sh
 ```
 
 调试脚本本身时有用；但端到端行为请优先用上面的 `agentproc --profile ...`。
@@ -78,83 +81,51 @@ bash ./echo_agent.sh
 
 ## 错误处理
 
-当 agent 遇到需要让用户看见的错误（上游 API 失效、限流、参数不合法等），输出一行 `AGENT_ERROR:` ——bridge 会把消息原样转发给用户，并把这次进程视为失败（即使后续退出码为 0）。比起单纯返回非零退出码，这能让用户看到一条有意义的说明，而不是 bridge 的通用模板。
-
-### 裸脚本形式
-
-任何能写 stdout 的脚本都可以直接输出协议行：
+当 agent 遇到需要让用户看见的错误（上游 API 失效、限流、参数不合法等），输出一个 `{"type":"error"}` 事件——bridge 会把消息原样转发给用户，并把这次进程视为失败（即使后续退出码为 0），并丢弃并发的回复正文。
 
 ::: code-group
 
 ```bash [bash]
 #!/usr/bin/env bash
 # error_agent.sh
-if [ -z "$AGENT_MESSAGE" ]; then
-  printf 'AGENT_ERROR:"消息不能为空。"\n'
+read -r turn
+message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
+if [ -z "$message" ]; then
+  echo '{"type":"error","message":"消息不能为空。"}'
   exit 1
 fi
-echo "你说：$AGENT_MESSAGE"
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"你说：'"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]
 #!/usr/bin/env python3
 # error_agent.py
-import os, json
-msg = os.environ.get("AGENT_MESSAGE", "").strip()
-if not msg:
-    print(f'AGENT_ERROR:{json.dumps("消息不能为空。", ensure_ascii=False)}')
-    raise SystemExit(1)
-print(f"你说：{msg}")
-```
-
-```js [node]
-#!/usr/bin/env node
-// error_agent.js
-const msg = (process.env.AGENT_MESSAGE || '').trim();
-if (!msg) {
-  process.stdout.write(`AGENT_ERROR:${JSON.stringify('消息不能为空。')}\n`);
-  process.exit(1);
-}
-console.log(`你说：${msg}`);
-```
-
-:::
-
-### SDK 形式
-
-使用 SDK 时，调用错误透出 API 或抛出 `ProtocolError`，SDK 会替你格式化协议行。
-
-::: code-group
-
-```python [python]
 from agentproc import create_profile, ProtocolError
 
 async def handler(ctx):
     if not ctx.message.strip():
         raise ProtocolError("消息不能为空。")
-    # 或者用：await ctx.send_error("消息不能为空。") 然后 return
-    reply = await my_llm(ctx.message)
-    return reply
+    return f"你说：{ctx.message}"
 
 create_profile(handler)
 ```
 
 ```js [node]
+#!/usr/bin/env node
+// error_agent.js
 const { createProfile, protocolError } = require('agentproc');
 
 createProfile(async (ctx) => {
   if (!ctx.message.trim()) {
-    throw await protocolError('消息不能为空。');
-    // 或者用：ctx.sendError('消息不能为空。'); return;
+    throw protocolError('消息不能为空。');
   }
-  const reply = await myLLM(ctx.message);
-  return { response: reply };
+  return { response: `你说：${ctx.message}` };
 });
 ```
 
 :::
 
-详见 [协议规范](/zh/spec/#error-行) 和 [SDK 文档](/zh/sdk/python#错误透出)。
+SDK 形式（抛 `ProtocolError` / `protocolError(...)`）和裸 `echo '{"type":"error","message":"..."}'` 形式产生的线上输出完全一致。无论哪种，输出事件后都要以非零码退出。
 
 ---
 

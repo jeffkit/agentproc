@@ -58,7 +58,7 @@ function build() {
   const parts = [];
   parts.push(`# AgentProc — Full Documentation (for LLMs)\n`);
   parts.push(`> Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: ${SITE}\n`);
-  parts.push(`> Protocol version: 0.1 · Package version: ${readPackageVersion()} · Generated from commit in repo.\n`);
+  parts.push(`> Protocol version: 0.3 · Package version: ${readPackageVersion()} · Generated from commit in repo.\n`);
 
   parts.push(`\n## Table of contents\n`);
   SECTIONS.forEach(([_, title]) => parts.push(`- ${title}`));

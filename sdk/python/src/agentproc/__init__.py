@@ -2,17 +2,17 @@
 agentproc — AgentProc Protocol SDK (Python)
 
 Implements the AgentProc P0 protocol so you can write a single async handler
-instead of manually reading env vars and formatting stdout.
+instead of manually reading the turn from stdin and formatting stdout.
 
-Protocol contract (spec/protocol.md, wire protocol 0.1):
-  Input  — env vars: AGENT_MESSAGE, AGENT_SESSION_ID, AGENT_SESSION_NAME,
-                     AGENT_FROM_USER, AGENT_STREAMING, AGENT_PROTOCOL_VERSION,
-                     AGENT_IMAGE_URL, AGENT_FILE_URL
-  Output — stdout (sentinel-prefixed lines):
-             AGENT_SESSION:<opaque-id>     — declare session id (last wins)
-             AGENT_PARTIAL:<json-string>   — streaming chunk
-             AGENT_ERROR:<json-string>     — error message to forward to user
-             everything else               = final reply body
+Protocol contract (spec/protocol.md, wire protocol 0.3, NDJSON both directions):
+  Input  — stdin: one {"type":"turn",...} line (message, session_id,
+                   session_name, from_user, attachments, permission,
+                   protocol_version). Secrets/config stay in env.
+  Output — stdout (one JSON object per line, discriminated by `type`):
+             {"type":"partial","text":...}    — streaming chunk
+             {"type":"text","text":...}       — final reply body
+             {"type":"session","id":...}      — declare session id (last wins)
+             {"type":"error","message":...}   — error message to forward to user
   Exit   — 0 success, 1 error, 124 timeout, 130 SIGINT, 143 SIGTERM
 
 Example::
@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable, List, Optional, Sequence, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 __all__ = [
     "AgentContext",
@@ -85,7 +85,8 @@ from .runner import PROTOCOL_VERSION, is_valid_session_id  # noqa: E402
 class ProtocolError(Exception):
     """Raised by the handler to signal an error that should reach the user.
 
-    The SDK emits an ``AGENT_ERROR:`` line with the message and exits non-zero.
+    The SDK emits a ``{"type":"error",...}`` line with the message and exits
+    non-zero.
     """
 
 
@@ -105,36 +106,33 @@ class AgentContext:
     """Input context passed to the agent handler."""
 
     message: str
-    """User message text (AGENT_MESSAGE)."""
+    """User message text (turn.message)."""
 
     session_id: str
-    """Session ID from the previous turn (AGENT_SESSION_ID). Empty = new session."""
+    """Session ID from the previous turn (turn.session_id). Empty = new session."""
 
     session_name: str
-    """Human-readable session name (AGENT_SESSION_NAME)."""
+    """Human-readable session name (turn.session_name)."""
 
     from_user: str
-    """Sender identifier (AGENT_FROM_USER)."""
-
-    streaming: bool
-    """Whether the bridge expects streaming output (AGENT_STREAMING == "1")."""
+    """Sender identifier (turn.from_user)."""
 
     protocol_version: str
-    """Protocol version the bridge implements (AGENT_PROTOCOL_VERSION)."""
+    """Protocol version the bridge implements (turn.protocol_version)."""
 
-    image_url: str
-    """Image attachment URL (AGENT_IMAGE_URL). Empty if no image."""
+    attachments: List[Dict[str, Any]]
+    """Attachment list (turn.attachments). Empty list = no attachments."""
 
-    file_url: str
-    """File attachment URL (AGENT_FILE_URL). Empty if no file."""
+    permission: bool
+    """True when the bridge enabled the optional permission channel."""
 
-    def send_partial(self, text: str):
+    def send_partial(self, text: str, role: Optional[str] = None):
         """Send a streaming chunk to the user immediately.
 
-        Writes an ``AGENT_PARTIAL:<json>`` line to stdout and flushes at call
-        time. The bridge forwards it to the user without waiting for the
-        process to exit. Has no effect when ``streaming`` is False (the bridge
-        will ignore the line).
+        Writes a ``{"type":"partial","text":...}`` line to stdout and flushes
+        at call time. The bridge forwards it to the user without waiting for
+        the process to exit. ``role`` (e.g. ``"output"`` or ``"thinking"``)
+        is optional and MAY be rendered differently by the bridge.
 
         Returns a no-op awaitable so ``await ctx.send_partial(...)`` keeps
         working in async handlers; a sync handler may call it bare. Either way
@@ -142,26 +140,29 @@ class AgentContext:
         """
         if not text:
             return _NoopAwaitable()
-        line = f"AGENT_PARTIAL:{json.dumps(text, ensure_ascii=False)}\n"
-        sys.stdout.write(line)
+        evt: Dict[str, Any] = {"type": "partial", "text": text}
+        if role:
+            evt["role"] = role
+        sys.stdout.write(json.dumps(evt, ensure_ascii=False, separators=(',', ':')) + "\n")
         sys.stdout.flush()
         return _NoopAwaitable()
 
     def send_error(self, text: str):
         """Send an error message to the user.
 
-        Writes an ``AGENT_ERROR:<json>`` line to stdout and flushes at call
-        time. Honored regardless of ``streaming`` mode. After calling this, the
-        handler should typically raise ProtocolError or return — any reply body
-        produced alongside will be discarded by the bridge.
+        Writes a ``{"type":"error","message":...}`` line to stdout and flushes
+        at call time. Honored regardless of ``streaming`` mode. After calling
+        this, the handler should typically raise ProtocolError or return — any
+        reply body produced alongside will be discarded by the bridge.
 
         Returns a no-op awaitable so ``await ctx.send_error(...)`` keeps working
         in async handlers; a sync handler may call it bare.
         """
         if not text:
             return _NoopAwaitable()
-        line = f"AGENT_ERROR:{json.dumps(text, ensure_ascii=False)}\n"
-        sys.stdout.write(line)
+        sys.stdout.write(
+            json.dumps({"type": "error", "message": text}, ensure_ascii=False, separators=(',', ':')) + "\n"
+        )
         sys.stdout.flush()
         return _NoopAwaitable()
 
@@ -174,7 +175,7 @@ class AgentResult:
     """Final reply text. Can be empty if all content was sent via send_partial."""
 
     session_id: str = ""
-    """Session ID to persist. Bridge will pass it back next turn as AGENT_SESSION_ID."""
+    """Session ID to persist. Bridge will pass it back next turn as session_id."""
 
 
 @dataclass
@@ -194,17 +195,15 @@ def session_file_path(session_id: str, base_dir: Optional[str] = None) -> Path:
     Returns the path even if the file does not yet exist. Raises ``ValueError``
     when ``session_id`` is empty — callers should guard with ``if session_id``.
 
-    Rejects any id that is not a spec-compliant session id (see
-    ``is_valid_session_id`` in runner.py — non-empty, no whitespace / control
-    chars / colons / path separators), plus the literal ``.`` and ``..`` even
-    though those pass the charset (the regex allows ``.``). A handler can call
-    this with any string, and we store each session as ``<id>.jsonl`` — a
-    separator-bearing or ``..`` id would path-traverse out of the sessions
-    directory. Valid ids like ``a..b`` are accepted (no traversal).
+    In wire 0.3 a session id is an arbitrary JSON string on the wire, but the
+    SDK stores each session as ``<id>.jsonl``; an id that is not a storage-safe
+    filename component (path separators, control chars, ``.``/``..``) would
+    path-traverse out of the sessions directory and is rejected here. See
+    ``is_valid_session_id`` in runner.py.
     """
     if not session_id:
         raise ValueError("session_id must be non-empty")
-    if not is_valid_session_id(session_id) or session_id in (".", ".."):
+    if not is_valid_session_id(session_id):
         raise ValueError(f"session_id is not a safe filename component: {session_id!r}")
     root = Path(base_dir) if base_dir else Path.home() / ".agentproc" / "sessions"
     root.mkdir(parents=True, exist_ok=True)
@@ -258,19 +257,40 @@ def append_history(
 
 
 # ---------------------------------------------------------------------------
-# Env parsing helpers
+# Turn parsing — read the {"type":"turn",...} line from stdin
 # ---------------------------------------------------------------------------
 
-def _context_from_env() -> AgentContext:
+def _read_turn() -> Dict[str, Any]:
+    """Read exactly one line from stdin (the turn object) and JSON-decode it.
+
+    Returns an empty dict on any failure (best-effort, fail-soft per spec).
+    """
+    try:
+        line = sys.stdin.readline()
+    except Exception:
+        return {}
+    if not line:
+        return {}
+    line = line.rstrip("\r\n")
+    try:
+        v = json.loads(line)
+        if isinstance(v, dict):
+            return v
+    except json.JSONDecodeError:
+        pass
+    return {}
+
+
+def _context_from_turn() -> AgentContext:
+    t = _read_turn()
     return AgentContext(
-        message=os.environ.get("AGENT_MESSAGE", ""),
-        session_id=os.environ.get("AGENT_SESSION_ID", ""),
-        session_name=os.environ.get("AGENT_SESSION_NAME", "default"),
-        from_user=os.environ.get("AGENT_FROM_USER", ""),
-        streaming=os.environ.get("AGENT_STREAMING", "1") != "0",
-        protocol_version=os.environ.get("AGENT_PROTOCOL_VERSION", PROTOCOL_VERSION),
-        image_url=os.environ.get("AGENT_IMAGE_URL", ""),
-        file_url=os.environ.get("AGENT_FILE_URL", ""),
+        message=t.get("message") if isinstance(t.get("message"), str) else "",
+        session_id=t.get("session_id") if isinstance(t.get("session_id"), str) else "",
+        session_name=t.get("session_name") if isinstance(t.get("session_name"), str) else "default",
+        from_user=t.get("from_user") if isinstance(t.get("from_user"), str) else "",
+        protocol_version=t.get("protocol_version") if isinstance(t.get("protocol_version"), str) else PROTOCOL_VERSION,
+        attachments=t.get("attachments") if isinstance(t.get("attachments"), list) else [],
+        permission=t.get("permission") is True,
     )
 
 
@@ -284,9 +304,9 @@ Handler = Callable[[AgentContext], Union[Awaitable[Union[str, AgentResult, None]
 def create_profile(handler: Handler) -> None:
     """Run the handler as an AgentProc-compliant process.
 
-    Reads AGENT_* env vars, calls the handler, and writes the P0 output to stdout.
-    Call this at the bottom of your script — it blocks until the handler completes
-    and then exits the process.
+    Reads the turn object from stdin, calls the handler, and writes the P0
+    output to stdout. Call this at the bottom of your script — it blocks until
+    the handler completes and then exits the process.
 
     Args:
         handler: A function taking an :class:`AgentContext` and returning either
@@ -297,7 +317,7 @@ def create_profile(handler: Handler) -> None:
             one (or any handler returning a coroutine) is awaited via
             :func:`asyncio.run`. This mirrors the Node SDK, which accepts both.
     """
-    ctx = _context_from_env()
+    ctx = _context_from_turn()
 
     try:
         ret = handler(ctx)
@@ -307,7 +327,10 @@ def create_profile(handler: Handler) -> None:
     except ProtocolError as e:
         # Handler already-signaled error surfaced via exception.
         sys.stdout.write(
-            f"AGENT_ERROR:{json.dumps(str(e) or 'unknown error', ensure_ascii=False)}\n"
+            json.dumps(
+                {"type": "error", "message": str(e) or "unknown error"},
+                ensure_ascii=False, separators=(',', ':'),
+            ) + "\n"
         )
         sys.stdout.flush()
         sys.exit(1)
@@ -323,16 +346,18 @@ def create_profile(handler: Handler) -> None:
     if isinstance(result, str):
         result = AgentResult(response=result)
 
-    # session line — emitted last in the typical "I just learned it" flow,
+    # session event — emitted last in the typical "I just learned it" flow,
     # but the spec says last wins, so emitting it at the end is correct.
     if result.session_id:
-        sys.stdout.write(f"AGENT_SESSION:{result.session_id}\n")
+        sys.stdout.write(
+            json.dumps({"type": "session", "id": result.session_id}, ensure_ascii=False, separators=(',', ':')) + "\n"
+        )
         sys.stdout.flush()
 
     if result.response:
-        sys.stdout.write(result.response)
-        if not result.response.endswith("\n"):
-            sys.stdout.write("\n")
+        sys.stdout.write(
+            json.dumps({"type": "text", "text": result.response}, ensure_ascii=False, separators=(',', ':')) + "\n"
+        )
         sys.stdout.flush()
 
     sys.exit(0)

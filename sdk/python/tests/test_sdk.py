@@ -31,20 +31,21 @@ SCENARIOS = DATA["scenarios"]
 
 
 def _run_scenario(scenario: dict) -> subprocess.CompletedProcess:
-    # Start from a minimal infra env (no inherited AGENT_*), then layer the
-    # scenario's AGENT_* vars on top — so a leftover AGENT_SESSION_ID from the
-    # test runner's own environment can't contaminate the result.
+    # Start from a minimal infra env (no inherited AGENT_*). Wire 0.3 carries
+    # the turn on stdin, not env — so the scenario's `turn` object is written as
+    # a single NDJSON line to the harness's stdin.
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": os.environ.get("HOME", ""),
         "LANG": os.environ.get("LANG", ""),
         "TERM": os.environ.get("TERM", ""),
         "PYTHONPATH": str(SRC_DIR),
-        **scenario["env"],
     }
+    turn_line = json.dumps(scenario["turn"]) + "\n"
     return subprocess.run(
         [sys.executable, str(HARNESS), scenario["handler"]],
         env=env,
+        input=turn_line,
         capture_output=True,
         text=True,
     )

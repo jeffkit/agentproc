@@ -8,7 +8,8 @@ cli_install: |
   # Or download from https://cursor.com/downloads
   # Then log in: agent login
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your
   # current directory (so `agent` runs against your project); you can also
   # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
@@ -27,16 +28,16 @@ maintainer: jeffkit
 tags: [coding, cursor, ai]
 notes: |
   The bridge invokes `agent -p <message> --output-format stream-json
-  --stream-partial-output --yolo` and re-emits as AGENT_PARTIAL: lines.
+  --stream-partial-output --yolo` and re-emits as {"type":"partial"} lines.
 
   Note the Cursor Agent CLI binary is named `agent`, not `cursor`. It is a
   standalone download separate from the Cursor IDE.
 
   Schema (verified end-to-end against agent 2026.06.24):
-    system/init      → session_id (forwarded as AGENT_SESSION:)
-    assistant        → content[].text delta → AGENT_PARTIAL:
+    system/init      → session_id (forwarded as {"type":"session"})
+    assistant        → content[].text delta → {"type":"partial"}
     result/success   → terminal; carries session_id (last wins) and full result
-    result/error     → AGENT_ERROR:
+    result/error     → {"type":"error"}
 
   Cursor emits both delta chunks AND a final assembled `assistant` event with
   the full text — the bridge's accumulated-prefix dedup drops the duplicate.

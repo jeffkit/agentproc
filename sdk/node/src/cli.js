@@ -17,29 +17,29 @@
  *   --session <id>            Previous session id for multi-turn
  *   --session-name <name>     Human-readable session name
  *   --from <user>             Sender identifier
- *   --image-url <url>         Image attachment URL (sets AGENT_IMAGE_URL)
- *   --file-url <url>          File attachment URL (sets AGENT_FILE_URL)
+ *   --image-url <url>         Image attachment URL (carried in the turn's attachments)
+ *   --file-url <url>          File attachment URL (carried in the turn's attachments)
  *   --cwd <path>              Override profile.cwd
  *   --env KEY=VALUE           Extra env var (repeatable)
  *   --timeout <secs>          Override profile.timeout_secs
- *   --no-stream               Disable streaming (set AGENT_STREAMING=0)
+ *   --no-stream               Disable streaming (ignore {"type":"partial"} events)
  *   --verbose                 Forward protocol lines to stderr (default)
  *   --quiet                   Suppress protocol lines on stderr
- *   --raw                     Don't parse stdout; forward agent output verbatim
+ *   --raw                     Quiet mode: only print the final reply body (no live events)
  *   --stdin                   Read prompt from stdin instead of --prompt
  *   --version                 Print version and exit
  *   --help, -h                Show help
  *
  * Output (default mode):
- *   stderr  → protocol lines (AGENT_PARTIAL:, AGENT_SESSION:, AGENT_ERROR:) in real time
- *   stdout  → final reply body (printed after agent exits)
+ *   stderr  → NDJSON events ({"type":"partial"/"session"/"error"}) in real time
+ *   stdout  → final reply body (assembled from {"type":"text"} events; after agent exits)
  *   exit    → 0 success, 1 error, 124 timeout
  *
  * Output (--raw mode):
  *   stdout  → agent's stdout, verbatim, no parsing
  *   exit    → agent's exit code
  *
- * The last AGENT_SESSION: id is also printed on stderr at the very end,
+ * The last {"type":"session"} id is also printed on stderr at the very end,
  * prefixed with "agentproc:session:" so shell scripts can capture it:
  *   session=$(agentproc ... 2>&1 | grep '^agentproc:session:' | cut -d: -f3)
  */
@@ -272,8 +272,8 @@ Hub run options (same as the regular --profile runner):
   --env KEY=VALUE              Extra env var (repeatable)
   --session <id>               Previous session id for multi-turn
   --from <user>                Sender identifier
-  --image-url <url>            Image attachment URL (sets AGENT_IMAGE_URL)
-  --file-url <url>             File attachment URL (sets AGENT_FILE_URL)
+  --image-url <url>            Image attachment URL (carried in the turn's attachments)
+  --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
@@ -292,6 +292,20 @@ Examples:
 
 Profiles are cached at ~/.agentproc/cache/hub/<name>/ (24h TTL).
 `);
+}
+
+/**
+ * Build the turn's `attachments` array from the legacy --image-url / --file-url
+ * flags. Wire 0.3 carries attachments as a single `attachments` list; there are
+ * no separate AGENT_IMAGE_URL / AGENT_FILE_URL channels. Returns undefined when
+ * no attachment flags were given (so the turn object omits the key entirely —
+ * presence-as-feature).
+ */
+function buildAttachments(opts) {
+  const a = [];
+  if (opts.imageUrl) a.push({ kind: 'image', url: String(opts.imageUrl) });
+  if (opts.fileUrl) a.push({ kind: 'file', url: String(opts.fileUrl) });
+  return a.length ? a : undefined;
 }
 
 /**
@@ -342,8 +356,7 @@ async function runAgent(profilePath, opts) {
       cwd: opts.cwd,
       profileDir,
       extraEnv,
-      imageUrl: opts.imageUrl || '',
-      fileUrl: opts.fileUrl || '',
+      attachments: buildAttachments(opts),
       timeoutSecs: opts.timeout,
     });
     process.stdout.write(r.reply);
@@ -396,12 +409,11 @@ async function runAgent(profilePath, opts) {
     cwd: opts.cwd,
     profileDir,
     extraEnv,
-    imageUrl: opts.imageUrl || '',
-    fileUrl: opts.fileUrl || '',
+    attachments: buildAttachments(opts),
     timeoutSecs: opts.timeout,
-    onPartial: (t) => { if (verbose) process.stderr.write(`AGENT_PARTIAL:${JSON.stringify(t)}\n`); },
-    onSession: (id) => { if (verbose) process.stderr.write(`AGENT_SESSION:${id}\n`); },
-    onError: (msg) => { if (verbose) process.stderr.write(`AGENT_ERROR:${JSON.stringify(msg)}\n`); },
+    onPartial: (t, role) => { if (verbose) process.stderr.write(JSON.stringify({ type: 'partial', text: t, ...(role ? { role } : {}) }) + '\n'); },
+    onSession: (id) => { if (verbose) process.stderr.write(JSON.stringify({ type: 'session', id }) + '\n'); },
+    onError: (msg) => { if (verbose) process.stderr.write(JSON.stringify({ type: 'error', message: msg }) + '\n'); },
     onStderr: (line) => { if (verbose) process.stderr.write(`[agent stderr] ${line}\n`); },
     onPermission: permissionOn ? onPermission : undefined,
   });
@@ -452,20 +464,20 @@ Session:
   --from <user>             Sender identifier
 
 Attachments:
-  --image-url <url>         Image attachment URL (sets AGENT_IMAGE_URL)
-  --file-url <url>          File attachment URL (sets AGENT_FILE_URL)
+  --image-url <url>         Image attachment URL (carried in the turn's attachments)
+  --file-url <url>          File attachment URL (carried in the turn's attachments)
 
 Execution:
   --cwd <path>              Override profile.cwd (relative paths resolve
                             against the profile.yaml's directory)
   --env KEY=VALUE           Extra env var (repeatable)
   --timeout <secs>          Override profile.timeout_secs
-  --no-stream               Set AGENT_STREAMING=0
+  --no-stream               Disable streaming (ignore {"type":"partial"} events)
 
 Output:
   --verbose                 Forward protocol lines to stderr (default)
   --quiet                   Suppress protocol lines on stderr
-  --raw                     Don't parse stdout; forward agent output verbatim
+  --raw                     Quiet mode: only print the final reply body (no live events)
   --stdin                   Read prompt from stdin instead of --prompt
 
 Other:
@@ -473,8 +485,8 @@ Other:
   --help, -h                Show this help
 
 Output semantics:
-  stderr  → protocol lines (AGENT_PARTIAL:, AGENT_SESSION:, AGENT_ERROR:)
-  stdout  → final reply body (non-protocol lines)
+  stderr  → NDJSON events ({"type":"partial"/"session"/"error"})
+  stdout  → final reply body (assembled from {"type":"text"} events)
   exit    → 0 success · 1 error · 124 timeout (per spec)
 
 The final session id is printed on stderr as: agentproc:session:<id>

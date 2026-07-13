@@ -1,41 +1,47 @@
 {
-  "_comment": "Multi-line stdout scenarios for the bridge-side runner. Each scenario feeds the listed lines (in order) as the agent's stdout, then asserts the runner's observable outputs: final reply, session_id, error, exit_code, and (when streaming) the list of partial chunks delivered via on_partial. Both the Python runner.run() and Node runner.run() MUST produce the listed result. Add scenarios here when a spec change touches multi-line interaction semantics (last-wins, error-mid-stream, session-with-error, etc.); both SDK test suites pick this file up automatically.",
+  "_comment": "Multi-line stdout NDJSON scenarios for the bridge-side runner. Each scenario feeds the listed lines (in order) as the agent's stdout, then asserts the runner's observable outputs: final reply (assembled from {type:text} events), session_id, error, exit_code, and (when streaming) the list of partial chunks delivered via on_partial. In wire 0.3 every line is a JSON event; non-event lines are malformed and ignored (logged, never appended to the reply). Both the Python runner.run() and Node runner.run() MUST produce the listed result. Add scenarios here when a spec change touches multi-line interaction semantics (last-wins, error-mid-stream, session-with-error, invalid-session handling, etc.); both SDK test suites pick this file up automatically.",
   "scenarios": [
     {
-      "name": "session last-wins (two session lines)",
-      "lines": ["AGENT_SESSION:first", "AGENT_SESSION:second", "done"],
+      "name": "session last-wins (two session events)",
+      "lines": ["{\"type\":\"session\",\"id\":\"first\"}", "{\"type\":\"session\",\"id\":\"second\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
       "streaming": true,
       "expect": {"reply": "done", "session_id": "second", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "session discovered at end (common CLI-wrapping case)",
-      "lines": ["AGENT_PARTIAL:\"Here is the first part. \"", "AGENT_PARTIAL:\"And the second.\"", "AGENT_SESSION:cli-sess-9f3a2c1e"],
+      "lines": ["{\"type\":\"partial\",\"text\":\"Here is the first part. \"}", "{\"type\":\"partial\",\"text\":\"And the second.\"}", "{\"type\":\"session\",\"id\":\"cli-sess-9f3a2c1e\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "cli-sess-9f3a2c1e", "error": "", "exit_code": 0, "partials": ["Here is the first part. ", "And the second."]}
     },
     {
       "name": "one-shot with session declared up front",
-      "lines": ["AGENT_SESSION:f47ac10b-58cc-4372", "Here is the complete answer."],
+      "lines": ["{\"type\":\"session\",\"id\":\"f47ac10b-58cc-4372\"}", "{\"type\":\"text\",\"text\":\"Here is the complete answer.\"}"],
       "streaming": true,
       "expect": {"reply": "Here is the complete answer.", "session_id": "f47ac10b-58cc-4372", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "error mid-stream (rate-limit case)",
-      "lines": ["AGENT_PARTIAL:\"Let me look that up... \"", "AGENT_ERROR:\"Upstream API rate limited. Try again in 60s.\""],
+      "lines": ["{\"type\":\"partial\",\"text\":\"Let me look that up... \"}", "{\"type\":\"error\",\"message\":\"Upstream API rate limited. Try again in 60s.\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "", "error": "Upstream API rate limited. Try again in 60s.", "exit_code": 1, "partials": ["Let me look that up... "]}
     },
     {
-      "name": "session preserved when error follows (result{is_error} shape)",
-      "lines": ["AGENT_SESSION:sess-before-error", "AGENT_ERROR:\"turn failed\""],
+      "name": "session preserved when error follows",
+      "lines": ["{\"type\":\"session\",\"id\":\"sess-before-error\"}", "{\"type\":\"error\",\"message\":\"turn failed\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "sess-before-error", "error": "turn failed", "exit_code": 1, "partials": []}
     },
     {
-      "name": "body lines accumulate as reply",
-      "lines": ["line 1", "line 2", "line 3"],
+      "name": "text event carries newlines verbatim",
+      "lines": ["{\"type\":\"text\",\"text\":\"line 1\\nline 2\\nline 3\"}"],
       "streaming": true,
       "expect": {"reply": "line 1\nline 2\nline 3", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "multiple text events concatenate with no separator",
+      "lines": ["{\"type\":\"text\",\"text\":\"a\"}", "{\"type\":\"text\",\"text\":\"b\"}", "{\"type\":\"text\",\"text\":\"c\"}"],
+      "streaming": true,
+      "expect": {"reply": "abc", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "empty output → empty reply, success",
@@ -44,41 +50,59 @@
       "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "streaming=false ignores partials, keeps reply body",
-      "lines": ["AGENT_PARTIAL:\"ignored\"", "AGENT_SESSION:abc-123", "final body"],
+      "name": "streaming=false ignores partials, keeps text",
+      "lines": ["{\"type\":\"partial\",\"text\":\"ignored\"}", "{\"type\":\"session\",\"id\":\"abc-123\"}", "{\"type\":\"text\",\"text\":\"final body\"}"],
       "streaming": false,
       "expect": {"reply": "final body", "session_id": "abc-123", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "invalid session id is ignored, no session captured",
-      "lines": ["AGENT_SESSION:has space", "done"],
+      "name": "invalid session id (path separator) is ignored",
+      "lines": ["{\"type\":\"session\",\"id\":\"bad/path\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
       "streaming": true,
       "expect": {"reply": "done", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "invalid session id after valid one preserves the valid",
-      "lines": ["AGENT_SESSION:valid-1", "AGENT_SESSION:bad:id", "done"],
+      "lines": ["{\"type\":\"session\",\"id\":\"valid-1\"}", "{\"type\":\"session\",\"id\":\"bad/path\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
       "streaming": true,
       "expect": {"reply": "done", "session_id": "valid-1", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "non-streaming reply body truncated at max_reply_chars",
+      "name": "session id with spaces and colons is valid on the wire",
+      "lines": ["{\"type\":\"session\",\"id\":\"ok: spaced\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
+      "streaming": true,
+      "expect": {"reply": "done", "session_id": "ok: spaced", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "partial with role streams normally (role is not part of partials)",
+      "lines": ["{\"type\":\"partial\",\"text\":\"thinking...\",\"role\":\"thinking\"}", "{\"type\":\"text\",\"text\":\"answer\"}"],
+      "streaming": true,
+      "expect": {"reply": "answer", "session_id": "", "error": "", "exit_code": 0, "partials": ["thinking..."]}
+    },
+    {
+      "name": "malformed lines are ignored, never appended to reply",
+      "lines": ["hello world", "not json", "{\"type\":\"text\",\"text\":\"ok\"}"],
+      "streaming": true,
+      "expect": {"reply": "ok", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "non-streaming text truncated at max_reply_chars",
       "profile_overrides": {"max_reply_chars": 10},
-      "lines": ["0123456789ABCDEF"],
+      "lines": ["{\"type\":\"text\",\"text\":\"0123456789ABCDEF\"}"],
       "streaming": false,
       "expect": {"reply": "0123456789", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "streaming partials truncated at max_reply_chars",
       "profile_overrides": {"max_reply_chars": 10},
-      "lines": ["AGENT_PARTIAL:\"hello \"", "AGENT_PARTIAL:\"world!!\"", "AGENT_SESSION:sess-1"],
+      "lines": ["{\"type\":\"partial\",\"text\":\"hello \"}", "{\"type\":\"partial\",\"text\":\"world!!\"}", "{\"type\":\"session\",\"id\":\"sess-1\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "sess-1", "error": "", "exit_code": 0, "partials": ["hello ", "worl"]}
     },
     {
       "name": "streaming partials: first chunk already exceeds cap",
       "profile_overrides": {"max_reply_chars": 3},
-      "lines": ["AGENT_PARTIAL:\"hello\"", "AGENT_PARTIAL:\"world\""],
+      "lines": ["{\"type\":\"partial\",\"text\":\"hello\"}", "{\"type\":\"partial\",\"text\":\"world\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": ["hel"]}
     }

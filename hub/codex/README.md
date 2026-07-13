@@ -66,11 +66,12 @@ cd ~/projects/my-app
 agentproc hub run codex -p "reply with exactly: codex ok" --env OPENAI_API_KEY=$OPENAI_API_KEY
 ```
 
-Expected output (on stderr / stdout):
+Expected output (on stdout, one NDJSON event per line):
 
 ```
-AGENT_SESSION:019efead-1a89-7ff3-887a-cd11f3c0843f
-codex ok
+{"type":"partial","text":"codex ok"}
+{"type":"session","id":"019efead-1a89-7ff3-887a-cd11f3c0843f"}
+{"type":"text","text":"codex ok"}
 ```
 
 <details>
@@ -78,11 +79,7 @@ codex ok
 
 ```bash
 cd hub/codex
-AGENT_MESSAGE="reply with exactly: codex ok" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="0" \
-OPENAI_API_KEY="$OPENAI_API_KEY" \
-python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: codex ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | OPENAI_API_KEY="$OPENAI_API_KEY" python3 bridge.py
 ```
 
 </details>
@@ -94,11 +91,11 @@ codex emits NDJSON events with its own schema (different from claude's):
 | Event | What the bridge does |
 |-------|---------------------|
 | `thread.started` | Captures `thread_id` as the session id |
-| `item.completed` (`type: agent_message`) | Emits `AGENT_PARTIAL:` with the text |
+| `item.completed` (`type: agent_message`) | Emits `{"type":"partial"}` with the text |
 | `turn.completed` | Signals end of turn (no-op for the bridge) |
-| `turn.failed` | Emits `AGENT_ERROR:` |
+| `turn.failed` | Emits `{"type":"error"}` |
 
-For session continuity, the bridge invokes `codex exec resume --json <thread_id> <prompt>` when `AGENT_SESSION_ID` is set. The `--json` flag is present on both the first-turn and resume paths — without it codex emits non-NDJSON output that the bridge cannot parse. The thread id is opaque — the messaging bridge forwards it without interpreting.
+For session continuity, the bridge invokes `codex exec resume --json <thread_id> <prompt>` when `turn.session_id` is set. The `--json` flag is present on both the first-turn and resume paths — without it codex emits non-NDJSON output that the bridge cannot parse. The thread id is opaque — the messaging bridge forwards it without interpreting.
 
 ## Environment variables
 
@@ -122,13 +119,13 @@ Then the bridge:
 1. Creates a one-shot `CODEX_HOME` (copies `auth.json` / `config.toml` from the real home).
 2. Installs a `PermissionRequest` hook (`permission_hook.py`) that relays approvals over a Unix socket.
 3. Runs `codex exec --json` with `--dangerously-bypass-hook-trust` and `-c approval_policy="on-request"`.
-4. Translates Codex hook decisions ↔ AgentProc `AGENT_PERMISSION_REQUEST` / `AGENT_PERMISSION_RESPONSE`.
+4. Translates Codex hook decisions ↔ AgentProc `turn.permission_REQUEST` / `turn.permission_RESPONSE`.
 
 `agentproc` on a TTY prompts `Allow? [y/N]` for each request; without a TTY it denies. See [PERMISSIONS.md](../PERMISSIONS.md).
 
 ## Caveats
 
-- `codex exec --json` writes its progress lines to stderr by default (visible if you run the bridge with `AGENT_STREAMING=0`). The bridge does not forward stderr to the user unless `include_stderr_in_reply: true` is set in the profile.
+- `codex exec --json` writes its progress lines to stderr by default (visible if you run the bridge with a non-streaming profile, `streaming: false`). The bridge does not forward stderr to the user unless `include_stderr_in_reply: true` is set in the profile.
 - The bridge waits for `turn.completed` / `turn.failed` rather than relying on stdout EOF, because codex's stream ends with a final usage summary that's not part of the reply.
 - Default path: `codex`'s sandbox mode is **not** disabled — if you want the agent to be able to write files or run commands, configure that in `~/.codex/config.toml` (e.g. `sandbox_mode = "workspace-write"`).
 - Permission mode needs Codex ≥ ~0.133 (GA hooks with `PermissionRequest`). The bridge also needs `python3` on PATH for the hook script.

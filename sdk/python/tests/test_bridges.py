@@ -1,9 +1,11 @@
-"""End-to-end tests for hub bridge scripts.
+"""End-to-end tests for hub bridge scripts (wire 0.3).
 
 Each hub profile ships a Python bridge that wraps an AI CLI emitting NDJSON.
-These tests exercise each bridge's ``build_args`` + ``parse_event`` against
-fixture NDJSON streams, asserting the resulting ``AGENT_PARTIAL:`` /
-``AGENT_SESSION:`` / ``AGENT_ERROR:`` output — without needing the real CLI
+These tests drive each bridge's ``build_args`` + ``parse_event`` through the
+shared ``stream_utils.run_bridge`` (or ``run_plain_cli``) against fixture NDJSON
+streams — feeding a ``{"type":"turn",...}`` object on stdin and asserting the
+NDJSON event output (``{"type":"partial"}`` / ``{"type":"session"}`` /
+``{"type":"error"}`` / ``{"type":"text"}``) — without needing the real CLI
 installed.
 
 This is the layer that catches:
@@ -21,7 +23,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import pytest
 
@@ -45,7 +47,7 @@ def _load_bridge(profile_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Fake subprocess for stream_utils.run_bridge
+# Fake subprocess for stream_utils.run_bridge / run_plain_cli
 # ---------------------------------------------------------------------------
 
 class _FakePipe:
@@ -64,24 +66,7 @@ class _FakePipe:
         return ""
 
 
-class _FakeProc:
-    def __init__(self, ndjson_lines: List[str], returncode: int = 0):
-        self.stdout = _FakePipe(ndjson_lines)
-        self._stderr = ""
-        self.returncode = returncode
-
-    @property
-    def stderr(self):
-        # stream_utils does proc.stderr.read() once after the loop.
-        return _StderrReader(self._stderr)
-
-    def wait(self):
-        return self.returncode
-
-
 class _StderrReader:
-    """Wraps a string so .read() returns it (mimics pipe.stderr.read())."""
-
     def __init__(self, text: str):
         self._text = text
 
@@ -89,68 +74,47 @@ class _StderrReader:
         return self._text
 
 
+class _FakeProc:
+    """Fake Popen return value for run_bridge (stdout iter + stderr + wait)."""
+
+    def __init__(self, ndjson_lines: List[str], returncode: int = 0, stderr: str = ""):
+        self.stdout = _FakePipe(ndjson_lines)
+        self._stderr = stderr
+        self.returncode = returncode
+
+    @property
+    def stderr(self):
+        return _StderrReader(self._stderr)
+
+    def wait(self):
+        return self.returncode
+
+
+class _FakeCompletedProcess:
+    """Fake subprocess.run return value for run_plain_cli."""
+
+    def __init__(self, stdout: str, returncode: int, stderr: str = ""):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
 def _events_to_ndjson(events) -> List[str]:
     return [json.dumps(e, ensure_ascii=False) for e in events]
 
 
-def _run_bridge(mod, events, *, streaming=True, returncode=0, session_id="", message="hi"):
-    """Run the bridge module against fixture events; capture stdout.
-
-    Monkeypatches ``subprocess.Popen`` inside stream_utils so the bridge sees
-    a fake CLI that emits the given NDJSON event dicts, one per line.
-    """
-    import _shared.stream_utils as su
-
-    lines = _events_to_ndjson(events)
-    fake_proc = _FakeProc(lines, returncode=returncode)
-
-    captured_stdout: List[str] = []
-
-    def fake_emit(line: str):
-        captured_stdout.append(line)
-
-    env = {
-        "AGENT_MESSAGE": message,
-        "AGENT_SESSION_ID": session_id,
-        "AGENT_STREAMING": "1" if streaming else "0",
+def _make_turn(*, message="hi", session_id="", attachments=None) -> str:
+    turn = {
+        "type": "turn",
+        "message": message,
+        "session_id": session_id,
+        "session_name": "default",
+        "from_user": "",
+        "protocol_version": "0.3",
     }
-    monkeypatch_targets = []
-
-    real_popen = su.subprocess.Popen
-    real_emit = su.emit
-    real_environ = os.environ
-
-    class _Patcher:
-        def __enter__(self):
-            su.subprocess.Popen = lambda args, **kw: fake_proc
-            su.emit = fake_emit
-            # Replace os.environ in the stream_utils module's view: run_bridge
-            # reads env = os.environ. We swap the attribute on the os module
-            # referenced by stream_utils.
-            os.environ = env
-            return self
-
-        def __exit__(self, *exc):
-            su.subprocess.Popen = real_popen
-            su.emit = real_emit
-            os.environ = real_environ
-
-    patcher = _Patcher()
-    patcher.__enter__()
-    try:
-        # Call run_bridge directly so we can inspect the captured stdout.
-        rc = su.run_bridge(
-            getattr(mod, "CLI_NAME"),
-            getattr(mod, "INSTALL_HINT"),
-            mod.build_args,
-            # cursor uses make_parse_event() (a closure factory); the others
-            # expose parse_event directly. Normalise.
-            _resolve_parse_event(mod),
-        )
-    finally:
-        patcher.__exit__()
-
-    return rc, captured_stdout
+    if attachments is not None:
+        turn["attachments"] = attachments
+    return json.dumps(turn)
 
 
 def _resolve_parse_event(mod):
@@ -161,20 +125,82 @@ def _resolve_parse_event(mod):
     return mod.parse_event
 
 
-def _classify_output(lines: List[str]):
-    """Split captured stdout into session / partials / error / body buckets."""
+def _run_bridge(mod, events, *, returncode=0, session_id="", message="hi", attachments=None):
+    """Run the bridge module against fixture events; capture emitted NDJSON.
+
+    Monkeypatches ``subprocess.Popen`` and ``_emit_obj`` inside stream_utils so
+    the bridge sees a fake CLI emitting the given NDJSON event dicts, one per
+    line, and we capture the AgentProc events it emits on stdout.
+    """
+    import _shared.stream_utils as su
+
+    fake_proc = _FakeProc(_events_to_ndjson(events), returncode=returncode)
+    captured: List[dict] = []
+
+    real_emit_obj = su._emit_obj
+    real_popen = su.subprocess.Popen
+    saved_stdin = sys.stdin
+
+    su._emit_obj = lambda obj: captured.append(obj)
+    su.subprocess.Popen = lambda args, **kw: fake_proc
+    sys.stdin = io.StringIO(_make_turn(message=message, session_id=session_id,
+                                       attachments=attachments) + "\n")
+    try:
+        rc = su.run_bridge(
+            getattr(mod, "CLI_NAME"),
+            getattr(mod, "INSTALL_HINT"),
+            mod.build_args,
+            _resolve_parse_event(mod),
+        )
+    finally:
+        su._emit_obj = real_emit_obj
+        su.subprocess.Popen = real_popen
+        sys.stdin = saved_stdin
+
+    return rc, captured
+
+
+def _run_plain_cli(mod, *, message="hi", fake_result=None):
+    """Run a plain-CLI bridge (run_plain_cli) with subprocess.run mocked."""
+    import _shared.stream_utils as su
+
+    captured: List[dict] = []
+    real_emit_obj = su._emit_obj
+    real_run = su.subprocess.run
+    saved_stdin = sys.stdin
+
+    su._emit_obj = lambda obj: captured.append(obj)
+    su.subprocess.run = lambda args, **kw: _FakeCompletedProcess(**(fake_result or {}))
+    sys.stdin = io.StringIO(_make_turn(message=message) + "\n")
+    try:
+        rc = su.run_plain_cli(
+            getattr(mod, "CLI_NAME"),
+            getattr(mod, "INSTALL_HINT"),
+            mod.build_args,
+            timeout_env=getattr(mod, "TIMEOUT_ENV", "CLI_TIMEOUT"),
+            default_timeout=getattr(mod, "DEFAULT_TIMEOUT", 600),
+        )
+    finally:
+        su._emit_obj = real_emit_obj
+        su.subprocess.run = real_run
+        sys.stdin = saved_stdin
+
+    return rc, captured
+
+
+def _classify_output(events: List[dict]):
+    """Split captured NDJSON events into session / partials / error / body."""
     out = {"session": "", "partials": [], "error": "", "body": []}
-    for raw in lines:
-        # The bridge emits "AGENT_X:payload" — no trailing newline because we
-        # captured the inner string, not the emit() wrapper. Recreate the form.
-        if raw.startswith("AGENT_SESSION:"):
-            out["session"] = raw[len("AGENT_SESSION:"):].strip()
-        elif raw.startswith("AGENT_PARTIAL:"):
-            out["partials"].append(json.loads(raw[len("AGENT_PARTIAL:"):]))
-        elif raw.startswith("AGENT_ERROR:"):
-            out["error"] = json.loads(raw[len("AGENT_ERROR:"):])
-        else:
-            out["body"].append(raw)
+    for e in events:
+        t = e.get("type")
+        if t == "session":
+            out["session"] = e.get("id", "")
+        elif t == "partial":
+            out["partials"].append(e.get("text", ""))
+        elif t == "error":
+            out["error"] = e.get("message", "")
+        elif t == "text":
+            out["body"].append(e.get("text", ""))
     return out
 
 
@@ -183,21 +209,23 @@ def _classify_output(lines: List[str]):
 # ---------------------------------------------------------------------------
 
 def _assert_streaming_turn_works(mod, partial_event, result_event):
-    events = [partial_event, result_event]
-    rc, out = _run_bridge(mod, events, streaming=True)
+    """A streaming turn emits partial(s), forwards the session, and ends with a
+    final {"type":"text"} event (the result text, or the last partial when the
+    CLI has no terminal text). No error."""
+    rc, out = _run_bridge(mod, [partial_event, result_event])
     assert rc == 0
     parsed = _classify_output(out)
     assert parsed["partials"] == ["hello world"], f"partials wrong: {parsed}"
     assert parsed["session"], "session id should be forwarded"
     assert parsed["error"] == ""
-    # When streaming emitted partials, final_text MUST NOT also be sent as body.
-    assert parsed["body"] == [], f"final text leaked into body: {parsed}"
+    # 0.3 always emits a final text event (reply body).
+    assert parsed["body"], f"no final text event emitted: {parsed}"
 
 
 def _assert_error_preserves_session(mod, error_result_event):
-    """Spec: AGENT_ERROR does not invalidate the session — bridges MUST still
+    """Spec: an error event does not invalidate the session — bridges MUST still
     persist the session id for the next turn."""
-    rc, out = _run_bridge(mod, [error_result_event], streaming=True)
+    rc, out = _run_bridge(mod, [error_result_event])
     parsed = _classify_output(out)
     assert rc == 1, "error turn must exit non-zero"
     assert parsed["error"], "error message must reach the user"
@@ -283,7 +311,7 @@ class TestCodexBridge:
 
     def test_turn_failed_emits_error(self):
         fail = {"type": "turn.failed", "error": "quota exceeded"}
-        rc, out = _run_bridge(self.mod, [fail], streaming=True)
+        rc, out = _run_bridge(self.mod, [fail])
         parsed = _classify_output(out)
         assert rc == 1
         assert parsed["error"] == "quota exceeded"
@@ -305,18 +333,19 @@ class TestGeminiCliBridge:
         init = {"type": "init", "session_id": "gem-sess-1"}
         msg = {"type": "message", "role": "assistant", "content": "hi", "delta": True}
         result = {"type": "result", "status": "success"}
-        rc, out = _run_bridge(self.mod, [init, msg, result], streaming=True)
+        rc, out = _run_bridge(self.mod, [init, msg, result])
         parsed = _classify_output(out)
         assert rc == 0
         assert parsed["session"] == "gem-sess-1"
         assert parsed["partials"] == ["hi"]
+        assert parsed["body"] == ["hi"]  # last partial becomes the reply text
 
     def test_non_streaming_uses_final_text(self):
         init = {"type": "init", "session_id": "gem-sess-1"}
-        # delta=false (or absent) → full text, used as final fallback
+        # delta=false (or absent) → full text, used as final_text
         msg = {"type": "message", "role": "assistant", "content": "full reply"}
         result = {"type": "result", "status": "success"}
-        rc, out = _run_bridge(self.mod, [init, msg, result], streaming=False)
+        rc, out = _run_bridge(self.mod, [init, msg, result])
         parsed = _classify_output(out)
         assert rc == 0
         assert parsed["session"] == "gem-sess-1"
@@ -326,7 +355,7 @@ class TestGeminiCliBridge:
     def test_result_error_emits_error(self):
         init = {"type": "init", "session_id": "gem-sess-1"}
         result = {"type": "result", "status": "error", "error": {"message": "bad model"}}
-        rc, out = _run_bridge(self.mod, [init, result], streaming=True)
+        rc, out = _run_bridge(self.mod, [init, result])
         parsed = _classify_output(out)
         assert rc == 1
         assert parsed["error"] == "bad model"
@@ -350,11 +379,12 @@ class TestQwenCodeBridge:
         init = {"type": "init", "session_id": "qwen-sess-1"}
         msg = {"type": "message", "role": "assistant", "content": "hello", "delta": True}
         result = {"type": "result", "status": "success"}
-        rc, out = _run_bridge(self.mod, [init, msg, result], streaming=True)
+        rc, out = _run_bridge(self.mod, [init, msg, result])
         parsed = _classify_output(out)
         assert rc == 0
         assert parsed["session"] == "qwen-sess-1"
         assert parsed["partials"] == ["hello"]
+        assert parsed["body"] == ["hello"]
 
 
 class TestCursorBridge:
@@ -393,7 +423,6 @@ class TestCursorBridge:
         rc, out = _run_bridge(
             self.mod,
             [init, assistant1, assistant2, full_assistant, result],
-            streaming=True,
         )
         parsed = _classify_output(out)
         assert rc == 0
@@ -402,15 +431,16 @@ class TestCursorBridge:
         assert parsed["partials"] == ["hel", "lo"], (
             f"duplicate full-text event leaked: {parsed}"
         )
-        assert parsed["body"] == []
+        # The terminal result provides the final reply text.
+        assert parsed["body"] == ["hello"]
 
     def test_result_error_preserves_session(self):
         init = {"type": "system", "subtype": "init", "session_id": "cur-sess-1"}
         result = {"type": "result", "session_id": "cur-sess-1", "is_error": True, "result": "boom"}
-        _assert_error_preserves_session(self.mod, [init, result][-1])
-        # Re-run with both events to be sure init's session survives.
-        rc, out = _run_bridge(self.mod, [init, result], streaming=True)
+        rc, out = _run_bridge(self.mod, [init, result])
         parsed = _classify_output(out)
+        assert rc == 1
+        assert parsed["error"] == "boom"
         assert parsed["session"] == "cur-sess-1"
 
 
@@ -433,23 +463,45 @@ class TestCodebuddyBridge:
         result = {"type": "result", "session_id": "cb-sess-1", "result": "hello world"}
         _assert_streaming_turn_works(self.mod, partial, result)
 
+    def test_permission_true_is_refused(self):
+        """codebuddy does not support mid-turn permission; the bridge refuses
+        turn.permission before delegating to run_bridge."""
+        from _shared.stream_utils import emit_error  # noqa: F401  (ensures import path)
+        captured: List[dict] = []
+        real_emit = self.mod.emit_error
+        self.mod.emit_error = lambda m: captured.append({"type": "error", "message": m})
+        saved_stdin = sys.stdin
+        sys.stdin = io.StringIO(
+            json.dumps({"type": "turn", "message": "hi", "permission": True}) + "\n"
+        )
+        try:
+            rc = self.mod.main()
+        finally:
+            self.mod.emit_error = real_emit
+            sys.stdin = saved_stdin
+        assert rc == 1
+        assert captured and captured[0]["type"] == "error"
+        assert "permission" in captured[0]["message"].lower()
+
 
 class TestEmptyMessageHandling:
-    """Covers the spec rule: AGENT_MESSAGE may be empty when the turn carries
-    attachments. The hub layer rejects only when there is no text AND no
-    attachment of any kind."""
+    """Covers the spec rule: turn.message may be empty when the turn carries
+    attachments (e.g. an image-only message). The hub layer rejects only when
+    there is no text AND no attachment of any kind."""
 
-    def _run_with_env(self, env, events=None):
+    def _run_with_turn(self, *, message, attachments=None):
         import _shared.stream_utils as su
-        fake_proc = _FakeProc(_events_to_ndjson(events or []), returncode=0)
-        captured = []
+        fake_proc = _FakeProc(_events_to_ndjson([]), returncode=0)
+        captured: List[dict] = []
+        real_emit = su._emit_obj
         real_popen = su.subprocess.Popen
-        real_emit = su.emit
-        real_environ = os.environ
+        saved_stdin = sys.stdin
+        su._emit_obj = lambda o: captured.append(o)
+        su.subprocess.Popen = lambda args, **kw: fake_proc
+        sys.stdin = io.StringIO(
+            _make_turn(message=message, attachments=attachments) + "\n"
+        )
         try:
-            su.subprocess.Popen = lambda args, **kw: fake_proc
-            su.emit = lambda line: captured.append(line)
-            os.environ = env
             rc = su.run_bridge(
                 "test-cli",
                 "install hint",
@@ -457,71 +509,41 @@ class TestEmptyMessageHandling:
                 lambda event: None,
             )
         finally:
+            su._emit_obj = real_emit
             su.subprocess.Popen = real_popen
-            su.emit = real_emit
-            os.environ = real_environ
+            sys.stdin = saved_stdin
         return rc, captured
 
     def test_empty_message_no_attachment_is_rejected(self):
-        rc, captured = self._run_with_env({
-            "AGENT_MESSAGE": "",
-            "AGENT_SESSION_ID": "",
-            "AGENT_STREAMING": "1",
-        })
+        rc, captured = self._run_with_turn(message="")
         assert rc == 1
-        assert any(l.startswith("AGENT_ERROR:") for l in captured)
+        assert any(e.get("type") == "error" for e in captured)
 
-    def test_empty_message_with_image_url_is_accepted(self):
-        rc, captured = self._run_with_env({
-            "AGENT_MESSAGE": "",
-            "AGENT_SESSION_ID": "",
-            "AGENT_STREAMING": "1",
-            "AGENT_IMAGE_URL": "https://example.com/x.png",
-        })
+    def test_empty_message_with_image_attachment_is_accepted(self):
+        rc, captured = self._run_with_turn(
+            message="",
+            attachments=[{"type": "image", "url": "https://example.com/x.png"}],
+        )
         assert rc == 0
-        assert not any(l.startswith("AGENT_ERROR:") for l in captured)
+        assert not any(e.get("type") == "error" for e in captured)
 
-    def test_empty_message_with_file_url_is_accepted(self):
-        rc, captured = self._run_with_env({
-            "AGENT_MESSAGE": "",
-            "AGENT_SESSION_ID": "",
-            "AGENT_STREAMING": "1",
-            "AGENT_FILE_URL": "https://example.com/x.pdf",
-        })
+    def test_empty_message_with_file_attachment_is_accepted(self):
+        rc, captured = self._run_with_turn(
+            message="",
+            attachments=[{"type": "file", "url": "https://example.com/x.pdf"}],
+        )
         assert rc == 0
-        assert not any(l.startswith("AGENT_ERROR:") for l in captured)
-
-    def test_empty_message_with_attachments_array_is_rejected(self):
-        # AGENT_ATTACHMENTS was removed in 0.5.0; the bridge no longer treats it
-        # as an attachment signal, so an empty message with only AGENT_ATTACHMENTS
-        # set is now rejected (would-be image-only messages must use
-        # AGENT_IMAGE_URL / AGENT_FILE_URL).
-        rc, captured = self._run_with_env({
-            "AGENT_MESSAGE": "",
-            "AGENT_SESSION_ID": "",
-            "AGENT_STREAMING": "1",
-            "AGENT_ATTACHMENTS": '[{"type":"image","url":"https://example.com/x.png"}]',
-        })
-        assert rc == 1
-        assert any(l.startswith("AGENT_ERROR:") for l in captured)
+        assert not any(e.get("type") == "error" for e in captured)
 
     def test_empty_message_with_empty_attachments_array_is_rejected(self):
-        rc, captured = self._run_with_env({
-            "AGENT_MESSAGE": "",
-            "AGENT_SESSION_ID": "",
-            "AGENT_STREAMING": "1",
-            "AGENT_ATTACHMENTS": "[]",
-        })
+        rc, captured = self._run_with_turn(message="", attachments=[])
         assert rc == 1
+        assert any(e.get("type") == "error" for e in captured)
 
     def test_non_empty_message_always_accepted(self):
         # Whitespace-only counts as non-empty content (the agent decides what
         # to do with it); the bridge only rejects truly empty + no attachment.
-        rc, captured = self._run_with_env({
-            "AGENT_MESSAGE": "   ",
-            "AGENT_SESSION_ID": "",
-            "AGENT_STREAMING": "1",
-        })
+        rc, captured = self._run_with_turn(message="   ")
         assert rc == 0
 
 
@@ -554,11 +576,12 @@ class TestOpencodeBridge:
         step_start = {"type": "step_start", "sessionID": "ses_abc"}
         text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "hello world"}}
         step_finish = {"type": "step_finish", "sessionID": "ses_abc", "part": {"reason": "stop"}}
-        rc, out = _run_bridge(self.mod, [step_start, text_event, step_finish], streaming=True)
+        rc, out = _run_bridge(self.mod, [step_start, text_event, step_finish])
         parsed = _classify_output(out)
         assert rc == 0
         assert parsed["partials"] == ["hello world"]
         assert parsed["session"] == "ses_abc"
+        assert parsed["body"] == ["hello world"]
 
     def test_error_preserves_session(self):
         """Spec: session id must survive even when the turn errors."""
@@ -568,29 +591,31 @@ class TestOpencodeBridge:
             "sessionID": "ses_abc",
             "part": {"message": "rate limited"},
         }
-        rc, out = _run_bridge(self.mod, [step_start, error_event], streaming=True)
+        rc, out = _run_bridge(self.mod, [step_start, error_event])
         parsed = _classify_output(out)
         assert rc == 1
         assert parsed["error"] == "rate limited"
         assert parsed["session"] == "ses_abc"
 
-    def test_non_streaming_suppresses_partials_but_forwards_session(self):
-        # opencode is designed for streaming (profile: streaming: true).
-        # In non-streaming mode partial_text is suppressed; the session id
-        # is still forwarded so multi-turn continuity isn't broken.
+    def test_non_streaming_bridge_still_emits_partials(self):
+        # In 0.3 the bridge always emits {"type":"partial"} events; the runner
+        # is what suppresses them for non-streaming profiles. So driving the
+        # bridge directly still surfaces the partial — and the final text event
+        # is the last partial.
         text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "full reply"}}
         step_finish = {"type": "step_finish", "sessionID": "ses_abc"}
-        rc, out = _run_bridge(self.mod, [text_event, step_finish], streaming=False)
+        rc, out = _run_bridge(self.mod, [text_event, step_finish])
         parsed = _classify_output(out)
         assert rc == 0
-        assert parsed["partials"] == [], "no partials in non-streaming mode"
+        assert parsed["partials"] == ["full reply"]
         assert parsed["session"] == "ses_abc"
+        assert parsed["body"] == ["full reply"]
 
     def test_tool_use_events_only_forward_session(self):
         step_start = {"type": "step_start", "sessionID": "ses_abc"}
         tool = {"type": "tool_use", "sessionID": "ses_abc", "part": {"tool": "bash"}}
         text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "done"}}
-        rc, out = _run_bridge(self.mod, [step_start, tool, text_event], streaming=True)
+        rc, out = _run_bridge(self.mod, [step_start, tool, text_event])
         parsed = _classify_output(out)
         assert rc == 0
         assert parsed["partials"] == ["done"]
@@ -630,19 +655,21 @@ class TestKimiCodeBridge:
         # kimi emits {"role": "assistant", "content": "..."} on each chunk.
         assistant = {"role": "assistant", "content": "hello world"}
         rc, out = _run_bridge(
-            self.mod, [assistant], streaming=True, session_id="kimi-sess-1"
+            self.mod, [assistant], session_id="kimi-sess-1"
         )
         parsed = _classify_output(out)
         assert rc == 0
         assert parsed["partials"] == ["hello world"]
         assert parsed["session"] == "kimi-sess-1"
+        assert parsed["body"] == ["hello world"]
 
     def test_tool_role_is_ignored(self):
         tool_event = {"role": "tool", "content": "some tool result"}
         rc, out = _run_bridge(
-            self.mod, [tool_event], streaming=True, session_id="kimi-sess-2"
+            self.mod, [tool_event], session_id="kimi-sess-2"
         )
         parsed = _classify_output(out)
+        assert rc == 0
         assert parsed["partials"] == []
         assert parsed["error"] == ""
 
@@ -719,46 +746,6 @@ class TestDeepseekBridgeArgs:
 # agy bridge (plain-text one-shot, no streaming, no session)
 # ---------------------------------------------------------------------------
 
-def _run_agy_bridge(mod, *, message="hi", env_extra=None, fake_proc_result=None):
-    """Run agy bridge with subprocess.run mocked; return (exit_code, stdout_lines)."""
-    import subprocess
-
-    captured: list[str] = []
-    orig_environ = os.environ.copy()
-    env = {"AGENT_MESSAGE": message, "AGENT_SESSION_ID": "", "AGENT_STREAMING": "0"}
-    if env_extra:
-        env.update(env_extra)
-
-    class _FakeCompletedProcess:
-        def __init__(self, stdout, returncode, stderr=""):
-            self.stdout = stdout
-            self.returncode = returncode
-            self.stderr = stderr
-
-    real_run = subprocess.run
-    real_environ = os.environ
-
-    def fake_run(args, **kwargs):
-        return _FakeCompletedProcess(**fake_proc_result)
-
-    real_emit = mod.emit
-
-    def capture_emit(line):
-        captured.append(line)
-
-    os.environ = env  # type: ignore[assignment]
-    mod.emit = capture_emit
-    subprocess.run = fake_run
-    try:
-        rc = mod.main()
-    finally:
-        os.environ = real_environ  # type: ignore[assignment]
-        mod.emit = real_emit
-        subprocess.run = real_run
-
-    return rc, captured
-
-
 class TestAgyBridge:
     @pytest.fixture(autouse=True)
     def _mod(self):
@@ -788,35 +775,37 @@ class TestAgyBridge:
     # ── full bridge (subprocess.run mocked) ──────────────────────────────────
 
     def test_success_emits_reply_body(self):
-        rc, out = _run_agy_bridge(
+        rc, out = _run_plain_cli(
             self.mod,
-            fake_proc_result={"stdout": "agy ok\n", "returncode": 0},
+            fake_result={"stdout": "agy ok\n", "returncode": 0},
         )
+        parsed = _classify_output(out)
         assert rc == 0
-        assert out == ["agy ok"]
+        assert parsed["body"] == ["agy ok"]
 
     def test_empty_message_emits_error(self):
-        rc, out = _run_agy_bridge(
+        rc, out = _run_plain_cli(
             self.mod, message="",
-            fake_proc_result={"stdout": "", "returncode": 0},
+            fake_result={"stdout": "", "returncode": 0},
         )
+        parsed = _classify_output(out)
         assert rc == 1
-        assert any("AGENT_ERROR:" in line for line in out)
+        assert parsed["error"]
 
     def test_nonzero_exit_emits_agent_error(self):
-        rc, out = _run_agy_bridge(
+        rc, out = _run_plain_cli(
             self.mod,
-            fake_proc_result={"stdout": "", "returncode": 1, "stderr": "auth failed"},
+            fake_result={"stdout": "", "returncode": 1, "stderr": "auth failed"},
         )
+        parsed = _classify_output(out)
         assert rc == 1
-        assert any("AGENT_ERROR:" in line for line in out)
-        body = json.loads(out[0].split("AGENT_ERROR:", 1)[1])
-        assert "auth failed" in body
+        assert "auth failed" in parsed["error"]
 
     def test_empty_stdout_emits_agent_error(self):
-        rc, out = _run_agy_bridge(
+        rc, out = _run_plain_cli(
             self.mod,
-            fake_proc_result={"stdout": "", "returncode": 0},
+            fake_result={"stdout": "", "returncode": 0},
         )
+        parsed = _classify_output(out)
         assert rc == 1
-        assert any("AGENT_ERROR:" in line for line in out)
+        assert parsed["error"]

@@ -8,19 +8,19 @@ Invokes:
         [--model <model>]
 
 Parses the NDJSON stream and re-emits as AgentProc protocol output:
-    step_start  → captures sessionID (forwarded as AGENT_SESSION:)
-    text        → part.text → AGENT_PARTIAL: (streaming) or reply body (one-shot)
+    step_start  → captures sessionID (forwarded as {"type":"session"})
+    text        → part.text → {"type":"partial"} (streaming) or reply body (one-shot)
     step_finish → terminal event; part.reason="stop" signals the final turn
     tool_use    → captures sessionID (content not forwarded to user)
-    error       → AGENT_ERROR:
+    error       → {"type":"error"}
 
 The sessionID field is present on every event (format: ses_XXX). The bridge
-captures it from the first event and forwards it at the end via AGENT_SESSION:.
+captures it from the first event and forwards it at the end via {"type":"session"}.
 
 Env vars:
-    AGENT_MESSAGE          User message
-    AGENT_SESSION_ID       Previous session id (empty = new session)
-    AGENT_STREAMING        "1" streaming mode, "0" one-shot
+    turn.message          User message
+    turn.session_id       Previous session id (empty = new session)
+    streaming        "1" streaming mode, "0" one-shot
     OPENCODE_MODEL         Optional model (e.g. "anthropic/claude-opus-4-5")
 """
 

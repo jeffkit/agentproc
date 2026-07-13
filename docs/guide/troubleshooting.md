@@ -16,8 +16,8 @@ What does the error say?
 ├─ "[agentproc runner] spawn error: spawn X ENOENT"
 │   → See: spawn ENOENT
 │
-├─ "AGENT_ERROR:..." on stderr
-│   → The agent itself failed. See: AGENT_ERROR from the wrapped CLI
+├─ "{"type":"error"}..." on stderr
+│   → The agent itself failed. See: {"type":"error"} from the wrapped CLI
 │
 ├─ Hangs / no output
 │   → See: Agent runs but nothing comes back
@@ -97,7 +97,7 @@ agentproc hub list
 ```
 [agentproc runner] spawn error: spawn python3 ENOENT
 [agentproc runner] hint: <one of the messages below>
-AGENT_ERROR:"failed to start agent: ..."
+{"type":"error","message":"failed to start agent: ..."}
 ```
 
 The CLI gives you a tailored hint depending on the cause — but here's the background.
@@ -117,7 +117,7 @@ The bridge spawns the agent via Node's `child_process.spawn`, which inherits the
 
 **Fix:** Either:
 - Make sure PATH includes the interpreter (e.g. symlink or full path).
-- Or use a Node bridge script instead of Python (`command: node {{PROFILE_DIR}}/bridge.js`) — Node is obviously available since the CLI ships on it.
+- Or use a Node bridge script instead of Python (`command: node`, `args: ["{{PROFILE_DIR}}/bridge.js"]`) — Node is obviously available since the CLI ships on it.
 
 ### Cause 3: `'claude' not found on PATH` (the wrapped CLI is missing)
 
@@ -133,27 +133,27 @@ Verify with `agentproc hub show <name>` — each profile's README lists its inst
 
 ### Cause 4: `argument file not found: ./bridge.py`
 
-You're running an old hub profile (or a hand-edited one) that uses `command: python3 ./bridge.py` with a relative path, and the agent's `cwd` doesn't contain that file.
+You're running an old hub profile (or a hand-edited one) whose `args` contain a bare `./bridge.py` relative path, and the agent's `cwd` doesn't contain that file.
 
-**Fix:** Re-install or refresh the profile (current profiles use `{{PROFILE_DIR}}/bridge.py` which always resolves correctly):
+**Fix:** Re-install or refresh the profile (current profiles use `{{PROFILE_DIR}}/bridge.py` in `args`, which always resolves correctly):
 ```bash
 agentproc hub install claude-code --refresh
 ```
 
 ---
 
-## AGENT_ERROR from the wrapped CLI
+## `{"type":"error"}` from the wrapped CLI
 
 ### Symptom
 
 ```
-AGENT_ERROR:"API Error: 400 [1211][模型不存在...]"
+{"type":"error","message":"API Error: 400 [1211][模型不存在...]"}
 agentproc:error:API Error: 400 ...
 ```
 
 ### Cause
 
-The wrapped CLI ran but returned an error. The bridge forwarded it to you via `AGENT_ERROR:` (per the protocol spec). The CLI also surfaces it on stderr as `agentproc:error:<message>`.
+The wrapped CLI ran but returned an error. The bridge forwarded it to you via `{"type":"error"}` (per the protocol spec). The CLI also surfaces it on stderr as `agentproc:error:<message>`.
 
 ### Common sub-cases
 
@@ -195,11 +195,11 @@ If you're routing through a proxy or third-party endpoint (e.g. a Chinese mirror
 
 ### Cause & fix
 
-1. **Streaming mode, but the agent's reply was emitted via `AGENT_PARTIAL:` lines only.** With `--quiet`, partials are suppressed and you see nothing. Re-run without `--quiet`, or capture the session id from stderr to verify the agent did respond.
+1. **Streaming mode, but the agent's reply was emitted via `{"type":"partial"}` lines only.** With `--quiet`, partials are suppressed and you see nothing. Re-run without `--quiet`, or capture the session id from stderr to verify the agent did respond.
 2. **The wrapped CLI wrote everything to its own stderr, not stdout.** Some CLIs do this for warnings. Run with `--verbose` (the default) and check stderr. If you want stderr in the reply, set `include_stderr_in_reply: true` in the profile.
-3. **The agent exited 0 without writing anything.** This is a bug in the agent script, not in AgentProc. Run the agent directly with the env vars set to see what it does:
+3. **The agent exited 0 without writing anything.** This is a bug in the agent script, not in AgentProc. Run the agent directly with a turn on stdin to see what it does:
    ```bash
-   AGENT_MESSAGE="hi" AGENT_STREAMING="1" python3 ./bridge.py
+   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./bridge.py
    ```
 
 ---

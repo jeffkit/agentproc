@@ -1,33 +1,46 @@
 # spec/conformance
 
-Cross-implementation conformance fixtures for the AgentProc protocol.
+Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.3).
 
 ## What's here
 
-- `cases.json` — input stdout lines paired with the expected `{kind, value}`
-  classification. Each case is a single line an agent might emit, plus what a
-  conformant bridge must classify it as.
+- `cases.json` — single stdout lines paired with the expected
+  `{kind, value[, role]}` classification. Each case is one NDJSON event line an
+  agent might emit, plus what a conformant bridge must classify it as.
 - `scenarios.json` — multi-line stdout sequences paired with the expected
   observable runner output (reply, session_id, error, exit_code, partials).
-  Each scenario is a full agent turn (a sequence of stdout lines), exercising
-  interaction semantics that single-line cases can't: last-wins, error
-  mid-stream, session-with-error, invalid-session handling, streaming vs
-  one-shot.
+  Each scenario is a full agent turn (a sequence of NDJSON event lines),
+  exercising interaction semantics that single-line cases can't: last-wins,
+  error mid-stream, session-with-error, invalid-session handling,
+  `{"type":"text"}` concatenation, partial-with-role, streaming vs one-shot.
 - `sdk.json` — SDK entry-point (`createProfile` / `create_profile`) scenarios.
-  Each scenario drives the SDK entry as a subprocess with a given `AGENT_*` env
-  and a handler of a named `kind`, then asserts the exact stdout lines and exit
-  code. Covers return-string, return-`AgentResult`, return-`None` after
-  `send_partial`, raised `ProtocolError`, `send_error`-then-return, and sync
-  handlers (return-string, bare `send_partial`) — pinning that both SDKs accept
-  sync and async handlers. Guards the user-facing SDK contract — not just the
-  runner internals — against cross-language drift.
+  Each scenario drives the SDK entry as a subprocess: the harness writes a
+  `{"type":"turn",...}` object to its stdin and runs a handler of a named
+  `kind`, then asserts the exact NDJSON stdout lines and exit code. Covers
+  return-string, return-`AgentResult`, return-`None` after `send_partial`,
+  raised `ProtocolError`, `send_error`-then-return, partial-with-role, and
+  sync handlers (return-string, bare `send_partial`) — pinning that both SDKs
+  accept sync and async handlers. Guards the user-facing SDK contract — not
+  just the runner internals — against cross-language drift.
 - `diagnostics.json` — shared `(pattern, hint)` table for the runner's
   post-mortem stderr diagnosis (the friendly "agent script not found" hints
-  surfaced when the agent exits non-zero with no `AGENT_ERROR:`). Both runners
-  embed an identical copy of the rules (the file is not shipped with the
-  npm/pypi package, so the runner cannot read it at runtime); the conformance
-  tests assert the embedded copies match this file rule-for-rule and that each
-  rule's `sample` produces the expected `hint`.
+  surfaced when the agent exits non-zero with no `{"type":"error"}` event).
+  Both runners embed an identical copy of the rules (the file is not shipped
+  with the npm/pypi package, so the runner cannot read it at runtime); the
+  conformance tests assert the embedded copies match this file rule-for-rule
+  and that each rule's `sample` produces the expected `hint`.
+
+## Wire 0.3 in one paragraph
+
+Every byte on the agent's stdin and stdout is NDJSON (one JSON object per
+line). Input is a single `{"type":"turn",...}` line (message, session_id,
+session_name, from_user, attachments, permission, protocol_version). Output is
+a stream of typed events: `{"type":"partial","text":...[, "role":...]}`,
+`{"type":"text","text":...}`, `{"type":"session","id":...}`,
+`{"type":"error","message":...}`, and (when permission is on)
+`{"type":"permission_request",...}` / `{"type":"permission_response",...}`.
+The reply body is the concatenation of `{"type":"text"}` events. The 0.2
+`AGENT_*:` sentinel prefixes and `AGENT_*` env-var injections are gone.
 
 ## How it's used
 
@@ -53,37 +66,38 @@ multi-line turns.
 
 ## When to add a case or scenario
 
-Whenever the spec's line-recognition rules change (new sentinel, new
-disambiguation rule, new lenient-mode behaviour), add a case to `cases.json`
-**before** changing either implementation. The failing tests tell you what to
-fix; once both pass, the two implementations are provably aligned on the new
-rule.
+Whenever the spec's event vocabulary changes (new event `type`, new field,
+new disambiguation rule), add a case to `cases.json` **before** changing
+either implementation. The failing tests tell you what to fix; once both
+pass, the two implementations are provably aligned on the new rule.
 
 Whenever a spec change touches **multi-line** interaction semantics
 (last-wins ordering, error's effect on partials, session preserved across
-error, invalid-session handling, streaming/one-shot differences), add a
-scenario to `scenarios.json` instead. Single-line cases can't catch these —
-the bug only shows up when several lines interact in one turn.
+error, invalid-session handling, text-event concatenation,
+streaming/one-shot differences), add a scenario to `scenarios.json` instead.
+Single-line cases can't catch these — the bug only shows up when several
+lines interact in one turn.
 
-## Payload decoding rule (partial / error)
+## Event classification rule
 
-The value after `AGENT_PARTIAL:` / `AGENT_ERROR:` is text meant for the user.
-The JSON-string encoding exists only to safely carry newlines and quotes —
-it is **not** a channel for structured data. Decoders MUST apply this rule:
+Every stdout line is parsed as JSON. A conformant bridge classifies it as:
 
-1. Empty payload → `""`.
-2. Valid JSON **string** → the decoded string (`AGENT_PARTIAL:"hi"` → `hi`).
-3. Valid JSON that is **not** a string (number, bool, null, array, object) →
-   fall back to the raw text verbatim (`AGENT_PARTIAL:true` → `true`,
-   `AGENT_PARTIAL:[1,2]` → `[1,2]`). Rationale: `str(True)` and `String(true)`
-   differ across runtimes; the raw text is the only language-independent
-   answer, and an agent emitting non-string JSON here has misused the API.
-4. Invalid JSON (bare text) → the raw text verbatim (lenient mode).
+- `session` — `{"type":"session","id":<string>}`; `value` is the id string
+  (empty string if `id` is missing or not a string).
+- `partial` — `{"type":"partial","text":<string>}`; `value` is the text
+  (empty string if `text` is missing/not a string). If a string `role` field
+  is present, the classification carries it as `role`.
+- `text` — `{"type":"text","text":<string>}`; `value` is the text.
+- `error` — `{"type":"error","message":<string>}`; `value` is the message.
+- `permission_request` — `{"type":"permission_request",...}`; `value` is the
+  whole event object.
+- `malformed` — anything else (non-JSON, non-object, no `type`, or an
+  unknown `type`); `value` is the raw line. Malformed lines are ignored (not
+  appended to the reply body — there is no implicit body in 0.3).
 
-Any new case in `cases.json` that exercises rule 3 is itself the regression
-test for this rule — both SDKs must agree, and a change to either
-`decode_json_value` / `decodeJsonValue` that breaks rule 3 will turn a case
-red.
+There is no lenient fallback in 0.3: a line that is not a valid JSON object
+event is `malformed` and dropped. The 0.2 `AGENT_PARTIAL:"hi"` decoding rules
+no longer apply.
 
 ## CI
 
@@ -98,16 +112,19 @@ full suites.
 ```json
 {
   "cases": [
-    {"line": "<raw stdout line, no trailing newline>",
-     "expect": {"kind": "session|partial|error|body", "value": "<string>"}}
+    {"line": "<raw stdout line, no trailing newline — a JSON event>",
+     "expect": {"kind": "session|partial|text|error|permission_request|malformed",
+                "value": "<string|object>",
+                "role": "<optional, only for partial with a role>"}}
   ]
 }
 ```
 
-`kind` is one of `session`, `partial`, `error`, `body` — matching the return
-shape of `classify_line` / `classifyLine` in both SDKs. For `partial` and
-`error`, `value` is the **decoded** payload per the payload decoding rule
-above; for `session` it is the stripped id; for `body` it is the raw line.
+`kind` matches the return shape of `classify_line` / `classifyLine` in both
+SDKs. For `partial` and `text`, `value` is the `text` string; for `error` it
+is the `message` string; for `session` it is the `id` string; for
+`permission_request` it is the whole event object; for `malformed` it is the
+raw line. `role` is asserted only when present and string-typed.
 
 ### scenarios.json format
 
@@ -116,22 +133,45 @@ above; for `session` it is the stripped id; for `body` it is the raw line.
   "scenarios": [
     {
       "name": "<short description>",
-      "lines": ["<stdout line 1>", "<stdout line 2>", "..."],
+      "lines": ["<NDJSON event line 1>", "<NDJSON event line 2>", "..."],
       "streaming": true,
       "expect": {
-        "reply": "<concatenated non-protocol lines>",
+        "reply": "<concatenation of {\"type\":\"text\"} events>",
         "session_id": "<final session id, '' if none>",
-        "error": "<decoded AGENT_ERROR payload, '' if none>",
+        "error": "<error message, '' if none>",
         "exit_code": 0,
-        "partials": ["<chunk delivered via on_partial>", "..."]
+        "partials": ["<text delivered via on_partial>", "..."]
       }
     }
   ]
 }
 ```
 
-`lines` is the agent's full stdout for the turn, in order. `expect` matches
-the runner's observable `RunResult` plus the `partials` collected via the
-`on_partial` / `onPartial` callback. `streaming` defaults to `true`; set
-`false` to exercise the one-shot path (where `AGENT_PARTIAL:` lines are
-ignored and `partials` should be `[]`).
+`lines` is the agent's full stdout for the turn, in order (each line a JSON
+event). `expect` matches the runner's observable `RunResult` plus the
+`partials` collected via the `on_partial` / `onPartial` callback. `streaming`
+defaults to `true`; set `false` to exercise the one-shot path (where
+`{"type":"partial"}` events are ignored and `partials` should be `[]`).
+
+### sdk.json format
+
+```json
+{
+  "scenarios": [
+    {
+      "name": "<short description>",
+      "kind": "<handler kind the harness runs>",
+      "turn": {"type":"turn","message":"...","session_id":"","session_name":"default","from_user":"","protocol_version":"0.3"},
+      "expect": {
+        "exit": 0,
+        "stdout_lines": ["<exact NDJSON event line>", "..."]
+      }
+    }
+  ]
+}
+```
+
+`turn` is the input object the test writes to the SDK subprocess's stdin (one
+NDJSON line). `stdout_lines` lists the exact NDJSON event lines the SDK must
+emit (compact JSON, no spaces — both SDKs serialize compactly so the bytes
+match). `exit` is the expected process exit code.

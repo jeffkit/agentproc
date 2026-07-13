@@ -2,11 +2,10 @@
 /**
  * Pure helpers for Codex ↔ AgentProc permission mapping.
  * Shared by bridge.js and unit tests.
+ *
+ * Wire 0.3: the bridge decides permission mode from `turn.permission`, not
+ * from an env var, so there is no permissionEnabled() here.
  */
-
-function permissionEnabled(env) {
-  return (env.AGENT_PERMISSION || '').trim() === '1';
-}
 
 function buildArgs(message, sessionId, env) {
   const model = (env.CODEX_MODEL || '').trim();
@@ -58,7 +57,7 @@ function parseEvent(event) {
   return null;
 }
 
-/** Codex PermissionRequest hook stdin → AgentProc AGENT_PERMISSION_REQUEST payload. */
+/** Codex PermissionRequest hook stdin → AgentProc {"type":"permission_request"} payload. */
 function hookInputToPermissionRequest(payload, requestId) {
   if (!payload || typeof payload !== 'object') return null;
   const toolInput = (payload.tool_input && typeof payload.tool_input === 'object'
@@ -80,7 +79,7 @@ function hookInputToPermissionRequest(payload, requestId) {
   return req;
 }
 
-/** AgentProc AGENT_PERMISSION_RESPONSE → Codex PermissionRequest hook stdout. */
+/** AgentProc {"type":"permission_response"} → Codex PermissionRequest hook stdout. */
 function permissionResponseToHookOutput(resp) {
   if (resp && resp.behavior === 'allow') {
     return {
@@ -124,7 +123,6 @@ function buildHooksJson(hookScriptPath) {
 }
 
 module.exports = {
-  permissionEnabled,
   buildArgs,
   buildPermissionArgs,
   parseEvent,

@@ -74,24 +74,20 @@ agentproc hub run gemini-cli -p "say hi in 5 words" --env GEMINI_API_KEY=$GEMINI
 Expected output (streaming mode):
 
 ```
-AGENT_SESSION:f47ac10b-58cc-4372-a567-0e02b2c3d479
-AGENT_PARTIAL:"Hi"
-AGENT_PARTIAL:" there"
-AGENT_PARTIAL:", how can I help?"
+{"type":"session","id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+{"type":"partial","text":"Hi"}
+{"type":"partial","text":" there"}
+{"type":"partial","text":", how can I help?"}
 ```
 
-Note: gemini emits the session id **up-front** in its `init` event, so `AGENT_SESSION:` appears before the partials — unlike claude/codex where it appears last.
+Note: gemini emits the session id **up-front** in its `init` event, so `{"type":"session"}` appears before the partials — unlike claude/codex where it appears last.
 
 <details>
 <summary>Drive the bridge script directly (without the CLI)</summary>
 
 ```bash
 cd hub/gemini-cli
-AGENT_MESSAGE="say hi in 5 words" \
-AGENT_SESSION_ID="" \
-AGENT_STREAMING="1" \
-GEMINI_API_KEY="$GEMINI_API_KEY" \
-python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.3"}' | GEMINI_API_KEY="$GEMINI_API_KEY" python3 bridge.py
 ```
 
 </details>
@@ -99,20 +95,20 @@ python3 bridge.py
 ## How it works
 
 ```
-AGENT_MESSAGE, AGENT_SESSION_ID
+turn.message, turn.session_id
   ↓
 bridge.py / bridge.js
   ↓ gemini -p <message> --output-format stream-json --yolo [--resume <id>]
 gemini CLI
   ↓ NDJSON stream: init / message / error / result events
 bridge.py / bridge.js
-  ↓ AGENT_SESSION:<id>   (session_id from init event)
-  ↓ AGENT_PARTIAL:"..."   (assistant message deltas)
-  ↓ AGENT_ERROR:"..."      (on error or result.status=error)
+  ↓ {"type":"session","id":"<id>"}   (session_id from init event)
+  ↓ {"type":"partial","text":"..."}   (assistant message deltas)
+  ↓ {"type":"error","message":"..."}      (on error or result.status=error)
   ↓ exit code from gemini
 ```
 
-The session ID is opaque — `gemini` emits it in the `init` event on its first turn, and the bridge forwards it via `AGENT_SESSION:`. On subsequent turns, your bridge passes it back as `AGENT_SESSION_ID`, and this bridge replays it as `--resume <id>`.
+The session ID is opaque — `gemini` emits it in the `init` event on its first turn, and the bridge forwards it via `{"type":"session"}`. On subsequent turns, your bridge passes it back as `turn.session_id`, and this bridge replays it as `--resume <id>`.
 
 ## Environment variables
 
@@ -127,7 +123,7 @@ The session ID is opaque — `gemini` emits it in the `init` event on its first 
 - `--yolo` (auto-approve tool calls) is set unconditionally — `gemini` would otherwise prompt interactively, which a non-interactive AgentProc bridge can't satisfy. Run the bridge in a sandbox if you're concerned about tool execution.
 - The session ID forwarded by `gemini` is the **CLI session ID**, not an upstream API conversation ID. `--resume` knows how to use it.
 - `streaming: false` falls back to one-shot mode: the bridge waits for the terminal `message` event (with `delta=false` or absent) and emits the full text at once.
-- `error` events with `severity: warning` are ignored (recoverable). Only `severity: error`, or a `result` event with `status: error`, surfaces as `AGENT_ERROR:`.
+- `error` events with `severity: warning` are ignored (recoverable). Only `severity: error`, or a `result` event with `status: error`, surfaces as `{"type":"error"}`.
 
 ## License
 

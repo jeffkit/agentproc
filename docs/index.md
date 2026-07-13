@@ -4,7 +4,7 @@ layout: home
 hero:
   name: AgentProc
   text: Connect any Agent CLI to any messaging platform
-  tagline: A minimal process-based protocol. No HTTP, no sockets — just stdin, stdout, and env vars.
+  tagline: A minimal process-based protocol. No HTTP, no sockets — just stdin and stdout.
   actions:
     - theme: brand
       text: Quick Start
@@ -58,7 +58,7 @@ Verify it works:
 
 ```bash
 agentproc --version
-# agentproc 0.3.0 (protocol 0.1)
+# agentproc 0.7.0 (protocol 0.3)
 ```
 
 ## ② Browse the hub
@@ -106,11 +106,11 @@ agentproc hub run claude-code \
 `agentproc hub run` automatically uses **your current directory** as the agent's `cwd`, and locates the bundled bridge script via a `{{PROFILE_DIR}}` placeholder. Just `cd` into the project you want the agent to work on, and run.
 :::
 
-You'll see protocol lines stream on stderr in real time, and the final reply on stdout:
+You'll see NDJSON events stream on stderr in real time, and the final reply on stdout:
 
 ```
-AGENT_PARTIAL:"This codebase is..."
-AGENT_SESSION:13c2f6ec-1f97-42c4-be9e-9475129e243c
+{"type":"partial","text":"This codebase is..."}
+{"type":"session","id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
 agentproc:session:13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
@@ -123,8 +123,8 @@ agentproc hub run claude-code \
   --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
-::: tip Short replies may not show AGENT_PARTIAL:
-Some agents emit the whole reply in one shot when the answer is short — you'll see just `AGENT_SESSION:` and the reply body, no `AGENT_PARTIAL:` lines. That's normal; streaming only fragments longer replies.
+::: tip Short replies may not show {"type":"partial"}
+Some agents emit the whole reply in one shot when the answer is short — you'll see just `{"type":"session"}` and the reply body, no `{"type":"partial"}` lines. That's normal; streaming only fragments longer replies.
 :::
 
 ## ④ Connect to your messaging platform
@@ -132,8 +132,8 @@ Some agents emit the whole reply in one shot when the answer is short — you'll
 AgentProc agents don't talk to WeChat or Slack directly — that's the **bridge's** job. The bridge is a small program that:
 
 1. Receives a message from the messaging platform (via webhook, polling, etc.)
-2. Spawns your agent with `AGENT_MESSAGE` env var set
-3. Reads the agent's stdout (per the AgentProc protocol)
+2. Spawns your agent and writes a `{"type":"turn",...}` object to its stdin
+3. Reads NDJSON events from the agent's stdout (per the AgentProc protocol)
 4. Forwards the reply back to the user
 
 Here's a complete working bridge in ~30 lines of Node.js that wires `agentproc` to anything:

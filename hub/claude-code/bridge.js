@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * AgentProc bridge for the `claude` CLI (Anthropic Claude Code).
+ * AgentProc bridge for the `claude` CLI (Anthropic Claude Code, wire 0.3).
  *
  * Default (unattended):
  *   claude -p <message> --output-format stream-json \
  *       --dangerously-skip-permissions --disallowed-tools AskUserQuestion
  *
- * Permission mode (AGENT_PERMISSION=1 / profile permission: true):
+ * Permission mode (turn.permission === true / profile permission: true):
  *   claude --print --input-format stream-json --output-format stream-json \
  *       --verbose --permission-prompt-tool stdio --permission-mode default
- *   Translates control_request/control_response ↔ AGENT_PERMISSION_*.
+ *   Translates control_request/control_response ↔ {"type":"permission_request"}
+ *   / {"type":"permission_response"} NDJSON events.
  */
 
 const path = require('node:path');
@@ -20,18 +21,16 @@ const { spawn } = require('node:child_process');
 const HUB_DIR = path.resolve(__dirname, '..');
 const {
   runBridge,
+  readTurn,
   emit,
   emitError,
   emitPartial,
   emitSession,
+  emitText,
 } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
 const CLI_NAME = 'claude';
 const INSTALL_HINT = 'Install: npm install -g @anthropic-ai/claude-code';
-
-function permissionEnabled(env) {
-  return (env.AGENT_PERMISSION || '').trim() === '1';
-}
 
 function buildArgs(message, sessionId, env) {
   const args = [
@@ -143,16 +142,15 @@ module.exports = {
   buildArgs,
   buildPermissionArgs,
   parseEvent,
-  permissionEnabled,
 };
 
-async function runPermissionMode(env) {
-  const message = env.AGENT_MESSAGE || '';
-  const sessionId = env.AGENT_SESSION_ID || '';
-  const streaming = (env.AGENT_STREAMING || '1') !== '0';
+async function runPermissionMode(turn, env) {
+  const message = (typeof turn.message === 'string') ? turn.message : '';
+  const sessionId = (typeof turn.session_id === 'string') ? turn.session_id : '';
+  const attachments = Array.isArray(turn.attachments) ? turn.attachments : [];
 
-  if (!message && !(env.AGENT_IMAGE_URL || '').trim() && !(env.AGENT_FILE_URL || '').trim()) {
-    emitError('AGENT_MESSAGE env var is required (or set AGENT_IMAGE_URL / AGENT_FILE_URL)');
+  if (!message && attachments.length === 0) {
+    emitError('turn.message is required (or include turn.attachments)');
     process.exit(1);
   }
 
@@ -199,18 +197,14 @@ async function runPermissionMode(env) {
     }
   });
 
-  // Bridge stdin ← AgentProc runner (AGENT_PERMISSION_RESPONSE:)
+  // Bridge stdin ← AgentProc runner ({"type":"permission_response",...} NDJSON)
   const bridgeRl = readline.createInterface({ input: process.stdin });
   bridgeRl.on('line', (raw) => {
-    const line = String(raw);
-    if (!line.startsWith('AGENT_PERMISSION_RESPONSE:')) return;
+    const line = String(raw).trim();
+    if (!line) return;
     let payload;
-    try {
-      payload = JSON.parse(line.slice('AGENT_PERMISSION_RESPONSE:'.length));
-    } catch {
-      return;
-    }
-    if (!payload || typeof payload !== 'object') return;
+    try { payload = JSON.parse(line); } catch { return; }
+    if (!payload || typeof payload !== 'object' || payload.type !== 'permission_response') return;
     const rid = payload.request_id;
     if (typeof rid !== 'string' || !rid) return;
     const waiter = waiters.get(rid);
@@ -235,7 +229,7 @@ async function runPermissionMode(env) {
 
   let foundSessionId = null;
   let lastFinalText = null;
-  let sawAnyPartial = false;
+  let lastPartialText = null;
   let errorMessage = null;
 
   const outRl = readline.createInterface({ input: child.stdout });
@@ -249,7 +243,7 @@ async function runPermissionMode(env) {
     if (permReq) {
       const rid = permReq.request_id;
       pendingInputs.set(rid, permReq.input || {});
-      emit(`AGENT_PERMISSION_REQUEST:${JSON.stringify(permReq)}`);
+      emit(Object.assign({ type: 'permission_request' }, permReq));
       const resp = await waitForResponse(rid);
       const original = pendingInputs.get(rid) || {};
       pendingInputs.delete(rid);
@@ -266,13 +260,11 @@ async function runPermissionMode(env) {
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
     if (result.partialText) {
-      if (streaming) {
-        emitPartial(result.partialText);
-        sawAnyPartial = true;
-      }
+      emitPartial(result.partialText);
+      lastPartialText = result.partialText;
     }
     if (result.finalText) {
-      if (!streaming || !sawAnyPartial) lastFinalText = result.finalText;
+      lastFinalText = result.finalText;
     }
   }
 
@@ -294,14 +286,16 @@ async function runPermissionMode(env) {
   }
 
   if (foundSessionId) emitSession(foundSessionId);
-  if (lastFinalText && !streaming) emit(lastFinalText);
+  const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
+  if (replyText) emitText(replyText);
   process.exit(0);
 }
 
 async function main() {
   const env = process.env;
-  if (permissionEnabled(env)) {
-    await runPermissionMode(env);
+  const turn = await readTurn();
+  if (turn.permission === true) {
+    await runPermissionMode(turn, env);
     return;
   }
   await runBridge({
@@ -309,6 +303,7 @@ async function main() {
     cliInstallHint: INSTALL_HINT,
     buildArgs,
     parseEvent,
+    turn,
   });
 }
 

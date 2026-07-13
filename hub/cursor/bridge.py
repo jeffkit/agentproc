@@ -13,10 +13,10 @@ Invokes:
         [--model <model>]
 
 Schema (verified against agent 2026.06.24):
-    system/init     → session_id (forwarded as AGENT_SESSION:)
-    assistant       → content[].text → AGENT_PARTIAL: (delta chunks)
+    system/init     → session_id (forwarded as {"type":"session"})
+    assistant       → content[].text → {"type":"partial"} (delta chunks)
     result/success  → terminal; session_id (last wins) + final result text
-    result/error    → AGENT_ERROR:
+    result/error    → {"type":"error"}
 
 Quirk: when --stream-partial-output is on, Cursor emits N delta chunks AND THEN
 a final `assistant` event with the FULL assembled text — which would duplicate
@@ -26,9 +26,9 @@ accumulation. The terminal assembled text is still captured via the `result`
 event's `result` field, used as final_text fallback in non-streaming mode.
 
 Env vars:
-    AGENT_MESSAGE          User message
-    AGENT_SESSION_ID       Previous chat id (empty = new session)
-    AGENT_STREAMING        "1" streaming mode, "0" one-shot
+    turn.message          User message
+    turn.session_id       Previous chat id (empty = new session)
+    streaming        "1" streaming mode, "0" one-shot
     CURSOR_API_KEY         Optional auth (alternative to `agent login`)
     CURSOR_MODEL           Optional model override (e.g. "gpt-5", "sonnet-4-thinking")
     CURSOR_FORCE           "1" (default) adds --yolo; "0" omits it

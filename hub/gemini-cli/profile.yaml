@@ -4,7 +4,8 @@ cli: gemini
 cli_install: |
   npm install -g @google/gemini-cli
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your
   # current directory (so `gemini` runs against your project); you can also
   # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
@@ -24,6 +25,6 @@ maintainer: jeffkit
 tags: [coding, google, ai]
 notes: |
   The bridge script invokes `gemini -p <message> --output-format stream-json
-  --yolo` and re-emits the stream as AGENT_PARTIAL: lines. The session id
-  emitted by gemini's `init` event is forwarded via AGENT_SESSION: and replayed
+  --yolo` and re-emits the stream as {"type":"partial"} lines. The session id
+  emitted by gemini's `init` event is forwarded via {"type":"session"} and replayed
   as `--resume <id>` on the next turn.

@@ -8,7 +8,8 @@ cli_install: |
   #   deepseek login
   # Or set DEEPSEEK_API_KEY environment variable.
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd defaults to your current directory under `agentproc hub run`.
   timeout_secs: 300
   streaming: false        # deepseek exec returns plain text after completion
@@ -23,7 +24,7 @@ notes: |
   Uses `deepseek exec -p <message> [--model <model>]` for non-interactive mode.
 
   `deepseek exec` is stateless — context is NOT persisted between separate exec
-  invocations (regardless of --session). No AGENT_SESSION: line is emitted.
+  invocations (regardless of --session). No {"type":"session"} line is emitted.
   Multi-turn continuity must be maintained externally via the AgentProc SDK's
   load_history / append_history helpers.
 
@@ -32,4 +33,4 @@ notes: |
     deepseek-v4-flash — faster, lighter
 
   If deepseek later adds native session persistence in exec mode, this bridge
-  can be upgraded to emit AGENT_SESSION:.
+  can be upgraded to emit {"type":"session"}.

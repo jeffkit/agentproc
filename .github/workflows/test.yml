@@ -217,24 +217,24 @@ jobs:
 
       - name: End-to-end test echo-agent (Python)
         run: |
-          output=$(AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="0" python3 hub/echo-agent/bridge.py)
-          if [ "$output" != "You said: hello" ]; then
+          output=$(echo '{"type":"turn","message":"hello","session_id":"","from_user":"ci","protocol_version":"0.3"}' | python3 hub/echo-agent/bridge.py)
+          if [ "$output" != '{"type":"text","text":"You said: hello"}' ]; then
             echo "::error::echo-agent Python output mismatch: $output"
             exit 1
           fi
 
       - name: End-to-end test echo-agent (Node)
         run: |
-          output=$(AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="0" node hub/echo-agent/bridge.js)
-          if [ "$output" != "You said: hello" ]; then
+          output=$(echo '{"type":"turn","message":"hello","session_id":"","from_user":"ci","protocol_version":"0.3"}' | node hub/echo-agent/bridge.js)
+          if [ "$output" != '{"type":"text","text":"You said: hello"}' ]; then
             echo "::error::echo-agent Node output mismatch: $output"
             exit 1
           fi
 
       - name: End-to-end test echo-agent (Bash)
         run: |
-          output=$(AGENT_MESSAGE="hello" AGENT_SESSION_ID="" AGENT_STREAMING="0" bash hub/echo-agent/bridge.sh)
-          if [ "$output" != "You said: hello" ]; then
+          output=$(echo '{"type":"turn","message":"hello","session_id":"","from_user":"ci","protocol_version":"0.3"}' | bash hub/echo-agent/bridge.sh)
+          if [ "$output" != '{"type":"text","text":"You said: hello"}' ]; then
             echo "::error::echo-agent Bash output mismatch: $output"
             exit 1
           fi

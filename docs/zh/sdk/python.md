@@ -6,8 +6,6 @@
 pip install agentproc
 ```
 
-SDK 版本与协议版本对齐（当前 **0.1.0**），支持 Python 3.8+。
-
 ## 基础用法
 
 ```python
@@ -18,24 +16,26 @@ async def handler(ctx):
     # ctx.session_id        — 上一轮返回的 session ID（空 = 新会话）
     # ctx.session_name      — 会话可读名称
     # ctx.from_user         — 发送者标识符
-    # ctx.streaming         — 是否流式模式
-    # ctx.protocol_version  — bridge 实现的协议版本（如 "0.1"）
-    # ctx.image_url         — 图片附件 URL（无则为空）
-    # ctx.file_url          — 文件附件 URL（无则为空）
+    # ctx.protocol_version  — bridge 实现的协议版本（如 "0.3"）
+    # ctx.attachments       — 附件列表，元素为 {kind, url, ...} 字典（空 = 无）
+    # ctx.permission        — bridge 是否开启了权限通道
     reply = await my_llm(ctx.message)
     return reply
 
 create_profile(handler)
 ```
 
-保存为 `agent.py`，在 profile YAML 中：
+SDK 从 stdin 读取 `{"type":"turn",...}` 对象，调用你的 handler，再把 NDJSON 事件写到 stdout。保存为 `agent.py`，在 profile YAML 中：
 
 ```yaml
-command: python3 ./agent.py
+command: python3
+args: ["./agent.py"]
 timeout_secs: 60
 ```
 
 ## 返回 session ID
+
+返回 `AgentResult` 以持久化 session ID，实现多轮续接：
 
 ```python
 from agentproc import create_profile, AgentResult
@@ -47,9 +47,11 @@ async def handler(ctx):
 create_profile(handler)
 ```
 
-SDK 会把 `AGENT_SESSION:` 行输出到 stdout 最后（spec 规定 session 行「最后一行生效」，所以在末尾输出是正确做法）。
+SDK 会输出 `{"type":"session","id":...}` 事件（随后是 `{"type":"text"}` 回复事件）。bridge 在下一轮把它作为 `session_id` 传回。
 
 ## 流式输出
+
+用 `ctx.send_partial()` 立即发送分片，不必等整段回复。当 profile 的 `streaming: true` 时，bridge 会实时转发：
 
 ```python
 from agentproc import create_profile, AgentResult
@@ -58,66 +60,56 @@ async def handler(ctx):
     session_id = ctx.session_id
     async for chunk, session_id in stream_llm(ctx.message, ctx.session_id):
         await ctx.send_partial(chunk)
+    # response="" —— 内容已通过 send_partial 全部流式发出。
     return AgentResult(response="", session_id=session_id)
 
 create_profile(handler)
 ```
 
-`ctx.send_partial(text)` 写入一行 `AGENT_PARTIAL:<json>` 并 flush。空字符串会被忽略。`streaming: false` 时 bridge 会忽略这些行，调用仍是安全的。
+`send_partial` 可选 `role` 参数（`"output"` | `"thinking"`）：
+
+```python
+await ctx.send_partial("推理中...", role="thinking")
+```
 
 ## 错误透出
 
-当 agent 遇到需要告诉用户的错误（如限流、上游 API 失效），用 `AGENT_ERROR:` 让 bridge 转发一条有意义的消息——而不是 bridge 的通用模板。
-
-### 方式一：`ctx.send_error`
-
-适合需要在流程中途透出错误、之后还想自己收尾的场景。bridge 看到 `AGENT_ERROR:` 后即视为失败，即使退出码为 0。
+当 agent 遇到需要告诉用户的错误，用 `{"type":"error"}` 事件让 bridge 转发。两种等价形式：
 
 ```python
-from agentproc import create_profile
+from agentproc import create_profile, AgentResult, ProtocolError
 
 async def handler(ctx):
-    try:
-        reply = await my_llm(ctx.message)
-        return reply
-    except RateLimitError:
+    # 方式一：调用 send_error，然后返回 / 抛出
+    if rate_limited():
         await ctx.send_error("被限流，60 秒后重试。")
-        return  # 立即返回；并发的回复正文会被 bridge 丢弃
+        return                       # bridge 会丢弃并发的回复正文
+
+    # 方式二：抛 ProtocolError —— SDK 输出 {"type":"error"} 并以退出码 1 退出
+    if bad_input(ctx.message):
+        raise ProtocolError("消息不能为空")
+
+    return AgentResult(response=await my_llm(ctx.message))
 
 create_profile(handler)
 ```
 
-### 方式二：`raise ProtocolError`
+`ProtocolError` 是异常形式；SDK 把它的消息序列化为 `{"type":"error"}` 事件并以非零码退出。其他未捕获异常会打到 stderr，以退出码 1 退出但不输出 `error` 事件。
 
-异常形式更符合控制流风格，且会以退出码 1 退出（更贴近 spec 的建议）。SDK 会捕获 `ProtocolError`，输出 `AGENT_ERROR:` 行。
+## 附件
 
-```python
-from agentproc import create_profile, ProtocolError
-
-async def handler(ctx):
-    if not ctx.message.strip():
-        raise ProtocolError("bad input: 消息不能为空")
-    ...
-
-create_profile(handler)
-```
-
-两种方式都会让 bridge 视本次进程为失败（即使后续退出码为 0 也会被覆盖）。
-
-## 协议版本
-
-`ctx.protocol_version` 反映 bridge 实现的协议版本（来自 `AGENT_PROTOCOL_VERSION`）。当 bridge 未注入时，SDK 回退到自身的 `PROTOCOL_VERSION`（当前 `"0.1"`）。
+读 `ctx.attachments` —— 一个 `{kind, url, ...}` 字典列表：
 
 ```python
-from agentproc import PROTOCOL_VERSION  # "0.1"
-
 async def handler(ctx):
-    if ctx.protocol_version != PROTOCOL_VERSION:
-        print(f"warn: bridge={ctx.protocol_version}, sdk={PROTOCOL_VERSION}", file=sys.stderr)
-    ...
+    images = [a for a in ctx.attachments if a.get("kind") == "image"]
+    reply = await my_vision(ctx.message, [a["url"] for a in images])
+    return reply
 ```
 
 ## 会话历史
+
+对于直接调 LLM API、需要跨轮携带上下文的 agent：
 
 ```python
 from agentproc import create_profile, AgentResult, load_history, append_history, HistoryEntry
@@ -142,22 +134,30 @@ create_profile(handler)
 
 ## 本地测试
 
-不需要启动 bridge，手动设置环境变量即可测试：
+用 hub 同款 CLI 跑你的 agent —— 最忠实的端到端验证：
 
 ```bash
-AGENT_MESSAGE="你好" \
-AGENT_SESSION_ID="" \
-AGENT_SESSION_NAME="default" \
-AGENT_FROM_USER="test" \
-AGENT_STREAMING="1" \
-AGENT_PROTOCOL_VERSION="0.1" \
-python3 ./agent.py
+agentproc --profile ./myagent.yaml --prompt "hello"
 ```
 
-要模拟单附件场景：
+::: tip 还没有 profile YAML？
+在你 agent 旁边存一个 `myagent.yaml`：
+
+```yaml
+command: python3
+args: ["./agent.py"]
+timeout_secs: 60
+```
+:::
+
+<details>
+<summary>想直接驱动脚本？</summary>
+
+像 bridge 那样把 turn 对象写进 stdin：
 
 ```bash
-AGENT_MESSAGE="看看这张图" \
-AGENT_IMAGE_URL="https://example.com/a.png" \
-python3 ./agent.py
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./agent.py
 ```
+
+单独调试脚本时很有用。
+</details>

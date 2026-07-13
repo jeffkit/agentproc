@@ -1,71 +1,100 @@
 'use strict';
 
 /**
- * Shared bridge utilities for AgentProc hub profiles.
+ * Shared bridge utilities for AgentProc hub profiles (wire 0.3).
  *
  * A bridge wraps a CLI that emits NDJSON (one JSON object per line) on stdout.
- * The bridge reads the stream line by line, extracts three things per event,
- * and emits AgentProc protocol output:
+ * The bridge reads the {"type":"turn",...} object from its own stdin, spawns
+ * the CLI, and translates the CLI's NDJSON stream into AgentProc wire-0.3
+ * output (one JSON event per line on stdout):
  *
- *   - partial text   → AGENT_PARTIAL:<json-string>   (streaming only)
- *   - session id     → AGENT_SESSION:<opaque-id>     (last wins)
- *   - error message  → AGENT_ERROR:<json-string>     (always honored)
+ *   - {"type":"partial","text":...}   live streaming chunk (always emitted;
+ *                                      the runner forwards it only when the
+ *                                      profile's streaming is true)
+ *   - {"type":"session","id":...}     declare session id (last wins)
+ *   - {"type":"error","message":...}  error message (always honored, exit 1)
+ *   - {"type":"text","text":...}      final reply body (emitted once at end)
  *
  * A profile supplies:
  *
  *   - `cliName`         e.g. "claude", "codex", "gemini"
  *   - `cliInstallHint`  short install instruction shown on ENOENT
  *   - `buildArgs(message, sessionId, env) -> string[]`
- *   - `parseEvent(event) -> { partialText?, sessionId?, error? } | null`
+ *   - `parseEvent(event) -> { partialText?, finalText?, sessionId?, error? } | null`
  *
- * This module handles subprocess lifecycle, line reading, JSON decoding,
- * non-streaming fallback (emit final text at end), exit-code mapping, and
- * the AGENT_* emission contract. Each bridge stays under ~30 lines.
+ * This module handles turn parsing, subprocess lifecycle, line reading, JSON
+ * decoding, exit-code mapping, and the NDJSON emission contract.
  */
 
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 
-function emit(line) {
-  process.stdout.write(line + '\n');
+function emitObj(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-function emitError(text) {
-  emit(`AGENT_ERROR:${JSON.stringify(text)}`);
+function emit(obj) {
+  // Emit one NDJSON event dict. Bridges may pass a pre-built event dict; for
+  // the common cases use emitPartial / emitText / emitSession / emitError.
+  emitObj(obj);
 }
 
 function emitPartial(text) {
-  emit(`AGENT_PARTIAL:${JSON.stringify(text)}`);
+  emitObj({ type: 'partial', text });
+}
+
+function emitText(text) {
+  emitObj({ type: 'text', text });
+}
+
+function emitError(text) {
+  emitObj({ type: 'error', message: text });
 }
 
 function emitSession(sessionId) {
-  emit(`AGENT_SESSION:${sessionId}`);
+  emitObj({ type: 'session', id: sessionId });
 }
 
-function hasAnyAttachment(env) {
-  if ((env.AGENT_IMAGE_URL || '').trim()) return true;
-  if ((env.AGENT_FILE_URL || '').trim()) return true;
-  return false;
+function hasAnyAttachment(turn) {
+  return Array.isArray(turn.attachments) && turn.attachments.length > 0;
 }
 
-async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
-  // Exit semantics: we use process.exit(n) for fatal pre-spawn / parse failures
-  // rather than setting process.exitCode and letting the loop drain. This
-  // bridge is an async reader loop; after we emit AGENT_ERROR we want the
-  // process gone immediately so the bridge doesn't keep reading a child we
-  // never started (or a child whose output we've already given up on). The
-  // `recursive` bridge uses exitCode because it owns a different control flow;
-  // don't "normalise" this one to match — the immediacy is the point.
+function readTurn() {
+  return new Promise((resolve) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    const onReadable = () => {
+      let chunk;
+      while ((chunk = process.stdin.read()) !== null) {
+        data += chunk;
+        const nl = data.indexOf('\n');
+        if (nl >= 0) {
+          const line = data.slice(0, nl);
+          process.stdin.removeListener('readable', onReadable);
+          try {
+            const v = JSON.parse(line);
+            resolve(v && typeof v === 'object' ? v : {});
+          } catch {
+            resolve({});
+          }
+          return;
+        }
+      }
+    };
+    process.stdin.once('readable', onReadable);
+    process.stdin.once('end', () => resolve({}));
+    process.stdin.once('error', () => resolve({}));
+  });
+}
+
+async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn = null }) {
+  if (turn === null) turn = await readTurn();
   const env = process.env;
-  const message = env.AGENT_MESSAGE || '';
-  const sessionId = env.AGENT_SESSION_ID || '';
-  const streaming = (env.AGENT_STREAMING || '1') !== '0';
+  const message = (typeof turn.message === 'string') ? turn.message : '';
+  const sessionId = (typeof turn.session_id === 'string') ? turn.session_id : '';
 
-  // Per spec: AGENT_MESSAGE may be empty when the turn carries attachments
-  // (e.g. an image-only message). Only reject when there is truly nothing
-  // to do — no text AND no attachment of any kind.
-  if (!message && !hasAnyAttachment(env)) {
-    emitError('AGENT_MESSAGE env var is required (or set AGENT_IMAGE_URL / AGENT_FILE_URL)');
+  if (!message && !hasAnyAttachment(turn)) {
+    emitError('turn.message is required (or include turn.attachments)');
     process.exit(1);
   }
 
@@ -88,7 +117,7 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
 
   let foundSessionId = null;
   let lastFinalText = null;
-  let sawAnyPartial = false;
+  let lastPartialText = null;
   let errorMessage = null;
 
   for await (const raw of rl) {
@@ -103,27 +132,19 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
     if (result.partialText) {
-      if (streaming) {
-        emitPartial(result.partialText);
-        sawAnyPartial = true;
-      }
+      // Always emit partials; the runner forwards them only when the profile's
+      // streaming is true (and drops them otherwise).
+      emitPartial(result.partialText);
+      lastPartialText = result.partialText;
     }
     if (result.finalText) {
-      // Only used as fallback in non-streaming mode (or when no partials
-      // were actually emitted). Streaming mode prefers the live partials.
-      if (!streaming || !sawAnyPartial) {
-        lastFinalText = result.finalText;
-      }
+      lastFinalText = result.finalText;
     }
   }
 
   const code = await new Promise(resolve => child.on('close', resolve));
 
   if (errorMessage) {
-    // Per spec: a CLI's terminal event often carries both session_id and an
-    // error indication. Persist the session for the next turn BEFORE emitting
-    // the error — the error terminates this turn but does not invalidate the
-    // session.
     if (foundSessionId) emitSession(foundSessionId);
     emitError(errorMessage);
     process.exit(1);
@@ -137,14 +158,73 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent }) {
   }
 
   if (foundSessionId) emitSession(foundSessionId);
-  if (lastFinalText && !streaming) emit(lastFinalText);
+  const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
+  if (replyText) emitText(replyText);
+  process.exit(0);
+}
+
+async function runPlainCli({ cliName, cliInstallHint, buildArgs, timeoutEnv = 'CLI_TIMEOUT', defaultTimeout = 600 }) {
+  // Drive a one-shot CLI that returns the full reply as plain stdout text
+  // (no streaming, no session id). Reads the turn from stdin, runs the CLI
+  // with a timeout, and emits the trimmed stdout as a single {"type":"text"}
+  // event (or {"type":"error"} on failure). buildArgs(message) builds the
+  // argv; per-CLI config is read from process.env inside buildArgs.
+  const turn = await readTurn();
+  const message = (typeof turn.message === 'string') ? turn.message : '';
+  if (!message && !hasAnyAttachment(turn)) {
+    emitError(`${cliName}: turn.message is required (or include turn.attachments)`);
+    process.exit(1);
+  }
+
+  const args = buildArgs(message);
+  const child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let stderr = '';
+  let spawnError = null;
+  child.on('error', err => { spawnError = err; });
+  child.stdout.on('data', d => { stdout += d.toString(); });
+  child.stderr.on('data', d => { stderr += d.toString(); });
+
+  const timeoutSecs = parseInt(process.env[timeoutEnv] || String(defaultTimeout), 10);
+  const timer = setTimeout(() => {
+    child.kill('SIGTERM');
+    emitError(`${cliName} timed out`);
+    process.exit(124);
+  }, timeoutSecs * 1000);
+
+  const code = await new Promise(resolve => child.on('close', resolve));
+  clearTimeout(timer);
+
+  if (spawnError) {
+    const notFound = spawnError.code === 'ENOENT';
+    const msg = notFound ? `${cliName} CLI not found. ${cliInstallHint}` : spawnError.message;
+    emitError(msg);
+    process.exit(1);
+  }
+  if (code !== 0) {
+    let msg = `${cliName} exited with ${code}`;
+    const s = stderr.trim();
+    if (s) msg += `: ${s.slice(0, 500)}`;
+    emitError(msg);
+    process.exit(1);
+  }
+
+  const text = stdout.trim();
+  if (!text) {
+    emitError(`${cliName} returned empty output`);
+    process.exit(1);
+  }
+  emitText(text);
   process.exit(0);
 }
 
 module.exports = {
   runBridge,
+  runPlainCli,
+  readTurn,
   emit,
-  emitError,
   emitPartial,
+  emitText,
+  emitError,
   emitSession,
 };

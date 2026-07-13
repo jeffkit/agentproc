@@ -16,19 +16,19 @@ createProfile(async (ctx) => {
   // ctx.sessionId         — previous session id (empty = new session)
   // ctx.sessionName       — human-readable session name
   // ctx.fromUser          — sender identifier
-  // ctx.streaming         — true if bridge expects streaming output
-  // ctx.protocolVersion   — protocol version string (e.g. "0.1")
-  // ctx.imageUrl          — image attachment URL (empty if none)
-  // ctx.fileUrl           — file attachment URL (empty if none)
+  // ctx.protocolVersion   — protocol version string (e.g. "0.3")
+  // ctx.attachments       — array of {kind, url, ...} objects (empty = none)
+  // ctx.permission        — true if the bridge enabled the permission channel
   const reply = await myLLM(ctx.message);
   return { response: reply };
 });
 ```
 
-Save as `agent.js`, then in your profile YAML:
+The SDK reads the `{"type":"turn",...}` object from stdin, calls your handler, and writes NDJSON events to stdout. Save as `agent.js`, then in your profile YAML:
 
 ```yaml
-command: node ./agent.js
+command: node
+args: ["./agent.js"]
 timeout_secs: 60
 ```
 
@@ -41,7 +41,11 @@ createProfile(async ({ message, sessionId }) => {
 });
 ```
 
+The SDK emits a `{"type":"session","id":...}` event (then a `{"type":"text"}` event for the reply). The bridge passes the session id back as `sessionId` on the next turn.
+
 ## Streaming
+
+Use `ctx.sendPartial()` to send chunks immediately. The bridge forwards them in real time when the profile's `streaming: true`:
 
 ```js
 createProfile(async (ctx) => {
@@ -50,13 +54,20 @@ createProfile(async (ctx) => {
     ctx.sendPartial(chunk);
     newSessionId = sid;
   }
+  // response: '' — all content was already streamed via sendPartial.
   return { response: '', sessionId: newSessionId };
 });
 ```
 
+`sendPartial` accepts an optional `role` (`"output"` | `"thinking"`):
+
+```js
+ctx.sendPartial('reasoning...', 'thinking');
+```
+
 ## Error handling
 
-Surface a user-readable error via `AGENT_ERROR:`. Two equivalent forms:
+Surface a user-readable error via a `{"type":"error"}` event. Two equivalent forms:
 
 ```js
 const { createProfile, protocolError } = require('agentproc');
@@ -68,16 +79,28 @@ createProfile(async (ctx) => {
     return;                          // bridge discards any reply body
   }
 
-  // Form 2: throw a protocol error — SDK emits AGENT_ERROR: and exits 1
+  // Form 2: throw a protocol error — SDK emits {"type":"error"} and exits 1
   if (badInput(ctx.message)) {
-    throw await protocolError('bad input');
+    throw protocolError('bad input');
   }
 
   return { response: await myLLM(ctx.message) };
 });
 ```
 
-`protocolError(msg)` returns a rejected promise whose error is tagged `isProtocolError`; the SDK serializes its message as an `AGENT_ERROR:` line and exits 1. Any other uncaught error is logged to stderr and exits 1 without an `AGENT_ERROR:` line.
+`protocolError(msg)` returns a `ProtocolError` instance tagged `isProtocolError`; the SDK serializes its message as a `{"type":"error"}` event and exits 1. Any other uncaught error is logged to stderr and exits 1 without an `error` event.
+
+## Attachments
+
+Read `ctx.attachments` — an array of `{kind, url, ...}` objects:
+
+```js
+createProfile(async (ctx) => {
+  const images = ctx.attachments.filter(a => a.kind === 'image');
+  const reply = await myVision(ctx.message, images.map(a => a.url));
+  return { response: reply };
+});
+```
 
 ## Conversation history
 
@@ -113,7 +136,8 @@ agentproc --profile ./myagent.yaml --prompt "hello"
 Save this as `myagent.yaml` next to your agent:
 
 ```yaml
-command: node ./agent.js
+command: node
+args: ["./agent.js"]
 timeout_secs: 60
 ```
 :::
@@ -121,16 +145,10 @@ timeout_secs: 60
 <details>
 <summary>Prefer to drive the script directly?</summary>
 
-Set the env vars the bridge would inject. This is exactly what the CLI does internally:
+Write the turn object to stdin the way the bridge does:
 
 ```bash
-AGENT_MESSAGE="hello" \
-AGENT_SESSION_ID="" \
-AGENT_SESSION_NAME="default" \
-AGENT_FROM_USER="test" \
-AGENT_STREAMING="1" \
-AGENT_PROTOCOL_VERSION="0.1" \
-node ./agent.js
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | node ./agent.js
 ```
 
 Useful when debugging the script in isolation.

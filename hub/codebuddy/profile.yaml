@@ -5,7 +5,8 @@ cli_install: |
   # CodeBuddy is currently distributed by Tencent; see internal docs for installation.
   # Once installed, the binary is typically available as `codebuddy` or `cbc`.
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd defaults to your current directory under `agentproc hub run`.
   timeout_secs: 600
   streaming: true
@@ -24,5 +25,5 @@ notes: |
   `-r <sessionId>` (or `--resume <sessionId>`).
 
   Do NOT set `permission: true` — CodeBuddy documents `--permission-prompt-tool`
-  as unsupported; the bridge fails closed with AGENT_ERROR if AGENT_PERMISSION=1.
+  as unsupported; the bridge fails closed with a {"type":"error"} event if turn.permission is true.
   Use hub/claude-code when mid-turn tool authorization is required.

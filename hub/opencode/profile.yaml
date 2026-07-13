@@ -5,7 +5,8 @@ cli_install: |
   npm install -g opencode-ai
   # or: curl -fsSL https://opencode.ai/install | bash
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your
   # current directory (so `opencode` runs against your project); you can also
   # pass --cwd explicitly.
@@ -27,7 +28,7 @@ notes: |
   flag emits NDJSON events that this bridge parses for text and session IDs.
 
   Session IDs (format `ses_XXX`) are captured from the `sessionID` field present
-  in every JSON event and forwarded as AGENT_SESSION:. The next turn replays the
+  in every JSON event and forwarded as {"type":"session"}. The next turn replays the
   id as `--session <id>`, enabling native multi-turn continuity.
 
   Requires opencode v1.16.3+ for reliable `--format json` output. Older versions

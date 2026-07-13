@@ -8,7 +8,8 @@ cli_install: |
   # `target/release/recursive` onto your PATH.
   # Then configure a provider: `recursive init` (or edit ~/.recursive/config.toml).
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd defaults to your current directory under `agentproc hub run`, which
   # becomes recursive's workspace root (the directory it can read/write).
   # Override with --cwd to point recursive at a different project.
@@ -44,8 +45,8 @@ notes: |
   `recursive --json [--stream] resume --from-file <session-dir> -p <message>`
   on subsequent turns (native session-id resume). Parses recursive's AgentEvent
   NDJSON stream:
-    - partial_token   → AGENT_PARTIAL: (streaming mode)
-    - assistant_text  → AGENT_PARTIAL: (non-streaming mode; the per-step reply)
+    - partial_token   → {"type":"partial"} (streaming mode)
+    - assistant_text  → {"type":"partial"} (non-streaming mode; the per-step reply)
     - turn_finished   → terminal
 
   recursive records each run as a session directory and logs

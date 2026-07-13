@@ -10,14 +10,14 @@ A minimal protocol for connecting any Agent CLI to a messaging platform through 
 
 AgentProc defines how a bridge (the platform adapter) talks to an agent process (your script). The interface is intentionally minimal:
 
-- **Input:** environment variables (`AGENT_MESSAGE`, `AGENT_SESSION_ID`, …)
-- **Output:** stdout lines (`AGENT_SESSION:`, `AGENT_PARTIAL:`, `AGENT_ERROR:`, reply text)
+- **Input:** one `{"type":"turn",...}` NDJSON line on stdin (message, session id, attachments, …)
+- **Output:** NDJSON events on stdout (`{"type":"partial"}`, `{"type":"text"}`, `{"type":"session"}`, `{"type":"error"}`)
 
-No HTTP, no sockets. Any process that reads env vars and writes to stdout is a valid agent.
+No HTTP, no sockets. Any process that reads a turn from stdin and writes NDJSON events to stdout is a valid agent.
 
 ```
 Messaging Platform → Bridge → Your Script → Bridge → User
-                       ↑ env vars    stdout ↑
+                       ↑ stdin turn    stdout NDJSON ↑
 ```
 
 ## Profile Hub
@@ -34,20 +34,23 @@ Ready-to-use profiles for popular AI CLIs — drop one in and any conformant bri
 
 ```bash
 #!/usr/bin/env bash
-# echo_agent.sh
-echo "You said: $AGENT_MESSAGE"
+# echo_agent.sh — reads the turn from stdin, echoes the message back
+read -r turn
+message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```yaml
 # profile.yaml
-command: bash ./echo_agent.sh
+command: bash
+args: ["./echo_agent.sh"]
 timeout_secs: 10
 ```
 
 ```bash
 # Test locally
-AGENT_MESSAGE="hello" bash ./echo_agent.sh
-# → You said: hello
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | bash ./echo_agent.sh
+# → {"type":"text","text":"You said: hello"}
 ```
 
 ## Streaming + errors + session continuity
@@ -55,15 +58,19 @@ AGENT_MESSAGE="hello" bash ./echo_agent.sh
 ```bash
 #!/usr/bin/env bash
 # A streaming agent with session continuity
-echo "AGENT_SESSION:my-session-$(date +%s)"
-echo 'AGENT_PARTIAL:"Let me think... "'
-echo 'AGENT_PARTIAL:"done."'
+read -r turn
+message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
+sid="my-session-$(date +%s)"
+printf '{"type":"session","id":"%s"}\n' "$sid"
+printf '{"type":"partial","text":"Let me think... "}\n'
+printf '{"type":"partial","text":"done."}\n'
+printf '{"type":"text","text":"You said: %s"}\n' "$message"
 ```
 
-If something goes wrong, emit an `AGENT_ERROR:` line — the bridge forwards it to the user regardless of streaming mode:
+If something goes wrong, emit a `{"type":"error"}` event — the bridge forwards it to the user regardless of streaming mode:
 
 ```bash
-echo 'AGENT_ERROR:"Upstream API rate limited. Try again in 60s."'
+printf '{"type":"error","message":"Upstream API rate limited. Try again in 60s."}\n'
 exit 1
 ```
 
@@ -112,14 +119,14 @@ create_profile(handler)
 ## How it differs from neighboring protocols
 
 - **Not MCP.** MCP connects an LLM app to *tools* (the LLM is the client, tools are subprocesses). AgentProc connects a bridge to an *agent* (reverse direction). They compose: your AgentProc agent can internally use MCP tools.
-- **Not ACP.** ACP is an interactive, bidirectional JSON-RPC protocol for IDEs. AgentProc is one process per turn, plain text on stdout.
-- **Not NDJSON.** NDJSON requires every line to be valid JSON. AgentProc uses sentinel-prefixed lines so `echo "You said: $AGENT_MESSAGE"` is a valid agent.
+- **Not ACP.** ACP is an interactive, bidirectional JSON-RPC protocol for IDEs. AgentProc is one process per turn, NDJSON on stdout.
+- **Is NDJSON.** AgentProc 0.3 *is* NDJSON both directions: one turn line in, typed event lines out. The vocabulary is closed and small, so a bridge classifies each line in one line of code.
 
 See the [full spec](./spec/protocol.md#comparison-with-related-protocols) for the complete comparison.
 
 ## Status
 
-Wire protocol `0.1` (Draft). The on-the-wire contract (env vars + sentinel-prefixed stdout) is stable enough to implement against; the spec document is revised independently and may clarify wording without bumping the wire version. See [CHANGELOG](./CHANGELOG.md).
+Wire protocol `0.3`, document revision `1.0` (Draft). The on-the-wire contract (stdin turn object + NDJSON stdout events) is stable enough to implement against; the spec document is revised independently and may clarify wording without bumping the wire version. See [CHANGELOG](./CHANGELOG.md).
 
 ## License
 

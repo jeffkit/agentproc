@@ -16,7 +16,7 @@ That's it. The CLI:
 2. Caches it at `~/.agentproc/cache/hub/claude-code/` (24h TTL)
 3. Uses **your current directory** as the agent's `cwd` (override with `--cwd`)
 4. Locates the bundled bridge script via a `{{PROFILE_DIR}}` placeholder, so `cwd` and script location are decoupled
-5. Forwards `AGENT_MESSAGE` and any `--env` you pass
+5. Writes a `{"type":"turn",...}` object to the agent's stdin and forwards any `--env` you pass
 
 ::: tip Hitting GitHub rate limits?
 Anonymous fetches are capped at ~60/hour per IP. Raise to 5,000/hour with:
@@ -137,7 +137,8 @@ cli: <command-name>             # the executable this wraps
 cli_install: |                  # how to install the CLI itself
   npm install -g ...
 agentproc:                      # the actual AgentProc P0 profile
-  command: python3 {{PROFILE_DIR}}/bridge.py   # {{PROFILE_DIR}} resolves to the profile's own directory
+  command: python3                          # argv[0] — single token, never split
+  args: ["{{PROFILE_DIR}}/bridge.py"]       # argv[1..]; {{PROFILE_DIR}} resolves to the profile's own directory
   # cwd intentionally omitted: `hub run` defaults it to the user's current
   # directory (so the wrapped CLI operates on their project). The bridge
   # script is located via {{PROFILE_DIR}} regardless of cwd.

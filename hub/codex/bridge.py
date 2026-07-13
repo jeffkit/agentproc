@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-AgentProc bridge for the `codex` CLI (OpenAI Codex).
+AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.3).
 
 Default:
     codex exec --json <message>
     codex exec resume --json <thread_id> <message>
 
-Permission mode (AGENT_PERMISSION=1 / profile permission: true):
+Permission mode (turn.permission is true / profile permission: true):
     Same argv + --dangerously-bypass-hook-trust + approval_policy=on-request,
     with a one-shot CODEX_HOME that installs a PermissionRequest hook.
-    The hook relays approvals over a Unix socket ↔ AGENT_PERMISSION_*.
+    The hook relays approvals over a Unix socket ↔
+    {"type":"permission_request"} / {"type":"permission_response"} NDJSON.
 """
 
 from __future__ import annotations
@@ -35,7 +36,9 @@ from _shared.stream_utils import (  # noqa: E402
     emit_error,
     emit_partial,
     emit_session,
+    emit_text,
     main_entry,
+    read_turn,
 )
 
 CLI_NAME = "codex"
@@ -44,14 +47,6 @@ HOOK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "permissi
 _PROFILE_DIR = os.path.dirname(os.path.abspath(__file__))
 if _PROFILE_DIR not in sys.path:
     sys.path.insert(0, _PROFILE_DIR)
-
-# Import pure helpers from the sibling module used by tests / Node.
-# Keep a thin local copy of the Python-facing API so bridge.py stays importable
-# without requiring Node's permission_map.js.
-
-
-def _permission_enabled(env) -> bool:
-    return env.get("AGENT_PERMISSION", "").strip() == "1"
 
 
 def build_args(message: str, session_id: str, env) -> list[str]:
@@ -138,15 +133,13 @@ def _prepare_permission_home() -> tuple[str, str]:
     return tmp, sock_path
 
 
-def _run_permission_mode(env) -> int:
-    message = env.get("AGENT_MESSAGE", "")
-    session_id = env.get("AGENT_SESSION_ID", "")
-    streaming = env.get("AGENT_STREAMING", "1") != "0"
+def _run_permission_mode(turn: dict, env) -> int:
+    message = turn.get("message") if isinstance(turn.get("message"), str) else ""
+    session_id = turn.get("session_id") if isinstance(turn.get("session_id"), str) else ""
+    attachments = turn.get("attachments") if isinstance(turn.get("attachments"), list) else []
 
-    if not message and not (
-        env.get("AGENT_IMAGE_URL", "").strip() or env.get("AGENT_FILE_URL", "").strip()
-    ):
-        emit_error("AGENT_MESSAGE env var is required (or set AGENT_IMAGE_URL / AGENT_FILE_URL)")
+    if not message and not attachments:
+        emit_error("turn.message is required (or include turn.attachments)")
         return 1
 
     tmp, sock_path = _prepare_permission_home()
@@ -180,7 +173,7 @@ def _run_permission_mode(env) -> int:
             box: Dict[str, Any] = {"event": event, "resp": None}
             with waiters_lock:
                 waiters[rid] = box
-            emit(f"AGENT_PERMISSION_REQUEST:{json.dumps(req, ensure_ascii=False)}")
+            emit({"type": "permission_request", **req})
             if not event.wait(timeout=600):
                 resp = {
                     "request_id": rid,
@@ -229,17 +222,17 @@ def _run_permission_mode(env) -> int:
     server_thread = threading.Thread(target=serve, daemon=True)
     server_thread.start()
 
-    # Bridge stdin ← AgentProc runner
+    # Bridge stdin ← AgentProc runner ({"type":"permission_response",...} NDJSON)
     def read_bridge_stdin() -> None:
         for raw in sys.stdin:
-            line = raw.rstrip("\n")
-            if not line.startswith("AGENT_PERMISSION_RESPONSE:"):
+            line = raw.rstrip("\r\n")
+            if not line:
                 continue
             try:
-                payload = json.loads(line[len("AGENT_PERMISSION_RESPONSE:") :])
+                payload = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if not isinstance(payload, dict):
+            if not isinstance(payload, dict) or payload.get("type") != "permission_response":
                 continue
             rid = payload.get("request_id")
             if not isinstance(rid, str) or not rid:
@@ -286,7 +279,7 @@ def _run_permission_mode(env) -> int:
 
     found_session_id: Optional[str] = None
     last_final_text: Optional[str] = None
-    saw_any_partial = False
+    last_partial_text: Optional[str] = None
     error_message: Optional[str] = None
 
     assert proc.stdout is not None
@@ -308,12 +301,10 @@ def _run_permission_mode(env) -> int:
         if result.error:
             error_message = result.error
         if result.partial_text:
-            if streaming:
-                emit_partial(result.partial_text)
-                saw_any_partial = True
+            emit_partial(result.partial_text)
+            last_partial_text = result.partial_text
         if result.final_text:
-            if not streaming or not saw_any_partial:
-                last_final_text = result.final_text
+            last_final_text = result.final_text
 
     code = proc.wait()
     stop_server.set()
@@ -343,12 +334,18 @@ def _run_permission_mode(env) -> int:
         return 1
     if found_session_id:
         emit_session(found_session_id)
-    if last_final_text and not streaming:
-        emit(last_final_text)
+    reply_text = last_final_text if last_final_text is not None else last_partial_text
+    if reply_text:
+        emit_text(reply_text)
     return 0
 
 
+def main() -> int:
+    turn = read_turn()
+    if turn.get("permission") is True:
+        return _run_permission_mode(turn, os.environ)
+    return main_entry(CLI_NAME, INSTALL_HINT, build_args, parse_event, turn=turn)
+
+
 if __name__ == "__main__":
-    if _permission_enabled(os.environ):
-        sys.exit(_run_permission_mode(os.environ))
-    sys.exit(main_entry(CLI_NAME, INSTALL_HINT, build_args, parse_event))
+    sys.exit(main())

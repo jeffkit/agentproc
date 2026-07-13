@@ -5,7 +5,8 @@ cli_install: |
   pip install aider-chat
   # or: brew install aider
 agentproc:
-  command: python3 {{PROFILE_DIR}}/bridge.py
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd defaults to your current directory under `agentproc hub run`.
   # aider reads and edits files in the working directory and makes git commits.
   timeout_secs: 600

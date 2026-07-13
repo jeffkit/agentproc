@@ -4,7 +4,7 @@ layout: home
 hero:
   name: AgentProc
   text: 把任意 Agent CLI 接入任意消息平台
-  tagline: 一个极简的进程级协议。不用 HTTP、不用 socket——只用 stdin、stdout 和环境变量。
+  tagline: 一个极简的进程级协议。不用 HTTP、不用 socket——只用 stdin 和 stdout。
   actions:
     - theme: brand
       text: 快速开始
@@ -58,7 +58,7 @@ Homebrew 的 Python 默认不暴露 `pip`。可以跑 `python3 -m ensurepip && p
 
 ```bash
 agentproc --version
-# agentproc 0.3.0 (protocol 0.1)
+# agentproc 0.7.0 (protocol 0.3)
 ```
 
 ## ② 浏览 hub
@@ -106,11 +106,11 @@ agentproc hub run claude-code \
 `agentproc hub run` 自动把**你当前所在目录**作为 agent 的 `cwd`，并通过 `{{PROFILE_DIR}}` 占位符找到打包的 bridge 脚本。只要 cd 到你想让 agent 操作的项目目录，跑就行。
 :::
 
-stderr 上会实时看到协议行，stdout 是最终回复：
+stderr 上会实时看到 NDJSON 事件，stdout 是最终回复：
 
 ```
-AGENT_PARTIAL:"This codebase is..."
-AGENT_SESSION:13c2f6ec-1f97-42c4-be9e-9475129e243c
+{"type":"partial","text":"This codebase is..."}
+{"type":"session","id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
 agentproc:session:13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
@@ -123,8 +123,8 @@ agentproc hub run claude-code \
   --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
-::: tip 短回复可能看不到 AGENT_PARTIAL:
-有些 agent 在回答较短时一次性吐完全部内容——你只会看到 `AGENT_SESSION:` 和回复正文，没有 `AGENT_PARTIAL:` 行。这是正常的；流式只分片长回复。
+::: tip 短回复可能看不到 {"type":"partial"}
+有些 agent 在回答较短时一次性吐完全部内容——你只会看到 `{"type":"session"}` 和回复正文，没有 `{"type":"partial"}` 行。这是正常的；流式只分片长回复。
 :::
 
 ## ④ 接到你的消息平台
@@ -132,8 +132,8 @@ agentproc hub run claude-code \
 AgentProc agent 不直接和微信或 Slack 通信——那是 **bridge** 的工作。bridge 是一个小程序，职责是：
 
 1. 从消息平台收到消息（通过 webhook、轮询等）
-2. 启动你的 agent 进程，注入 `AGENT_MESSAGE` 环境变量
-3. 读取 agent 的 stdout（按 AgentProc 协议）
+2. 启动你的 agent 进程，往它的 stdin 写入一个 `{"type":"turn",...}` 对象
+3. 读取 agent stdout 上的 NDJSON 事件（按 AgentProc 协议）
 4. 把回复转发给用户
 
 下面是一个 ~30 行的 Node.js bridge 示例，把 `agentproc` 接到任何平台：
