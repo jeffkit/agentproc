@@ -8,6 +8,37 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Unreleased
 
+### Spec / SDK 0.8.0 — spec/runner consistency, hub bridge parity, SDK permission channel (wire `0.3`, doc `1.0`)
+
+A batch of protocol-spec / runner consistency fixes plus the first cross-implementation conformance suite for the hub bridge engine and a new SDK-side permission channel. No wire change — `protocol_version` stays `"0.3"`. Doc revision stays `1.0` (the rule clarifications below state what the spec already meant; they don't add new vocabulary).
+
+**Spec clarification (matches what the runners already aimed to do).**
+
+- **`error` now stops subsequent `partial` / `text`.** Spec 5.4 elevated from SHOULD to MUST: after an `error` event, the bridge MUST drop subsequent `partial` events and MUST discard `text` events (a failed turn cannot accumulate reply body). `session` is exempt — last-wins still applies so the id can be captured for the next turn even after an error. Both runners gained an `errorSeen` / `error_seen` guard; 4 new scenarios in `spec/conformance/scenarios.json` pin the four orderings.
+- **`permission_response.updated_input` is no longer auto-filled.** When the bridge omits the field on allow, the response now omits it too — the agent (or wrapped CLI) falls back to the request's original `input`. Pre-fix, both runners pre-filled `req.input`, which erased the distinction between "user accepted unchanged" and "user never touched it" for downstream CLIs (notably Claude Code's `updatedInput`). The hub `claude-code` translation layer still back-fills `original_input` for the Claude control response because Claude's protocol requires the field — that's a CLI contract, not AgentProc policy. New `formatPermissionResponse` unit tests in both SDKs pin the omission.
+- **Streaming partial cap is implementation-defined at the boundary.** Spec 5.3 gained an explicit "Implementation-defined: the boundary chunk" paragraph: when a `partial` chunk straddles the cap, the bridge MAY either forward a tail-truncated slice that fits the remaining budget (then the truncation notice) OR drop the chunk entirely (forward only the notice). Both are conformant. The conformance scenario "first chunk already exceeds cap" now uses a new `partials_any_of` field accepting either candidate.
+- **`truncation_suffix` is read from the profile.** Pre-fix, the truncation notice was emitted only when `max_reply_chars === DEFAULT_MAX_REPLY_CHARS` — a custom cap silently stripped the "... (truncated)" marker, which was the opposite of what users wanted. `normalizeProfile` / `normalize_profile` now read the field from YAML (default `"\n\n…(truncated)"`); an empty string disables the notice while keeping the cap.
+
+**Runner robustness.**
+
+- **Node `onPermission` is serial.** Two concurrent permission_requests whose decisions resolve out of order (slow user click on r1, fast on r2) used to write r2's response before r1's; the agent would pair the wrong response with the wrong request. All decisions now flow through a single promise chain so writes land in request-arrival order regardless of resolution timing. New `concurrent permission responses are written in request-arrival order` test pins this with a 50ms-vs-5ms race.
+- **Python stderr drain timeout collapsed** from 5s+10s to 1s+1s. The old generous timeout let a misbehaving grandchild (one that inherited the stderr fd) hold the runner open ~15s past `kill_grace_secs`. The drain joins are just a backstop — once the child is dead the pipe EOFs in milliseconds — so a 1s cap protects the budget without losing diagnostic signal.
+- **Dead `stderrWindow` / `stderr_window` state removed.** Both runners maintained an 8KB sliding window of stderr "for future UI/display use" that nothing ever read. Re-add as `RunResult.stderrTail` when an actual consumer appears.
+
+**Hub bridge engine parity suite.**
+
+- New `spec/conformance/hub_bridge.json` (8 scenarios) drives the shared `hub/_shared/stream_utils.{py,js}` engines (`run_bridge` / `runBridge`) with an identity `parse_event` that forwards `{partial,text,session,error}` as-is. Both implementations MUST produce identical `bridge_stdout` and exit code. Locks: basic partial+session+text ordering, error-mid-stream preserves session id, session discovered at end (partial-as-reply fallback), empty-message + attachment accepted, empty-message + no-attachment → bridge emits error, non-zero exit without session → exit + stderr surfaced, non-zero exit but session captured → session still persisted, final text falls back to last partial. Per-CLI `parse_event` variations remain covered by each hub profile's own tests; this fixture covers the shared engine.
+- Node side runs the engine as a subprocess via `sdk/node/src/_hub_bridge_harness.js` (since `runBridge` ends with `process.exit`); Python side patches `subprocess.Popen` via `_FakeProc`.
+
+**SDK permission channel.**
+
+- **Node `readTurn()` no longer deadlocks under `permission: true`.** Pre-fix used `fs.readFileSync(0)`, which reads until EOF — the bridge keeps stdin open for permission_response traffic, so a Node SDK agent would block at turn-read time. Replaced with a byte-at-a-time `fs.readSync` loop that returns after the first newline, leaving the rest of stdin available.
+- **New `ctx.sendPermissionRequest(req)` + `ctx.readPermissionResponse()` on both SDKs.** Handlers can now speak the optional permission channel without managing raw stdin/stdout framing. `sendPermissionRequest` throws if `ctx.permission` is not true. New `spec/conformance/sdk.json` scenario `async-permission-roundtrip` exercises the full loop (send → read → reflect decision in reply) on both SDKs and pins the pre-fix Node deadlock as a regression.
+
+**CI.** `test.yml` and `publish.yml` `test-node` and `conformance` steps now include `hub_bridge_conformance.test.js` / `test_hub_bridge_conformance.py`.
+
+- **Versions.** SDK packages `0.7.1` → `0.8.0` (Python + Node, minor). Wire protocol stays `0.3`. Doc revision stays `1.0`.
+
 ### Spec / SDK 0.7.1 — fix Node runner EPIPE crash when agent exits early (wire `0.3`, doc `1.0`)
 
 Patch over 0.7.0. The Node runner writes the turn object to the agent's stdin on every run. If the agent exits (or closes its stdin) before the write lands — e.g. a one-shot CLI that reads nothing from stdin — the write fails with `EPIPE`, which Node emits **asynchronously** as an `'error'` event on the stdin stream. With no listener attached, that became an `uncaughtException` and crashed the bridge. The crash was timing-sensitive and surfaced on Node 22 in CI (`conformance` and `test-node (22)`); Node 20/24 and the Python runner (which already wrapped the write in `try/except (BrokenPipeError, ...)`) were unaffected.
