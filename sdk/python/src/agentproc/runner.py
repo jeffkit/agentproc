@@ -567,17 +567,12 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     _partials_truncated = False
     _max_chars = profile["max_reply_chars"]
     _trunc_suffix = profile["truncation_suffix"]
-    # Two views on stderr:
-    #   - stderr_window: bounded sliding window (8 KB) for the on_stderr UI
-    #     callback, so a noisy agent cannot exhaust memory.
-    #   - stderr_full:   bounded head capture (1 MB) used only for post-mortem
-    #     pattern diagnosis. The diagnostic patterns target interpreter-startup
-    #     errors (file/module not found) which appear in the first bytes, so a
-    #     head cap preserves the high-value signal without unbounded growth.
-    #     Beyond the cap the tail is dropped with a one-shot marker.
-    stderr_window: List[str] = []
+    # Bounded head capture (1 MB) used for post-mortem pattern diagnosis.
+    # The diagnostic patterns target interpreter-startup errors (file/module
+    # not found) which appear in the first bytes, so a head cap preserves
+    # the high-value signal without unbounded growth. Beyond the cap the
+    # tail is dropped with a one-shot marker.
     stderr_full: List[str] = []
-    STDERR_CAP = 8192
     STDERR_FULL_CAP = 1 << 20  # 1 MB
     stderr_full_len = 0
     stderr_full_truncated = False
@@ -593,10 +588,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             marker = "\n[agentproc runner] stderr capped at 1 MB; trailing output dropped\n"
             stderr_full.append(marker)
             stderr_full_truncated = True
-        stderr_window.append(text)
-        total = sum(len(s) for s in stderr_window)
-        while total > STDERR_CAP and len(stderr_window) > 1:
-            total -= len(stderr_window.pop(0))
 
     try:
         proc = subprocess.Popen(
@@ -882,15 +873,17 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         exit_code = proc.wait()
 
     _close_stdin()
-    stdout_thread.join(timeout=5)
-    # Drain stderr fully before running post-mortem diagnosis. The diagnosis
-    # reads the full capture, so we need the drain thread to have caught up.
-    # Generous timeout since the process has already exited — at most we wait
-    # for the pipe buffer to flush.
-    stderr_thread.join(timeout=10)
+    # Process has exited. Drain threads should hit EOF on their pipes within
+    # milliseconds and finish. The hard timeout here is a backstop for the
+    # rare case a grandchild inherited the stderr fd and is still alive — it
+    # keeps the runner from hanging indefinitely without letting drain latency
+    # balloon past the kill_grace_secs budget. 1s each = at most ~2s of extra
+    # latency; diagnosis may be incomplete if it fires, but the post-mortem
+    # stderr patterns target interpreter-startup errors that land in the
+    # first bytes of stderr anyway, well within the 1MB head capture.
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
     if stderr_thread.is_alive():
-        # Very rare; indicates a pathological agent that keeps stderr open.
-        # The diagnosis may be incomplete, but we don't want to hang forever.
         if options.on_stderr:
             options.on_stderr("[agentproc runner] warning: stderr drain timed out; diagnosis may be incomplete")
 

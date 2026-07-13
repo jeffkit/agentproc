@@ -575,6 +575,15 @@ async function run(profileRaw, options) {
   /** @type {Set<string>} */
   const pendingPermissionIds = new Set();
   let stdinClosed = false;
+  // Serial write queue for permission responses. onPermission may be async
+  // (user clicks "allow" on IM, slow), and if each request fires its own
+  // Promise.resolve().then(write) chain, an earlier request whose decision
+  // takes longer can have its response written AFTER a later request's.
+  // The agent reads stdin sequentially and would pair the wrong response to
+  // the wrong request. Chain every write through one promise tail so writes
+  // happen in the order requests arrived — regardless of when each decision
+  // resolves. (Equivalent to a single-producer FIFO.)
+  let writeQueue = Promise.resolve();
 
   function writePermissionResponse(decision) {
     if (stdinClosed || !child.stdin || child.stdin.destroyed) return false;
@@ -690,7 +699,11 @@ async function run(profileRaw, options) {
         pendingPermissionIds.add(req.request_id);
         if (options.onProtocolLine) options.onProtocolLine(line);
         if (typeof options.onPermission === 'function') {
-          Promise.resolve()
+          // Chain through writeQueue: the *write* happens in request-arrival
+          // order even if onPermission resolves out of order. The agent reads
+          // stdin sequentially, so a response written out of order would be
+          // paired with the wrong pending request.
+          writeQueue = writeQueue
             .then(() => options.onPermission(req))
             .then(decision => {
               if (!decision || typeof decision !== 'object') return;
@@ -738,26 +751,17 @@ async function run(profileRaw, options) {
 
   // ---- stderr: forward as debug ----
   let stderrBuf = '';
-  // Two views on stderr:
-  //   - stderrWindow: bounded sliding window (8 KB) — reserved for future
-  //     UI/display use so a noisy agent cannot exhaust memory.
-  //   - stderrFull:   bounded head capture (1 MB) used for post-mortem pattern
-  //     diagnosis. The diagnostic patterns target interpreter-startup errors
-  //     (file/module not found) which appear in the first bytes of stderr, so
-  //     a head cap preserves the high-value signal without unbounded growth.
-  //     Beyond the cap the tail is dropped with a one-shot marker.
-  let stderrWindow = '';
+  // Bounded head capture (1 MB) used for post-mortem pattern diagnosis. The
+  // diagnostic patterns target interpreter-startup errors (file/module not
+  // found) which appear in the first bytes of stderr, so a head cap
+  // preserves the high-value signal without unbounded growth. Beyond the
+  // cap the tail is dropped with a one-shot marker.
   let stderrFull = '';
   let stderrFullTruncated = false;
-  const STDERR_CAP = 8192;
   const STDERR_FULL_CAP = 1 << 20; // 1 MB
   child.stderr.on('data', chunk => {
     const text = chunk.toString();
     stderrBuf += text;
-    stderrWindow += text;
-    if (stderrWindow.length > STDERR_CAP) {
-      stderrWindow = stderrWindow.slice(stderrWindow.length - STDERR_CAP);
-    }
     if (stderrFull.length < STDERR_FULL_CAP) {
       const room = STDERR_FULL_CAP - stderrFull.length;
       stderrFull += text.slice(0, room);

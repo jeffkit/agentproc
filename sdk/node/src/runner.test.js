@@ -770,6 +770,44 @@ describe('run() — end-to-end', () => {
     assert.ok(r.reply.includes('DENIED'), `reply: ${r.reply}`);
     assert.ok(r.reply.includes('HASMSG'), `reply: ${r.reply}`);
   });
+
+  test('concurrent permission responses are written in request-arrival order', async () => {
+    // Agent emits two requests back-to-back. onPermission for r1 resolves
+    // SLOWER than r2 (50ms vs 5ms). Without serial chaining, r2's response
+    // would land on stdin before r1's; the agent reads responses in arrival
+    // order and would pair r1's first-read line with r2's response payload.
+    // We assert the first response line matches r1 and the second matches r2.
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'read -r turn\n' +
+      'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{}}\'\n' +
+      'echo \'{"type":"permission_request","request_id":"r2","tool_name":"Bash","input":{}}\'\n' +
+      'IFS= read -r resp1\n' +
+      'IFS= read -r resp2\n' +
+      // Report the request_id each response claims, in arrival order.
+      'rid1=$(echo "$resp1" | sed -n \'s/.*"request_id":"\\([^"]*\\)".*/\\1/p\')\n' +
+      'rid2=$(echo "$resp2" | sed -n \'s/.*"request_id":"\\([^"]*\\)".*/\\1/p\')\n' +
+      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"order=$rid1,$rid2\\"}"\n' +
+      'echo \'{"type":"session","id":"sess-order"}\'\n'
+    );
+    const r = await run(
+      { command: agent, permission: true },
+      {
+        message: 'hi',
+        onPermission: (req) => {
+          // r1 resolves slower than r2 — without the writeQueue the runner
+          // would write r2's response first.
+          const delay = req.request_id === 'r1' ? 50 : 5;
+          return new Promise(resolve => {
+            setTimeout(() => resolve({ behavior: 'allow' }), delay);
+          });
+        },
+      },
+    );
+    assert.strictEqual(r.reply, 'order=r1,r2');
+    assert.strictEqual(r.sessionId, 'sess-order');
+    assert.strictEqual(r.exitCode, 0);
+  });
 });
 
 test('formatPermissionResponse / isValidPermissionRequest', () => {
