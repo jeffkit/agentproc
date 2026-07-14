@@ -18,7 +18,7 @@ The simplest possible agent reads the `{"type":"turn",...}` object from stdin an
 # echo_agent.sh — reads the turn from stdin, echoes the message back
 read -r turn
 message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
-python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"result","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]
@@ -27,7 +27,7 @@ python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"
 import json, sys
 turn = json.loads(sys.stdin.readline() or "{}")
 msg = turn.get("message", "") if isinstance(turn.get("message"), str) else ""
-sys.stdout.write(json.dumps({"type": "text", "text": f"You said: {msg}"}, separators=(",", ":")) + "\n")
+sys.stdout.write(json.dumps({"type": "result", "text": f"You said: {msg}"}, separators=(",", ":")) + "\n")
 ```
 
 ```js [node]
@@ -36,7 +36,7 @@ sys.stdout.write(json.dumps({"type": "text", "text": f"You said: {msg}"}, separa
 const fs = require('node:fs');
 const raw = fs.readFileSync(0, 'utf8');
 const turn = JSON.parse(raw.split('\n')[0] || '{}');
-process.stdout.write(JSON.stringify({ type: 'text', text: `You said: ${turn.message || ''}` }) + '\n');
+process.stdout.write(JSON.stringify({ type: 'result', text: `You said: ${turn.message || ''}` }) + '\n');
 ```
 
 :::
@@ -59,7 +59,7 @@ agentproc --profile ./myagent.yaml --prompt "hello"
 # → You said: hello
 ```
 
-NDJSON events (`{"type":"partial"}`, `{"type":"session"}`, `{"type":"error"}`) appear on stderr; the reply body (assembled from `{"type":"text"}` events) on stdout. The CLI's exit code matches what a bridge would see: `0` success, `1` error, `124` timeout.
+NDJSON events (`{"type":"partial"}`, `{"type":"result"}`, `{"type":"error"}`; optional `session_id`) appear on stderr; the reply body (from `{"type":"result"}` / streaming `partial`s) on stdout. The CLI's exit code matches what a bridge would see: `0` success, `1` error, `124` timeout.
 
 <details>
 <summary>Prefer to test without the CLI?</summary>
@@ -67,7 +67,7 @@ NDJSON events (`{"type":"partial"}`, `{"type":"session"}`, `{"type":"error"}`) a
 You can also drive the script directly by piping the turn object yourself. This is what the CLI does internally:
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | bash ./echo_agent.sh
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | bash ./echo_agent.sh
 ```
 
 Useful when debugging the script in isolation, but for end-to-end behavior prefer the `agentproc --profile ...` form above.
@@ -94,7 +94,7 @@ if [ -z "$message" ]; then
   echo '{"type":"error","message":"message is required"}'
   exit 1
 fi
-python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"result","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]

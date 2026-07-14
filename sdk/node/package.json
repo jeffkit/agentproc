@@ -1,6 +1,6 @@
 {
   "name": "agentproc",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "AgentProc Protocol SDK + CLI for Node.js \u2014 connect any Agent CLI to a messaging platform",
   "main": "src/index.js",
   "types": "src/index.d.ts",

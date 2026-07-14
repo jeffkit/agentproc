@@ -1,6 +1,6 @@
 # kimi-code
 
-Wraps the [`kimi` CLI](https://moonshotai.github.io/kimi-cli) (Kimi Code CLI by Moonshot AI) as an AgentProc agent with **streaming** and **session continuity**. kimi's `--print` mode emits role-based NDJSON events; this bridge parses them and re-emits as `{"type":"partial"}` and `{"type":"session"}` lines.
+Wraps the [`kimi` CLI](https://moonshotai.github.io/kimi-cli) (Kimi Code CLI by Moonshot AI) as an AgentProc agent with **streaming** and **session continuity**. kimi's `--print` mode emits role-based NDJSON events; this bridge parses them and re-emits as `{"type":"partial"}` / `{"type":"result"}` with optional `session_id`.
 
 ## Quick test (zero config)
 
@@ -50,14 +50,14 @@ env_allowlist: [KIMI_MODEL, MOONSHOT_API_KEY]
 
 ```bash
 cd hub/kimi-code
-echo '{"type":"turn","message":"reply with exactly: kimi ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: kimi ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output (streaming with session):
 
 ```
-{"type":"partial","text":"kimi ok"}
-{"type":"session","id":"<uuid>"}
+{"type":"partial","text":"kimi ok","session_id":"<uuid>"}
+{"type":"result","text":"","session_id":"<uuid>"}
 ```
 
 ## How it works
@@ -71,12 +71,13 @@ kimi CLI  (emits role-based NDJSON on stdout)
   ↓ {"role":"assistant","content":"..."}  → {"type":"partial"} (streaming) / reply body
   ↓ {"role":"tool",...}                   → ignored
 bridge.py / bridge.js
-  ↓ {"type":"session","id":"<uuid>"}   (forwarded to SDK for next turn's turn.session_id)
+  ↓ {"type":"partial","text":"...","session_id":"<uuid>"}
+  ↓ {"type":"result","text":"","session_id":"<uuid>"}   (forwarded for next turn's turn.session_id)
 ```
 
 ## Session continuity
 
-kimi's `--session <id>` flag creates a new session with the given ID if it doesn't exist, or resumes the existing one. The bridge generates a UUID on the first turn and forwards it as `{"type":"session"}`. On subsequent turns, the SDK passes it back as `turn.session_id`, and the bridge replays it as `--session <id>`.
+kimi's `--session <id>` flag creates a new session with the given ID if it doesn't exist, or resumes the existing one. The bridge generates a UUID on the first turn and forwards it as `session_id` on `partial`/`result` events. On subsequent turns, the SDK passes it back as `turn.session_id`, and the bridge replays it as `--session <id>`.
 
 This gives kimi native multi-turn continuity backed by kimi's own session database, without needing any external state file.
 

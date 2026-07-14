@@ -2,11 +2,31 @@
 
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
-- **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.3`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.0`. Does not change the wire contract.
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.7.1`. Includes runner/CLI/SDK behaviour changes.
+- **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.9.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Unreleased
+
+### Spec / SDK 0.9.0 — wire `0.4`: `result` event, `session_id` on events (doc `1.1`)
+
+Breaking stdout vocabulary change. Hard cutover from 0.3 (same posture as 0.2 → 0.3).
+
+**Wire**
+
+- Removed `{"type":"session"}` and `{"type":"text"}`.
+- Final success body is a single `{"type":"result","text":...}` (optional `usage`).
+- Session continuity is an optional `session_id` field on `partial` / `result` / `error` / `permission_request`. Bridge persists the **first** non-empty valid value; agents SHOULD attach it once known; early omit is allowed; a later different value is a violation (keep first). Stateless agents omit the field (do not mint a fake id; CLI-required `--session` ids are fine).
+- Streaming body assembly: when partials were forwarded, do not append a duplicate `result.text`.
+- `protocol_version` is `"0.4"`.
+
+**SDK / hub**
+
+- Both runners and `create_profile` / `createProfile` emit and consume 0.4 events.
+- Hub `_shared/stream_utils` and custom bridges (claude-code, codex, recursive, echo-agent, …) updated; claude-code also reads `session_id` from `system/init`.
+- Conformance fixtures (`cases.json`, `scenarios.json`, `sdk.json`, `hub_bridge.json`) rewritten for 0.4.
+
+**Versions.** SDK packages `0.8.0` → `0.9.0`. Wire `0.3` → `0.4`. Doc revision `1.0` → `1.1`.
 
 ### Spec / SDK 0.8.0 — spec/runner consistency, hub bridge parity, SDK permission channel (wire `0.3`, doc `1.0`)
 

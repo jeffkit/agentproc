@@ -11,7 +11,7 @@ A minimal protocol for connecting any Agent CLI to a messaging platform through 
 AgentProc defines how a bridge (the platform adapter) talks to an agent process (your script). The interface is intentionally minimal:
 
 - **Input:** one `{"type":"turn",...}` NDJSON line on stdin (message, session id, attachments, …)
-- **Output:** NDJSON events on stdout (`{"type":"partial"}`, `{"type":"text"}`, `{"type":"session"}`, `{"type":"error"}`)
+- **Output:** NDJSON events on stdout (`{"type":"partial"}`, `{"type":"result"}`, `{"type":"error"}`; optional `session_id` on events)
 
 No HTTP, no sockets. Any process that reads a turn from stdin and writes NDJSON events to stdout is a valid agent.
 
@@ -37,7 +37,7 @@ Ready-to-use profiles for popular AI CLIs — drop one in and any conformant bri
 # echo_agent.sh — reads the turn from stdin, echoes the message back
 read -r turn
 message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
-python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"result","text":"You said: '"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```yaml
@@ -49,8 +49,8 @@ timeout_secs: 10
 
 ```bash
 # Test locally
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | bash ./echo_agent.sh
-# → {"type":"text","text":"You said: hello"}
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | bash ./echo_agent.sh
+# → {"type":"result","text":"You said: hello"}
 ```
 
 ## Streaming + errors + session continuity
@@ -61,10 +61,9 @@ echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","proto
 read -r turn
 message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
 sid="my-session-$(date +%s)"
-printf '{"type":"session","id":"%s"}\n' "$sid"
-printf '{"type":"partial","text":"Let me think... "}\n'
-printf '{"type":"partial","text":"done."}\n'
-printf '{"type":"text","text":"You said: %s"}\n' "$message"
+printf '{"type":"partial","text":"Let me think... ","session_id":"%s"}\n' "$sid"
+printf '{"type":"partial","text":"done.","session_id":"%s"}\n' "$sid"
+printf '{"type":"result","text":"","session_id":"%s"}\n' "$sid"
 ```
 
 If something goes wrong, emit a `{"type":"error"}` event — the bridge forwards it to the user regardless of streaming mode:

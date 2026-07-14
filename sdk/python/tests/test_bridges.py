@@ -1,12 +1,11 @@
-"""End-to-end tests for hub bridge scripts (wire 0.3).
+"""End-to-end tests for hub bridge scripts (wire 0.4).
 
 Each hub profile ships a Python bridge that wraps an AI CLI emitting NDJSON.
 These tests drive each bridge's ``build_args`` + ``parse_event`` through the
 shared ``stream_utils.run_bridge`` (or ``run_plain_cli``) against fixture NDJSON
 streams — feeding a ``{"type":"turn",...}`` object on stdin and asserting the
-NDJSON event output (``{"type":"partial"}`` / ``{"type":"session"}`` /
-``{"type":"error"}`` / ``{"type":"text"}``) — without needing the real CLI
-installed.
+NDJSON event output (``{"type":"partial"}`` / ``{"type":"result"}`` /
+``{"type":"error"}``) — without needing the real CLI installed.
 
 This is the layer that catches:
   - the codex resume-without-``--json`` regression
@@ -110,7 +109,7 @@ def _make_turn(*, message="hi", session_id="", attachments=None) -> str:
         "session_id": session_id,
         "session_name": "default",
         "from_user": "",
-        "protocol_version": "0.3",
+        "protocol_version": "0.4",
     }
     if attachments is not None:
         turn["attachments"] = attachments
@@ -189,17 +188,22 @@ def _run_plain_cli(mod, *, message="hi", fake_result=None):
 
 
 def _classify_output(events: List[dict]):
-    """Split captured NDJSON events into session / partials / error / body."""
+    """Split captured NDJSON events into session / partials / error / body.
+
+    Wire 0.4 carries session_id on partial / result / error events (no
+    separate {"type":"session"} event).
+    """
     out = {"session": "", "partials": [], "error": "", "body": []}
     for e in events:
         t = e.get("type")
-        if t == "session":
-            out["session"] = e.get("id", "")
-        elif t == "partial":
+        sid = e.get("session_id") or ""
+        if sid:
+            out["session"] = sid
+        if t == "partial":
             out["partials"].append(e.get("text", ""))
         elif t == "error":
             out["error"] = e.get("message", "")
-        elif t == "text":
+        elif t == "result":
             out["body"].append(e.get("text", ""))
     return out
 
@@ -209,22 +213,22 @@ def _classify_output(events: List[dict]):
 # ---------------------------------------------------------------------------
 
 def _assert_streaming_turn_works(mod, partial_event, result_event):
-    """A streaming turn emits partial(s), forwards the session, and ends with a
-    final {"type":"text"} event (the result text, or the last partial when the
-    CLI has no terminal text). No error."""
+    """A streaming turn emits partial(s), forwards the session_id, and ends with
+    a final {"type":"result"} event (the result text, or the last partial when
+    the CLI has no terminal text). No error."""
     rc, out = _run_bridge(mod, [partial_event, result_event])
     assert rc == 0
     parsed = _classify_output(out)
     assert parsed["partials"] == ["hello world"], f"partials wrong: {parsed}"
     assert parsed["session"], "session id should be forwarded"
     assert parsed["error"] == ""
-    # 0.3 always emits a final text event (reply body).
-    assert parsed["body"], f"no final text event emitted: {parsed}"
+    # 0.4 always emits a final result event (reply body).
+    assert parsed["body"], f"no final result event emitted: {parsed}"
 
 
 def _assert_error_preserves_session(mod, error_result_event):
     """Spec: an error event does not invalidate the session — bridges MUST still
-    persist the session id for the next turn."""
+    persist the session id for the next turn (on the error event)."""
     rc, out = _run_bridge(mod, [error_result_event])
     parsed = _classify_output(out)
     assert rc == 1, "error turn must exit non-zero"
@@ -598,10 +602,10 @@ class TestOpencodeBridge:
         assert parsed["session"] == "ses_abc"
 
     def test_non_streaming_bridge_still_emits_partials(self):
-        # In 0.3 the bridge always emits {"type":"partial"} events; the runner
+        # In 0.4 the bridge always emits {"type":"partial"} events; the runner
         # is what suppresses them for non-streaming profiles. So driving the
-        # bridge directly still surfaces the partial — and the final text event
-        # is the last partial.
+        # bridge directly still surfaces the partial — and the final result
+        # event is the last partial.
         text_event = {"type": "text", "sessionID": "ses_abc", "part": {"text": "full reply"}}
         step_finish = {"type": "step_finish", "sessionID": "ses_abc"}
         rc, out = _run_bridge(self.mod, [text_event, step_finish])

@@ -2,17 +2,16 @@
 /**
  * agentproc — AgentProc Protocol SDK (Node.js)
  *
- * Implements the AgentProc P0 protocol (spec/protocol.md, wire protocol 0.3).
+ * Implements the AgentProc P0 protocol (spec/protocol.md, wire protocol 0.4).
  *
- * Protocol contract (wire 0.3, NDJSON both directions):
+ * Protocol contract (wire 0.4, NDJSON both directions):
  *   Input  — stdin: one {"type":"turn",...} line (message, session_id,
  *                     session_name, from_user, attachments, permission,
  *                     protocol_version). Secrets/config stay in env.
  *   Output — stdout (one JSON object per line, discriminated by `type`):
- *              {"type":"partial","text":...}     — streaming chunk
- *              {"type":"text","text":...}        — final reply body
- *              {"type":"session","id":...}       — declare session id (last wins)
- *              {"type":"error","message":...}    — error message to forward to user
+ *              {"type":"partial","text":...,"session_id"?}  — streaming chunk
+ *              {"type":"result","text":...,"session_id"?}   — terminal success body
+ *              {"type":"error","message":...,"session_id"?} — error to forward
  *   Exit   — 0 success, 1 error, 124 timeout, 130 SIGINT, 143 SIGTERM
  *
  * @example
@@ -52,8 +51,8 @@ function sessionFilePath(sessionId, sessionDir) {
   if (!sessionId) {
     throw new Error('sessionId must be non-empty');
   }
-  // Defense in depth: the bridge validates {"type":"session"} ids with
-  // isValidSessionId (see runner.js), which in 0.3 accepts any JSON string
+  // Defense in depth: the bridge validates `session_id` fields with
+  // isValidSessionId (see runner.js), which in 0.4 accepts any JSON string
   // on the wire EXCEPT path separators / control chars / `.` / `..` (a
   // storage-safety constraint, since we store each session as <id>.jsonl).
   // A handler can call loadHistory with any string; reject anything that
@@ -284,11 +283,11 @@ function createProfile(handler) {
       const response = typeof result === 'string' ? result : (result.response || '');
       const newSessionId = typeof result === 'string' ? undefined : result.sessionId;
 
-      if (newSessionId) {
-        process.stdout.write(JSON.stringify({ type: 'session', id: newSessionId }) + '\n');
-      }
-      if (response) {
-        process.stdout.write(JSON.stringify({ type: 'text', text: response }) + '\n');
+      // Wire 0.4: one {"type":"result"} with optional session_id on the event.
+      if (response || newSessionId) {
+        const evt = { type: 'result', text: response };
+        if (newSessionId) evt.session_id = newSessionId;
+        process.stdout.write(JSON.stringify(evt) + '\n');
       }
       process.exit(0);
     })

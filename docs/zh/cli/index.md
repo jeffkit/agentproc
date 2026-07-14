@@ -126,8 +126,8 @@ agentproc --profile <path.yaml> --prompt "hello" [options]
 
 | 流 | 内容 |
 |----|------|
-| stderr | 实时 NDJSON 事件（`{"type":"partial"}`、`{"type":"session"}`、`{"type":"error"}`） |
-| stdout | 最终回复正文（由 `{"type":"text"}` 事件拼接），在 agent 退出后打印 |
+| stderr | 实时 NDJSON 事件（`{"type":"partial"}`、`{"type":"result"}`、`{"type":"error"}`；事件上可选 `session_id`） |
+| stdout | 最终回复正文（来自 `{"type":"result"}` / 流式 `partial`），在 agent 退出后打印 |
 | 退出码 | `0` 成功 · `1` 错误 · `124` 超时（按 spec） |
 
 最终的 session id 也会以 `agentproc:session:<id>` 的形式打到 stderr 末尾，便于 shell 脚本捕获：
@@ -188,7 +188,7 @@ CLI 是 SDK `run()` 函数（[`sdk/node/src/runner.js`](https://github.com/jeffk
 - **占位符替换**：`args`、`cwd`、`env` 中的 `{{MESSAGE}}`、`{{SESSION_ID}}`、`{{SESSION_NAME}}`——不走 shell。
 - **Turn 输入（stdin）**：向 agent 的 stdin 写入一行 `{"type":"turn",...}` NDJSON（`message`、`session_id`、`session_name`、`from_user`、`attachments`、`permission`、`protocol_version`），随后 EOF——除非 `permission: true`，此时 stdin 保持打开以收 `{"type":"permission_response"}` 帧。单轮请求**不**走环境变量。
 - **env 注入**：profile 的 `env` 块（`${VAR}` 展开受 `env_allowlist` 约束），外加固定的 infra 集合（`PATH`/`HOME`/`TERM`/…）。`--env KEY=VALUE` 追加运行期额外变量。
-- **stdout 分类**：每一行是按 `type` 派发的 JSON 对象——`{"type":"session"}`（最后一行生效）、`{"type":"partial"}`（`streaming: true` 时转发）、`{"type":"text"}`（回复正文，按序拼接）、`{"type":"error"}`（使本轮失败）。非 JSON / 未知 `type` 的行记日志并忽略。
+- **stdout 分类**：每一行是按 `type` 派发的 JSON 对象——`{"type":"partial"}`（`streaming: true` 时转发）、`{"type":"result"}`（终端回复正文；可选 `session_id` / `usage`）、`{"type":"error"}`（使本轮失败）。`session_id` 是事件上的字段（持久化第一个非空值；早期可省略；一旦已知 SHOULD 带上）。非 JSON / 未知 `type` 的行记日志并忽略。
 - **超时处理**：SIGTERM → `kill_grace_secs`（默认 5 秒）→ SIGKILL。退出码 124。
 - **退出码**：0 成功 · 1 错误（包括出现 `{"type":"error"}` 事件的情况）· 124 超时。
 

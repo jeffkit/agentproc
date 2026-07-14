@@ -8,7 +8,7 @@ Invokes:
 
 aider modifies files in the working directory and may make git commits.
 The stdout output (a human-readable summary of what was done) is forwarded
-as the AgentProc reply body (a single {"type":"text"} event). No session id
+as the AgentProc reply body (a single {"type":"result"} event). No session id
 is emitted — aider uses git history for context continuity, not an explicit
 session id.
 

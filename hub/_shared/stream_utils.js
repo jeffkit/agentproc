@@ -1,19 +1,20 @@
 'use strict';
 
 /**
- * Shared bridge utilities for AgentProc hub profiles (wire 0.3).
+ * Shared bridge utilities for AgentProc hub profiles (wire 0.4).
  *
  * A bridge wraps a CLI that emits NDJSON (one JSON object per line) on stdout.
  * The bridge reads the {"type":"turn",...} object from its own stdin, spawns
- * the CLI, and translates the CLI's NDJSON stream into AgentProc wire-0.3
+ * the CLI, and translates the CLI's NDJSON stream into AgentProc wire-0.4
  * output (one JSON event per line on stdout):
  *
- *   - {"type":"partial","text":...}   live streaming chunk (always emitted;
- *                                      the runner forwards it only when the
- *                                      profile's streaming is true)
- *   - {"type":"session","id":...}     declare session id (last wins)
- *   - {"type":"error","message":...}  error message (always honored, exit 1)
- *   - {"type":"text","text":...}      final reply body (emitted once at end)
+ *   - {"type":"partial","text":...,"session_id"?}  live streaming chunk
+ *      (always emitted; the runner forwards it only when the profile's
+ *      streaming is true). session_id is stamped when already known.
+ *   - {"type":"result","text":...,"session_id"?}   single terminal reply
+ *      (emitted once at end; text may be "" if the body was already streamed)
+ *   - {"type":"error","message":...,"session_id"?} error (exit 1); may
+ *      carry session_id so the session survives an error-terminated turn
  *
  * A profile supplies:
  *
@@ -35,24 +36,26 @@ function emitObj(obj) {
 
 function emit(obj) {
   // Emit one NDJSON event dict. Bridges may pass a pre-built event dict; for
-  // the common cases use emitPartial / emitText / emitSession / emitError.
+  // the common cases use emitPartial / emitResult / emitError.
   emitObj(obj);
 }
 
-function emitPartial(text) {
-  emitObj({ type: 'partial', text });
+function emitPartial(text, sessionId) {
+  const obj = { type: 'partial', text };
+  if (sessionId) obj.session_id = sessionId;
+  emitObj(obj);
 }
 
-function emitText(text) {
-  emitObj({ type: 'text', text });
+function emitResult(text, sessionId) {
+  const obj = { type: 'result', text };
+  if (sessionId) obj.session_id = sessionId;
+  emitObj(obj);
 }
 
-function emitError(text) {
-  emitObj({ type: 'error', message: text });
-}
-
-function emitSession(sessionId) {
-  emitObj({ type: 'session', id: sessionId });
+function emitError(text, sessionId) {
+  const obj = { type: 'error', message: text };
+  if (sessionId) obj.session_id = sessionId;
+  emitObj(obj);
 }
 
 function hasAnyAttachment(turn) {
@@ -129,15 +132,17 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
     const result = parseEvent(event);
     if (!result) continue;
 
+    // Capture sessionId before emitting partials so same-event session
+    // stamps the partial (runner first-non-empty wins if it arrives later).
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
     if (result.partialText) {
       // Always emit partials; the runner forwards them only when the profile's
       // streaming is true (and drops them otherwise).
-      emitPartial(result.partialText);
+      emitPartial(result.partialText, foundSessionId);
       lastPartialText = result.partialText;
     }
-    if (result.finalText) {
+    if (result.finalText !== undefined && result.finalText !== null) {
       lastFinalText = result.finalText;
     }
   }
@@ -145,8 +150,7 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
   const code = await new Promise(resolve => child.on('close', resolve));
 
   if (errorMessage) {
-    if (foundSessionId) emitSession(foundSessionId);
-    emitError(errorMessage);
+    emitError(errorMessage, foundSessionId);
     process.exit(1);
   }
   if (code !== 0 && !foundSessionId) {
@@ -157,16 +161,15 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
     process.exit(1);
   }
 
-  if (foundSessionId) emitSession(foundSessionId);
   const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
-  if (replyText) emitText(replyText);
+  emitResult(replyText || '', foundSessionId);
   process.exit(0);
 }
 
 async function runPlainCli({ cliName, cliInstallHint, buildArgs, timeoutEnv = 'CLI_TIMEOUT', defaultTimeout = 600 }) {
   // Drive a one-shot CLI that returns the full reply as plain stdout text
   // (no streaming, no session id). Reads the turn from stdin, runs the CLI
-  // with a timeout, and emits the trimmed stdout as a single {"type":"text"}
+  // with a timeout, and emits the trimmed stdout as a single {"type":"result"}
   // event (or {"type":"error"} on failure). buildArgs(message) builds the
   // argv; per-CLI config is read from process.env inside buildArgs.
   const turn = await readTurn();
@@ -214,7 +217,7 @@ async function runPlainCli({ cliName, cliInstallHint, buildArgs, timeoutEnv = 'C
     emitError(`${cliName} returned empty output`);
     process.exit(1);
   }
-  emitText(text);
+  emitResult(text);
   process.exit(0);
 }
 
@@ -224,7 +227,6 @@ module.exports = {
   readTurn,
   emit,
   emitPartial,
-  emitText,
+  emitResult,
   emitError,
-  emitSession,
 };

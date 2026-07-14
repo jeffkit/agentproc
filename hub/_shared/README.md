@@ -1,6 +1,6 @@
 # hub/_shared
 
-Shared bridge utilities used by the hub profiles (wire 0.3). The Python and
+Shared bridge utilities used by the hub profiles (wire 0.4). The Python and
 Node implementations stay at parity: same input contract, same output contract.
 
 ## What it does
@@ -11,9 +11,10 @@ NDJSON-speaking CLI:
 - reading the `{"type":"turn",...}` object from stdin (one NDJSON line)
 - subprocess spawn + `FileNotFoundError` → `{"type":"error"}`
 - line-by-line stdout reading + JSON decoding
-- partial / final / session / error classification → NDJSON events
+- partial / result / error classification → NDJSON events (`session_id` stamped on events once known)
 - always-emit-partial policy (the runner forwards `{"type":"partial"}` only
-  when the profile's `streaming` is true) + dedup
+  when the profile's `streaming` is true) + stamping `session_id` on partials
+  once known
 - exit-code mapping + stderr capture
 
 A bridge that wraps an NDJSON-speaking CLI only needs to provide two functions:
@@ -32,9 +33,10 @@ function parseEvent(event) { return { partialText?, finalText?, sessionId?, erro
 
 `run_bridge` / `runBridge` then: read the turn from stdin, spawn the CLI built
 by `build_args`, call `parse_event` on each stdout NDJSON line, and emit
-AgentProc NDJSON events on stdout. A final `{"type":"text"}` event is always
+AgentProc NDJSON events on stdout. A final `{"type":"result"}` event is always
 emitted at the end (the `final_text`, or the last `partial_text` as fallback) —
-that is the reply body.
+that is the reply body. `session_id` rides on partial / result / error events
+(not a separate session event).
 
 That keeps each bridge under ~50 lines. See `gemini-cli/bridge.py` for a
 minimal example.
@@ -49,7 +51,7 @@ assembled" event that follows the delta stream — see `cursor/bridge.py`'s
 CLIs that return the full reply as plain stdout (no streaming, no session id) —
 `aider`, `pi`, `deepseek`, `agy` — use `run_plain_cli` / `runPlainCli` instead.
 It reads the turn, runs the CLI with a timeout, and emits the trimmed stdout as
-a single `{"type":"text"}` event (or `{"type":"error"}` on failure). The bridge
+a single `{"type":"result"}` event (or `{"type":"error"}` on failure). The bridge
 only supplies `build_args(message)`.
 
 ## When NOT to use it
@@ -72,7 +74,7 @@ The shared module distinguishes two text channels:
 - `partial_text` — incremental chunks emitted mid-turn as `{"type":"partial"}`
   (the bridge always emits these; the runner forwards them only when the
   profile's `streaming` is true).
-- `final_text` — terminal text, emitted as the final `{"type":"text"}` reply
+- `final_text` — terminal text, emitted as the final `{"type":"result"}` reply
   event (used as-is when present, otherwise the last `partial_text` is the
   fallback).
 

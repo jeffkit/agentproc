@@ -14,7 +14,7 @@ tested: official
 maintainer: jeffkit
 tags: [example, reference]
 notes: |
-  The echo-agent is the smallest valid AgentProc agent (wire 0.3). It reads the
+  The echo-agent is the smallest valid AgentProc agent (wire 0.4). It reads the
   {"type":"turn",...} object from stdin and writes the message back to stdout
-  as a {"type":"text"} event prefixed with "You said: ". Use it to verify your
+  as a {"type":"result"} event prefixed with "You said: ". Use it to verify your
   messaging bridge speaks the protocol correctly before plugging in a real AI CLI.

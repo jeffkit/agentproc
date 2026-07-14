@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.3` · **Document revision:** `1.0` · **Status:** Draft
+**Wire protocol:** `0.4` · **Document revision:** `1.1` · **Status:** Draft
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -44,7 +44,7 @@ command: "/path with spaces/my agent"
 args: []
 ```
 
-*(0.2 had a shorthand where `args` absent + `command` containing whitespace meant "split `command`". 0.3 removes it — `command` is always one token.)*
+*(0.2 had a shorthand where `args` absent + `command` containing whitespace meant "split `command`". 0.3 removed it — `command` is always one token.)*
 
 ---
 
@@ -54,7 +54,7 @@ Before the agent reads its first byte of stdin, the bridge writes **exactly one*
 
 ```json
 {"type":"turn","message":"hello","session_id":"","session_name":"default",
- "from_user":"u1","attachments":[],"permission":false,"protocol_version":"0.3"}
+ "from_user":"u1","attachments":[],"permission":false,"protocol_version":"0.4"}
 ```
 
 ### Required fields
@@ -65,17 +65,17 @@ Before the agent reads its first byte of stdin, the bridge writes **exactly one*
 | `message` | User message text. May be `""` (see "Empty turns" in the full spec). |
 | `session_id` | Session ID from the previous turn (`""` = new session). |
 | `from_user` | Sender identifier (platform-specific). |
-| `protocol_version` | Protocol version string, e.g. `"0.3"`. **Opaque and non-comparable** — agents MUST NOT order or range-check it. |
+| `protocol_version` | Protocol version string, e.g. `"0.4"`. **Opaque and non-comparable** — agents MUST NOT order or range-check it. |
 
 ### Optional fields (present = relevant)
 
 | Field | Description |
 |-------|-------------|
 | `session_name` | Human-readable session name (default `"default"`). |
-| `attachments` | Array of `{kind, url, ...}` (e.g. `{"kind":"image","url":"https://..."}`). The only attachment channel — there are no single-attachment convenience vars in 0.3. Absent/`[]` = none. |
+| `attachments` | Array of `{kind, url, ...}` (e.g. `{"kind":"image","url":"https://..."}`). The only attachment channel — there are no single-attachment convenience vars. Absent/`[]` = none. |
 | `permission` | `true` when the profile has `permission: true`; absent/`false` otherwise. |
 
-Secrets and per-CLI config travel in **environment variables** (the profile `env` block), not the turn object. The per-turn request does **not** travel in env vars in 0.3.
+Secrets and per-CLI config travel in **environment variables** (the profile `env` block), not the turn object. The per-turn request does **not** travel in env vars in 0.4.
 
 ### stdin / EOF
 
@@ -86,29 +86,35 @@ Secrets and per-CLI config travel in **environment variables** (the profile `env
 
 ## Output — stdout NDJSON events
 
-Every stdout line is a JSON object terminated by `\n`, carrying a `type` field. The vocabulary is **closed**: `partial`, `text`, `session`, `error`, and (when permission is on) `permission_request`.
+Every stdout line is a JSON object terminated by `\n`, carrying a `type` field. The vocabulary is **closed**: `partial`, `result`, `error`, and (when permission is on) `permission_request`.
 
 ```
 {"type":"partial","text":"..."}            ← streaming chunk; forwarded when streaming: true
-{"type":"text","text":"..."}               ← final reply body; multiple events concatenate
-{"type":"session","id":"<opaque-id>"}      ← session id; can appear anywhere; LAST WINS
+{"type":"result","text":"..."}             ← terminal reply body (at most one); optional usage
 {"type":"error","message":"..."}           ← user-readable error; any mode; fails the turn
 {"type":"permission_request",...}          ← optional tool authorization (permission: true)
 ```
 
-A line that is not valid JSON, is not an object, or lacks a recognised `type` is **ignored** (logged to stderr) — it is not treated as reply body. Reply body is carried only by `text` events.
+Optional `session_id` may appear on any of these events. There is **no** `{"type":"session"}` or `{"type":"text"}` event in 0.4.
 
-### Session event — last wins
+A line that is not valid JSON, is not an object, or lacks a recognised `type` is **ignored** (logged to stderr) — it is not treated as reply body. Reply body is carried by `result` (and forwarded `partial`s when streaming).
 
-The session event MAY appear at **any position** in stdout. If multiple are emitted, the **last one wins**. This accommodates CLIs that only learn their session id at exit time (e.g. `claude --output-format stream-json`).
+### `session_id` on events — first non-empty
 
-If a `session` event and an `error` event appear in the same turn, the bridge **MUST** still persist the session id for the next turn even though the current turn is reported as failed.
+Session continuity is a field on events, not a dedicated event type.
+
+- The bridge persists the **first** non-empty `session_id` observed in the turn.
+- Early events MAY omit the field; once known, agents SHOULD attach it to subsequent events.
+- Stateless agents omit `session_id` entirely (and MUST NOT mint an id the tool cannot resume with).
+- A later different non-empty value is a violation (keep the first; warn).
 
 ```
 {"type":"partial","text":"thinking..."}
-{"type":"partial","text":"answer"}
-{"type":"session","id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"partial","text":"answer","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"result","text":"","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
 ```
+
+If `session_id` and an `error` appear in the same turn, the bridge **MUST** still persist the session id for the next turn even though the current turn is reported as failed.
 
 ### Partial events
 
@@ -119,17 +125,17 @@ Streaming chunks. Forwarded immediately when `streaming: true`; ignored by the r
 {"type":"partial","role":"thinking","text":"Let me consider..."}
 ```
 
-### Text events — reply body
+### Result events — terminal reply body
 
-Final reply body. Multiple `text` events concatenate in order. If all content was delivered via `partial` and no `text` event is emitted, the final reply is empty and the bridge skips the final send.
+At most one `result` per turn. Optional `usage` for token/cost stats. When streaming already delivered the body via `partial`s, `result.text` MAY be `""`.
 
 ```
-{"type":"text","text":"Here is the complete answer."}
+{"type":"result","text":"Here is the complete answer.","session_id":"cli-sess-…"}
 ```
 
 ### Error events
 
-User-readable error. Honored **regardless** of `streaming` mode. The bridge forwards it to the user, suppresses further partials, and **MUST** treat the turn as failed even if the exit code is 0. Any `text` produced alongside is discarded.
+User-readable error. Honored **regardless** of `streaming` mode. The bridge forwards it to the user, suppresses further partials, and **MUST** treat the turn as failed even if the exit code is 0. A `result` after an `error` is discarded.
 
 ```
 {"type":"error","message":"Upstream API rate limited. Try again in 60s."}

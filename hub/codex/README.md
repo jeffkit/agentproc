@@ -69,9 +69,8 @@ agentproc hub run codex -p "reply with exactly: codex ok" --env OPENAI_API_KEY=$
 Expected output (on stdout, one NDJSON event per line):
 
 ```
-{"type":"partial","text":"codex ok"}
-{"type":"session","id":"019efead-1a89-7ff3-887a-cd11f3c0843f"}
-{"type":"text","text":"codex ok"}
+{"type":"partial","text":"codex ok","session_id":"019efead-1a89-7ff3-887a-cd11f3c0843f"}
+{"type":"result","text":"","session_id":"019efead-1a89-7ff3-887a-cd11f3c0843f"}
 ```
 
 <details>
@@ -79,7 +78,7 @@ Expected output (on stdout, one NDJSON event per line):
 
 ```bash
 cd hub/codex
-echo '{"type":"turn","message":"reply with exactly: codex ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | OPENAI_API_KEY="$OPENAI_API_KEY" python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: codex ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | OPENAI_API_KEY="$OPENAI_API_KEY" python3 bridge.py
 ```
 
 </details>

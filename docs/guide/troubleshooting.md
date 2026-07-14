@@ -199,7 +199,7 @@ If you're routing through a proxy or third-party endpoint (e.g. a Chinese mirror
 2. **The wrapped CLI wrote everything to its own stderr, not stdout.** Some CLIs do this for warnings. Run with `--verbose` (the default) and check stderr. If you want stderr in the reply, set `include_stderr_in_reply: true` in the profile.
 3. **The agent exited 0 without writing anything.** This is a bug in the agent script, not in AgentProc. Run the agent directly with a turn on stdin to see what it does:
    ```bash
-   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./bridge.py
+   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./bridge.py
    ```
 
 ---

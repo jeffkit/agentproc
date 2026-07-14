@@ -21,7 +21,7 @@ notes: |
   pi from hanging after completion when extensions are loaded (known upstream
   issue earendil-works/pi#4617). Set PI_NO_EXTENSIONS=0 to omit the flag.
 
-  No {"type":"session"} line is emitted (pi's -p mode does not expose a session id
+  No session_id is stamped on events (pi's -p mode does not expose a session id
   on stdout). Each turn is a fresh pi process; multi-turn continuity must be
   maintained by the messaging bridge via the AgentProc SDK's load_history /
   append_history helpers.

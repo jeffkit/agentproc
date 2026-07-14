@@ -62,8 +62,8 @@ agentproc hub run codebuddy -p "reply with exactly: codebuddy ok"
 Expected output (on stderr / stdout):
 
 ```
-{"type":"session","id":"53bb6352-4b47-43fc-bce6-eaf808d419da"}
-codebuddy ok
+{"type":"partial","text":"codebuddy ok","session_id":"53bb6352-4b47-43fc-bce6-eaf808d419da"}
+{"type":"result","text":"","session_id":"53bb6352-4b47-43fc-bce6-eaf808d419da"}
 ```
 
 <details>
@@ -71,7 +71,7 @@ codebuddy ok
 
 ```bash
 cd hub/codebuddy
-echo '{"type":"turn","message":"reply with exactly: codebuddy ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: codebuddy ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 </details>

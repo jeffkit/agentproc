@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Hub bridge engine conformance (wire 0.3) — Node side.
+ * Hub bridge engine conformance (wire 0.4) — Node side.
  *
  * Drives the shared `hub/_shared/stream_utils.js` `runBridge` (via a tiny
  * harness that uses an identity parseEvent) against the same
@@ -17,9 +17,9 @@
  *      with PATH overridden, writes the scenario's turn object on stdin,
  *      collects stdout NDJSON, and asserts against the fixture.
  *
- * The harness uses an identity parseEvent (forwards {partial/text/session/
- * error} as-is) so this isolates runBridge engine behaviour, not per-CLI
- * parse logic.
+ * The harness uses an identity parseEvent (maps {partial/result/error} +
+ * optional session_id) so this isolates runBridge engine behaviour, not
+ * per-CLI parse logic.
  */
 
 const { test, describe } = require('node:test');

@@ -79,7 +79,7 @@ Expected output (streaming mode):
 {"type":"partial","text":"Hi"}
 {"type":"partial","text":" there"}
 {"type":"partial","text":", how can I help?"}
-{"type":"session","id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
+{"type":"result","text":"","session_id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
 ```
 
 <details>
@@ -87,7 +87,7 @@ Expected output (streaming mode):
 
 ```bash
 cd hub/claude-code
-echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.3"}' | ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.4"}' | ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 bridge.py
 ```
 
 </details>
@@ -103,11 +103,11 @@ claude CLI
   ↓ NDJSON stream: system / assistant / result events
 bridge.py / bridge.js
   ↓ {"type":"partial","text":"..."}   (assistant text blocks)
-  ↓ {"type":"session","id":"<id>"}    (session_id from result event, forwarded next turn)
+  ↓ {"type":"result","text":"","session_id":"<id>"}    (session_id from result event, forwarded next turn)
   ↓ exit code from claude
 ```
 
-The session ID is opaque — `claude` generates a UUID on its first turn, and the bridge forwards it via `{"type":"session"}`. On subsequent turns, your bridge passes it back as `turn.session_id`, and this bridge replays it as `--resume <id>`. Multi-turn continuity without the messaging bridge needing to know anything about Claude.
+The session ID is opaque — `claude` generates a UUID on its first turn, and the bridge forwards it as `session_id` on `partial`/`result` events. On subsequent turns, your bridge passes it back as `turn.session_id`, and this bridge replays it as `--resume <id>`. Multi-turn continuity without the messaging bridge needing to know anything about Claude.
 
 ## Environment variables
 

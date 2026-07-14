@@ -3,8 +3,8 @@
 /**
  * Harness for hub_bridge_conformance.test.js.
  *
- * Calls the shared hub `runBridge` with an identity parseEvent (forwards
- * {partial/text/session/error} as-is) and a buildArgs that invokes
+ * Calls the shared hub `runBridge` with an identity parseEvent (maps
+ * {partial/result/error} + optional session_id) and a buildArgs that invokes
  * `fake-cli` (a stub script the test puts on PATH). The test feeds a turn
  * object on stdin, this harness runs runBridge, and the resulting NDJSON
  * events land on stdout — exactly the same observable behaviour as a real
@@ -21,13 +21,25 @@ const { runBridge } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
 function identityParseEvent(event) {
   const t = event && event.type;
-  if (t === 'partial') return { partialText: typeof event.text === 'string' ? event.text : '' };
-  if (t === 'text')    return { finalText: typeof event.text === 'string' ? event.text : '' };
-  if (t === 'session') {
-    const id = event.id;
-    return typeof id === 'string' ? { sessionId: id } : null;
+  const sessionId = (typeof event.session_id === 'string') ? event.session_id : undefined;
+  if (t === 'partial') {
+    return {
+      partialText: typeof event.text === 'string' ? event.text : '',
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    };
   }
-  if (t === 'error')   return { error: typeof event.message === 'string' ? event.message : '' };
+  if (t === 'result') {
+    const out = {};
+    if (sessionId !== undefined) out.sessionId = sessionId;
+    if ('text' in event) out.finalText = typeof event.text === 'string' ? event.text : '';
+    return Object.keys(out).length ? out : null;
+  }
+  if (t === 'error') {
+    return {
+      error: typeof event.message === 'string' ? event.message : '',
+      ...(sessionId !== undefined ? { sessionId } : {}),
+    };
+  }
   return null;
 }
 

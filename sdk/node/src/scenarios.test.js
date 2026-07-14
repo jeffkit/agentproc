@@ -9,7 +9,7 @@
  * Python SDK runs the same fixture in `sdk/python/tests/test_scenarios.py`.
  *
  * Together they guarantee the two reference implementations agree on
- * multi-line interaction semantics: last-wins, error-mid-stream,
+ * multi-line interaction semantics: first-wins session_id, error-mid-stream,
  * session-with-error, invalid-session handling, streaming vs one-shot.
  */
 

@@ -74,18 +74,18 @@ NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-
 3. **Adjust** `cwd:` in the profile to point at your project.
 4. **Point your bridge** at the profile YAML. The exact command depends on your bridge.
 
-Example with the Python SDK's bare runner (wire 0.3 — the turn object arrives on stdin as one NDJSON line):
+Example with the Python SDK's bare runner (wire 0.4 — the turn object arrives on stdin as one NDJSON line):
 
 ```bash
 cd hub/claude-code
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 You should see AgentProc protocol output on stdout (one NDJSON event per line):
 
 ```
-{"type":"partial","text":"Hi! How can I help?"}
-{"type":"session","id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"partial","text":"Hi! How can I help?","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"result","text":"","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
 ```
 
 ## Design principles
@@ -116,7 +116,7 @@ description: <one-line>
 cli: <command-name>             # the executable this wraps
 cli_install: |                  # how to install the CLI itself
   npm install -g ...
-agentproc:                      # the actual AgentProc P0 profile (wire 0.3)
+agentproc:                      # the actual AgentProc P0 profile (wire 0.4)
   command: python3              # argv[0] — always a single token, never split
   args: ["{{PROFILE_DIR}}/bridge.py"]  # argv[1..]; or: ["{{PROFILE_DIR}}/bridge.js"] for node
   # cwd intentionally omitted: `hub run` defaults it to the user's

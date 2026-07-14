@@ -5,8 +5,8 @@ Python runner's `run()` and asserts the observable outputs (reply,
 session_id, error, exit_code, partials) match the expected values. The Node
 SDK runs the same fixture in `sdk/node/src/scenarios.test.js`. Together they
 guarantee the two reference implementations agree on multi-line interaction
-semantics: last-wins, error-mid-stream, session-with-error, invalid-session
-handling, streaming vs one-shot.
+semantics: first-non-empty session_id, error-mid-stream, result-vs-partial
+body assembly, invalid-session handling, streaming vs one-shot.
 
 When a spec change touches multi-line behaviour, add a scenario here first;
 both SDKs will fail until they agree.

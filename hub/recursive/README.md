@@ -80,7 +80,7 @@ recursive records each run as a session directory (under `~/.recursive/workspace
 
 The bridge:
 
-1. **Mints an opaque id** (`rc-<uuid>`) and emits it as `{"type":"session"}` (recursive's `--json` stream does not surface a session id, so the bridge owns the AgentProc-level handle).
+1. **Mints an opaque id** (`rc-<uuid>`) and stamps it as `session_id` on `partial`/`result` events (recursive's `--json` stream does not surface a session id, so the bridge owns the AgentProc-level handle).
 2. **Turn 1:** runs `recursive run`, captures the recursive session directory from stderr, and persists it keyed by the opaque id (a `<state_dir>/<id>.session` file containing the dir path).
 3. **Turn N:** loads the stored session directory and runs `recursive resume --from-file <dir> -p <new message>`.
 
@@ -138,8 +138,8 @@ agentproc hub run recursive -p "reply with exactly: recursive ok" \
 Expected (stderr / stdout):
 
 ```
-{"type":"session","id":"rc-<uuid>"}
-recursive ok
+{"type":"partial","text":"recursive ok","session_id":"rc-<uuid>"}
+{"type":"result","text":"","session_id":"rc-<uuid>"}
 ```
 
 Multi-turn:

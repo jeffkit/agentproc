@@ -28,7 +28,7 @@ notes: |
   flag emits NDJSON events that this bridge parses for text and session IDs.
 
   Session IDs (format `ses_XXX`) are captured from the `sessionID` field present
-  in every JSON event and forwarded as {"type":"session"}. The next turn replays the
+  in every JSON event and stamped as session_id on AgentProc events. The next turn replays the
   id as `--session <id>`, enabling native multi-turn continuity.
 
   Requires opencode v1.16.3+ for reliable `--format json` output. Older versions

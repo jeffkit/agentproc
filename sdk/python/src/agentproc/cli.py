@@ -58,7 +58,7 @@ PKG_VERSION = _read_pkg_version()
 def _build_attachments(opts) -> List[Dict[str, str]]:
     """Build the turn's `attachments` array from --image-url / --file-url.
 
-    Wire 0.3 carries attachments as a single `attachments` list; there are no
+    Wire 0.4 carries attachments as a single `attachments` list; there are no
     separate AGENT_IMAGE_URL / AGENT_FILE_URL channels. Returns an empty list
     when no attachment flags were given (the runner omits the key when empty).
     """

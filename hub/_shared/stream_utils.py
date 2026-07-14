@@ -1,17 +1,18 @@
 """
-Shared bridge utilities for AgentProc hub profiles (wire 0.3).
+Shared bridge utilities for AgentProc hub profiles (wire 0.4).
 
 A bridge wraps a CLI that emits NDJSON (one JSON object per line) on stdout.
 The bridge reads the {"type":"turn",...} object from its own stdin, spawns the
-CLI, and translates the CLI's NDJSON stream into AgentProc wire-0.3 output
+CLI, and translates the CLI's NDJSON stream into AgentProc wire-0.4 output
 (one JSON event per line on stdout):
 
-  - {"type":"partial","text":...}   — live streaming chunk (always emitted;
-                                       the runner forwards it only when the
-                                       profile's streaming is true)
-  - {"type":"session","id":...}     — declare session id (last wins)
-  - {"type":"error","message":...}  — error message (always honored, exit 1)
-  - {"type":"text","text":...}      — final reply body (emitted once at end)
+  - {"type":"partial","text":...,"session_id"?}  — live streaming chunk
+      (always emitted; the runner forwards it only when the profile's
+      streaming is true). session_id is stamped when already known.
+  - {"type":"result","text":...,"session_id"?}   — single terminal reply
+      (emitted once at end; text may be "" if the body was already streamed)
+  - {"type":"error","message":...,"session_id"?} — error (exit 1); may
+      carry session_id so the session survives an error-terminated turn
 
 A profile supplies:
 
@@ -40,7 +41,7 @@ from typing import Any, Callable, Dict, Optional
 class EventResult:
     # Incremental text streamed mid-turn → emitted as a {"type":"partial"} event.
     partial_text: Optional[str] = None
-    # Terminal text — the final assembled reply → emitted as a {"type":"text"}
+    # Terminal text — the final assembled reply → emitted as a {"type":"result"}
     # event at end. When a CLI only produces a single completed message (no
     # deltas), set this; if a bridge marks it partial_text instead, the last
     # partial_text is used as the reply fallback.
@@ -56,25 +57,30 @@ def _emit_obj(obj: Dict[str, Any]) -> None:
 
 def emit(obj: Dict[str, Any]) -> None:
     """Emit one NDJSON event dict on stdout. (Bridges may pass a pre-built
-    event dict; for the common cases use emit_partial / emit_text /
-    emit_session / emit_error instead.)"""
+    event dict; for the common cases use emit_partial / emit_result /
+    emit_error instead.)"""
     _emit_obj(obj)
 
 
-def emit_partial(text: str) -> None:
-    _emit_obj({"type": "partial", "text": text})
+def emit_partial(text: str, session_id: Optional[str] = None) -> None:
+    obj: Dict[str, Any] = {"type": "partial", "text": text}
+    if session_id:
+        obj["session_id"] = session_id
+    _emit_obj(obj)
 
 
-def emit_text(text: str) -> None:
-    _emit_obj({"type": "text", "text": text})
+def emit_result(text: str, session_id: Optional[str] = None) -> None:
+    obj: Dict[str, Any] = {"type": "result", "text": text}
+    if session_id:
+        obj["session_id"] = session_id
+    _emit_obj(obj)
 
 
-def emit_session(session_id: str) -> None:
-    _emit_obj({"type": "session", "id": session_id})
-
-
-def emit_error(text: str) -> None:
-    _emit_obj({"type": "error", "message": text})
+def emit_error(text: str, session_id: Optional[str] = None) -> None:
+    obj: Dict[str, Any] = {"type": "error", "message": text}
+    if session_id:
+        obj["session_id"] = session_id
+    _emit_obj(obj)
 
 
 def _read_turn() -> Dict[str, Any]:
@@ -87,10 +93,11 @@ def _read_turn() -> Dict[str, Any]:
         return {}
     try:
         v = json.loads(line.rstrip("\r\n"))
-        if isinstance(v, dict):
-            return v
     except json.JSONDecodeError:
         pass
+    else:
+        if isinstance(v, dict):
+            return v
     return {}
 
 
@@ -113,7 +120,7 @@ def run_bridge(
     turn: Optional[Dict[str, Any]] = None,
 ) -> int:
     """
-    Drive a CLI as an AgentProc agent (wire 0.3).
+    Drive a CLI as an AgentProc agent (wire 0.4).
 
     Reads the turn object from stdin (unless ``turn`` is passed — used by
     bridges that need to inspect the turn, e.g. to refuse ``permission: true``
@@ -164,6 +171,8 @@ def run_bridge(
         if result is None:
             continue
 
+        # Capture session_id before emitting partials so same-event session
+        # stamps the partial (runner first-non-empty wins if it arrives later).
         if result.session_id:
             found_session_id = result.session_id
         if result.error:
@@ -171,20 +180,18 @@ def run_bridge(
         if result.partial_text:
             # Always emit partials; the runner forwards them only when the
             # profile's streaming is true (and drops them otherwise).
-            emit_partial(result.partial_text)
+            emit_partial(result.partial_text, session_id=found_session_id)
             last_partial_text = result.partial_text
-        if result.final_text:
+        if result.final_text is not None:
             last_final_text = result.final_text
 
     proc.wait()
     stderr_output = proc.stderr.read() if proc.stderr else ""
 
     if error_message:
-        # Persist the session for the next turn BEFORE emitting the error —
-        # the error terminates this turn but does not invalidate the session.
-        if found_session_id:
-            emit_session(found_session_id)
-        emit_error(error_message)
+        # Persist the session on the error event — the error terminates this
+        # turn but does not invalidate the session.
+        emit_error(error_message, session_id=found_session_id)
         return 1
     if proc.returncode != 0 and not found_session_id:
         msg = f"{cli_name} exited with {proc.returncode}"
@@ -193,11 +200,8 @@ def run_bridge(
         emit_error(msg)
         return 1
 
-    if found_session_id:
-        emit_session(found_session_id)
     reply_text = last_final_text if last_final_text is not None else last_partial_text
-    if reply_text:
-        emit_text(reply_text)
+    emit_result(reply_text or "", session_id=found_session_id)
     return 0
 
 
@@ -231,7 +235,7 @@ def run_plain_cli(
     """Drive a one-shot CLI that returns the full reply as plain stdout text
     (no streaming, no session id). Reads the turn from stdin, runs the CLI
     with a timeout, and emits the trimmed stdout as a single
-    ``{"type":"text"}`` event (or ``{"type":"error"}`` on failure).
+    ``{"type":"result"}`` event (or ``{"type":"error"}`` on failure).
 
     ``build_args(message) -> list[str]`` builds the argv; per-CLI config
     (model, api key, …) is read from ``os.environ`` inside ``build_args`` as
@@ -271,7 +275,7 @@ def run_plain_cli(
 
     text = (proc.stdout or "").strip()
     if text:
-        emit_text(text)
+        emit_result(text)
         return 0
     emit_error(f"{cli_name} returned empty output")
     return 1

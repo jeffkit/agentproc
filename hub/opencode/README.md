@@ -1,6 +1,6 @@
 # opencode
 
-Wraps the [`opencode` CLI](https://github.com/anomalyco/opencode) as an AgentProc agent with **streaming** and **session continuity**. opencode emits NDJSON events via `--format json`; this bridge parses those events and re-emits them as `{"type":"partial"}` and `{"type":"session"}` lines.
+Wraps the [`opencode` CLI](https://github.com/anomalyco/opencode) as an AgentProc agent with **streaming** and **session continuity**. opencode emits NDJSON events via `--format json`; this bridge parses those events and re-emits them as `{"type":"partial"}` / `{"type":"result"}` with optional `session_id`.
 
 ## Quick test (zero config)
 
@@ -51,14 +51,14 @@ env_allowlist: [OPENCODE_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/opencode
-echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output (streaming):
 
 ```
-{"type":"partial","text":"opencode ok"}
-{"type":"session","id":"ses_<opaque-id>"}
+{"type":"partial","text":"opencode ok","session_id":"ses_<opaque-id>"}
+{"type":"result","text":"","session_id":"ses_<opaque-id>"}
 ```
 
 <details>
@@ -66,7 +66,7 @@ Expected output (streaming):
 
 ```bash
 cd hub/opencode
-echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 </details>
@@ -83,13 +83,13 @@ opencode CLI  (emits NDJSON events on stdout)
   ↓ text       → {"type":"partial"} (streaming) or accumulated for reply body
   ↓ step_finish → turn complete
 bridge.py / bridge.js
-  ↓ {"type":"session","id":"<id>"}   (replayed as --session on next turn)
-  ↓ reply body            (non-streaming) or nothing (streaming used partials)
+  ↓ {"type":"partial","text":"...","session_id":"<id>"}
+  ↓ {"type":"result","text":"","session_id":"<id>"}   (replayed as --session on next turn)
 ```
 
 ## Session continuity
 
-opencode's `--format json` emits a `sessionID` field (format `ses_XXX`) on every event. The bridge captures it and forwards it as `{"type":"session"}`. On the next turn, the SDK passes it back as `turn.session_id`, and the bridge replays it as `--session <id>` — enabling native multi-turn continuity backed by opencode's own session database.
+opencode's `--format json` emits a `sessionID` field (format `ses_XXX`) on every event. The bridge captures it and forwards it as `session_id` on `partial`/`result` events. On the next turn, the SDK passes it back as `turn.session_id`, and the bridge replays it as `--session <id>` — enabling native multi-turn continuity backed by opencode's own session database.
 
 ## Environment variables
 

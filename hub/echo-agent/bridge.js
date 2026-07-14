@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * Minimal AgentProc echo agent (Node.js, wire 0.3).
+ * Minimal AgentProc echo agent (Node.js, wire 0.4).
  *
  * Reads the {"type":"turn",...} object from stdin and writes the message back
- * as a single {"type":"text"} event. No external dependencies, no AI calls.
+ * as a single {"type":"result"} event. No external dependencies, no AI calls.
  * Use this to verify your messaging bridge speaks the protocol correctly.
  */
 
@@ -15,11 +15,11 @@ rl.on('line', (line) => {
   let turn = {};
   try { turn = JSON.parse(line); } catch { /* empty turn */ }
   const message = (typeof turn.message === 'string') ? turn.message : '';
-  process.stdout.write(JSON.stringify({ type: 'text', text: `You said: ${message}` }) + '\n');
+  process.stdout.write(JSON.stringify({ type: 'result', text: `You said: ${message}` }) + '\n');
   process.exit(0);
 });
 rl.on('close', () => {
   // No turn line at all — echo an empty message.
-  process.stdout.write(JSON.stringify({ type: 'text', text: 'You said: ' }) + '\n');
+  process.stdout.write(JSON.stringify({ type: 'result', text: 'You said: ' }) + '\n');
   process.exit(0);
 });

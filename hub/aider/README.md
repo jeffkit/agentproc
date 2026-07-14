@@ -54,7 +54,7 @@ env_allowlist: [AIDER_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/aider
-echo '{"type":"turn","message":"reply with exactly: aider ok (do not edit any files)","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: aider ok (do not edit any files)","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected: stdout contains `aider ok` (plus aider's usual banner/summary output).
@@ -70,7 +70,7 @@ aider CLI
   ↓ reads cwd via repo map → LLM → edits files → optional git commit
   ↓ human-readable summary on stdout (after the turn completes)
 bridge.py / bridge.js
-  ↓ reply body (no {"type":"session"} line, no {"type":"partial"} lines)
+  ↓ reply body (no session_id on events, no {"type":"partial"} lines)
 ```
 
 ## Session continuity
@@ -92,7 +92,7 @@ For projects without git, there is no automatic context continuity. Use the [Age
 
 - **Modifies files.** aider edits your working directory. Run it in a git repo so you can review and revert changes.
 - **No streaming.** `--no-stream` returns the full response at the end.
-- **No {"type":"session"}.** Session continuity is git-based, not AgentProc-native. The bridge emits no `{"type":"session"}` line.
+- **No `session_id` on events.** Session continuity is git-based, not AgentProc-native. The bridge omits `session_id` on events.
 - **No explicit file targeting.** The bridge does not pass specific files; aider uses its repo-map heuristic to find relevant files. Add files to aider's context by including them in your message (e.g. `"edit src/utils.py: add type hints"`).
 - **Auto-confirm.** `--yes-always` bypasses all aider confirmation prompts. Aider will edit and commit without asking.
 

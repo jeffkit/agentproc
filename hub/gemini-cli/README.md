@@ -74,20 +74,20 @@ agentproc hub run gemini-cli -p "say hi in 5 words" --env GEMINI_API_KEY=$GEMINI
 Expected output (streaming mode):
 
 ```
-{"type":"session","id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
-{"type":"partial","text":"Hi"}
-{"type":"partial","text":" there"}
-{"type":"partial","text":", how can I help?"}
+{"type":"partial","text":"Hi","session_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+{"type":"partial","text":" there","session_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+{"type":"partial","text":", how can I help?","session_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+{"type":"result","text":"","session_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
 ```
 
-Note: gemini emits the session id **up-front** in its `init` event, so `{"type":"session"}` appears before the partials — unlike claude/codex where it appears last.
+Note: gemini emits the session id **up-front** in its `init` event, so `session_id` is stamped on partials early — unlike claude/codex where it may arrive late on the terminal result.
 
 <details>
 <summary>Drive the bridge script directly (without the CLI)</summary>
 
 ```bash
 cd hub/gemini-cli
-echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.3"}' | GEMINI_API_KEY="$GEMINI_API_KEY" python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.4"}' | GEMINI_API_KEY="$GEMINI_API_KEY" python3 bridge.py
 ```
 
 </details>
@@ -102,13 +102,13 @@ bridge.py / bridge.js
 gemini CLI
   ↓ NDJSON stream: init / message / error / result events
 bridge.py / bridge.js
-  ↓ {"type":"session","id":"<id>"}   (session_id from init event)
-  ↓ {"type":"partial","text":"..."}   (assistant message deltas)
+  ↓ {"type":"partial","text":"...","session_id":"<id>"}   (deltas; session_id from init)
+  ↓ {"type":"result","text":"","session_id":"<id>"}
   ↓ {"type":"error","message":"..."}      (on error or result.status=error)
   ↓ exit code from gemini
 ```
 
-The session ID is opaque — `gemini` emits it in the `init` event on its first turn, and the bridge forwards it via `{"type":"session"}`. On subsequent turns, your bridge passes it back as `turn.session_id`, and this bridge replays it as `--resume <id>`.
+The session ID is opaque — `gemini` emits it in the `init` event on its first turn, and the bridge forwards it as `session_id` on `partial`/`result` events. On subsequent turns, your bridge passes it back as `turn.session_id`, and this bridge replays it as `--resume <id>`.
 
 ## Environment variables
 

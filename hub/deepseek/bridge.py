@@ -4,7 +4,7 @@ AgentProc bridge for the DeepSeek TUI CLI (wire 0.3).
 
 Uses `deepseek exec -p <message> [--model <model>]` for non-interactive output.
 deepseek exec returns plain text — no streaming, no session continuity. The
-bridge forwards the text as the reply body (a single {"type":"text"} event).
+bridge forwards the text as the reply body (a single {"type":"result"} event).
 
 Per-CLI config (read from the process env the runner injects):
     DEEPSEEK_MODEL   Optional model override (default: deepseek-v4-pro)

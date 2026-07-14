@@ -5,7 +5,7 @@
  *
  * agy's --print mode returns the full reply as plain text — no streaming, no
  * exposed session id. The bridge forwards the text as the reply body (a single
- * {"type":"text"} event).
+ * {"type":"result"} event).
  *
  * Per-CLI config (read from the process env the runner injects):
  *   AGY_MODEL   Optional model override

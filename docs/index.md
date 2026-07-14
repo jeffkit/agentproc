@@ -58,7 +58,7 @@ Verify it works:
 
 ```bash
 agentproc --version
-# agentproc 0.7.1 (protocol 0.3)
+# agentproc 0.9.0 (protocol 0.4)
 ```
 
 ## ② Browse the hub
@@ -109,8 +109,8 @@ agentproc hub run claude-code \
 You'll see NDJSON events stream on stderr in real time, and the final reply on stdout:
 
 ```
-{"type":"partial","text":"This codebase is..."}
-{"type":"session","id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
+{"type":"partial","text":"This codebase is...","session_id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
+{"type":"result","text":"","session_id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
 agentproc:session:13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
@@ -123,8 +123,8 @@ agentproc hub run claude-code \
   --session 13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
-::: tip Short replies may not show {"type":"partial"}
-Some agents emit the whole reply in one shot when the answer is short — you'll see just `{"type":"session"}` and the reply body, no `{"type":"partial"}` lines. That's normal; streaming only fragments longer replies.
+::: tip Short replies may not show `{"type":"partial"}`
+Some agents emit the whole reply in one shot when the answer is short — you'll see a single `{"type":"result","text":"..."}` (with optional `session_id`), no `{"type":"partial"}` lines. That's normal; streaming only fragments longer replies.
 :::
 
 ## ④ Connect to your messaging platform

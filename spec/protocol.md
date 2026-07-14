@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
-**Wire protocol:** `0.3` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.0`
+**Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
+**Document revision:** `1.1`
 **Status:** Draft
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -16,7 +16,7 @@ The wire protocol and this document are versioned **independently**. The wire ve
 - If an agent expects a version string the bridge does not send, the agent MUST fall back to its built-in default.
 - The string is not a feature-detection mechanism: there is no negotiation, no capability advertisement, and no ordering. Agents that need to know whether a specific feature (e.g. an image attachment) is present MUST inspect the relevant field in the [turn object](#input--stdin-turn-object) directly (e.g. a non-empty `attachments` array), not the version string.
 
-The rationale is that any comparable version invites implementers to gate behaviour on `>= 0.3`, which breaks the moment a bridge ships without bumping the number. Treating the string as opaque keeps the contract honest: presence of a feature is signalled by presence of the field that carries it.
+The rationale is that any comparable version invites implementers to gate behaviour on `>= 0.4`, which breaks the moment a bridge ships without bumping the number. Treating the string as opaque keeps the contract honest: presence of a feature is signalled by presence of the field that carries it.
 
 ---
 
@@ -42,7 +42,7 @@ Messaging Platform
 The protocol has three input paths and one output path:
 
 - **Input — stdin:** a single NDJSON [turn object](#input--stdin-turn-object) describing this turn, written before the process starts (or just after). When [optional tool permission](#optional-tool-permission) is enabled, stdin stays open and the bridge writes further NDJSON `permission_response` objects mid-turn.
-- **Input — environment variables:** secrets and configuration (the profile `env` block, plus a minimal infra set). The per-turn request does **not** travel in env vars in 0.3 — it travels in the stdin turn object.
+- **Input — environment variables:** secrets and configuration (the profile `env` block, plus a minimal infra set). The per-turn request does **not** travel in env vars in 0.4 — it travels in the stdin turn object.
 - **Input — argv placeholders:** `{{MESSAGE}}`, `{{SESSION_ID}}`, `{{SESSION_NAME}}`, `{{PROFILE_DIR}}` substituted into `command`/`args` before launch, for agents that pass the message to an underlying CLI as a CLI argument.
 - **Output — stdout:** NDJSON events, one JSON object per line, distinguished by a `type` field.
 
@@ -181,7 +181,7 @@ Before the agent process reads its first byte of stdin, the bridge writes **exac
 
 ```json
 {"type":"turn","message":"hello","session_id":"","session_name":"default",
- "from_user":"u1","attachments":[],"permission":false,"protocol_version":"0.3"}
+ "from_user":"u1","attachments":[],"permission":false,"protocol_version":"0.4"}
 ```
 
 ### Required fields
@@ -192,7 +192,7 @@ Before the agent process reads its first byte of stdin, the bridge writes **exac
 | `message` | string | User message text. May be `""` — see "Empty turns" below. |
 | `session_id` | string | Session ID from the previous turn (`""` = new session). |
 | `from_user` | string | Sender identifier (platform-specific: user ID, handle, etc.). |
-| `protocol_version` | string | Protocol version string, e.g. `"0.3"`. **Opaque and non-comparable** — see [Versioning](#versioning). |
+| `protocol_version` | string | Protocol version string, e.g. `"0.4"`. **Opaque and non-comparable** — see [Versioning](#versioning). |
 
 ### Optional fields (present = relevant)
 
@@ -233,21 +233,40 @@ The agent process writes to stdout. The bridge reads it line by line in real tim
 | `type` | Direction | Description |
 |--------|-----------|-------------|
 | `partial` | agent → bridge | A streaming chunk, forwarded to the user immediately. |
-| `text` | agent → bridge | Final reply body. Multiple `text` events concatenate in order. |
-| `session` | agent → bridge | Declares or updates the session id. Last one wins. |
+| `result` | agent → bridge | Terminal success body for this turn (at most one). |
 | `error` | agent → bridge | A terminal error message to forward to the user. |
 | `permission_request` | agent → bridge | Optional tool-permission request (only when `permission: true`). |
 
 ### Closed vocabulary
 
-The event set above is **closed**. The seven `type` values — `turn` (stdin), `partial`, `text`, `session`, `error`, `permission_request`, and `permission_response` (stdin) — are the entire protocol vocabulary. AgentProc deliberately does **not** grow typed events for tool calls, file diffs, plan updates, reasoning blocks, or other richer semantics. An agent that needs those should wrap an IDE-oriented protocol (e.g. ACP) internally; an AgentProc bridge renders no diffs and owns no user files, so it has nothing to do with such events. Bridges MUST NOT expect additional event types, and agents MUST NOT invent them as a way to smuggle richer semantics through this protocol — that path leads to reimplementing ACP poorly. Unknown `type` values are handled per [Malformed lines](#malformed-lines).
+The event set above is **closed**. The six `type` values — `turn` (stdin), `partial`, `result`, `error`, `permission_request`, and `permission_response` (stdin) — are the entire protocol vocabulary. AgentProc deliberately does **not** grow typed events for tool calls, file diffs, plan updates, reasoning blocks, or other richer semantics. An agent that needs those should wrap an IDE-oriented protocol (e.g. ACP) internally; an AgentProc bridge renders no diffs and owns no user files, so it has nothing to do with such events. Bridges MUST NOT expect additional event types, and agents MUST NOT invent them as a way to smuggle richer semantics through this protocol — that path leads to reimplementing ACP poorly. Unknown `type` values are handled per [Malformed lines](#malformed-lines).
 
 This protocol is scoped to **one turn**: one user message, one process, one reply. Long-lived sessions, mid-turn cancellation, concurrent requests, and client-provided callbacks (file system, terminal) are out of scope by design — they are what make ACP an IDE protocol rather than a chat-bridge protocol.
+
+### `session_id` on events
+
+Session continuity is carried as an optional field on stdout events, **not** as a dedicated event type.
+
+| Rule | Requirement |
+|------|-------------|
+| Persistence | The bridge persists the **first** non-empty `session_id` observed in the turn and passes it back as `turn.session_id` on the next turn. If no event carries a non-empty `session_id`, the bridge does not learn a new agent session id from this turn. |
+| Once known | After a non-empty `session_id` is known, agents SHOULD attach that same value to every subsequent stdout event. Early events MAY omit the field (e.g. while waiting for a CLI `init`). Omitting-then-presenting is **not** a protocol violation. |
+| Non-empty when present | On output, `session_id` MUST NOT be `""`. Empty string on input (`turn.session_id`) still means “new session”; that meaning does not apply on output. |
+| Stateless agents | Agents with no native resume/session MUST **omit** the field on every event. They MUST NOT mint an id when the underlying tool cannot resume with it. Generating an id the tool itself requires as an input (e.g. a CLI `--session <id>` flag) and returning that same id on events is allowed — that is not “minting solely to populate the field.” |
+| Inbound stamp | When `turn.session_id` is non-empty, resume-capable agents SHOULD include that same value on every stdout event from the first event onward (no discovery buffering). Discovery buffering applies only when starting a new session (`turn.session_id` is `""`) and the CLI assigns an id asynchronously. |
+| No permission buffering | Agents MUST NOT buffer a `permission_request` (or any event that requires a stdin response) while waiting for a session id. Prefer stamping the inbound `turn.session_id` when present, or emitting the request without the field until the id is known. |
+| Disagreement | A **different** non-empty `session_id` after one has already been observed is a protocol violation. The bridge SHOULD log a warning to stderr and MUST keep the first non-empty value (fail-soft). It MUST NOT invent an id. |
+
+`session_id` on the wire is an arbitrary JSON string — it MAY contain colons, slashes, whitespace, or any other JSON-escapeable character. SDK history helpers that store each session as `<id>.jsonl` impose a **storage-level** constraint: an id that is not safe as a filename component cannot round-trip through file storage. Bridges/SDKs that persist ids SHOULD either sanitise or reject such ids with a stderr warning; the wire itself places no restriction.
+
+### Optional `usage` on terminal events
+
+`result` and `error` MAY include a `usage` object for token/cost stats. Bridges MAY ignore it. Recommended keys (all optional): `input_tokens`, `output_tokens`, `total_tokens` (numbers). Additional keys are forward-compatible and SHOULD be ignored if unrecognised. There is **no** separate `usage` event type.
 
 ### `{"type":"partial"}` — streaming chunk
 
 ```json
-{"type":"partial","text":"hello ","role":"output"}
+{"type":"partial","text":"hello ","role":"output","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
 ```
 
 | Field | Type | Description |
@@ -255,68 +274,56 @@ This protocol is scoped to **one turn**: one user message, one process, one repl
 | `type` | string | Literal `"partial"`. |
 | `text` | string | The chunk text. May contain newlines, emoji, etc. — JSON-escaped as needed. |
 | `role` | string | Optional. `"output"` (default) or `"thinking"`. Lets the agent distinguish assistant output from reasoning/thinking text. Bridges MAY render thinking differently (e.g. collapsed, greyed) but MUST forward it. Unknown values are forwarded as-is. |
+| `session_id` | string | Per [`session_id` on events](#session_id-on-events). |
 
 Additional fields MAY be included by the agent (forward-compatibility); bridges SHOULD ignore fields they do not understand.
 
-When `streaming: false` is set in the profile, the bridge ignores all `partial` events and assembles the reply from `text` events only.
+When `streaming: false` is set in the profile, the bridge ignores all `partial` events and assembles the reply from the `result` event only.
 
-### `{"type":"text"}` — final reply body
+### `{"type":"result"}` — terminal success body
 
 ```json
-{"type":"text","text":"Here is the complete answer."}
+{"type":"result","text":"Here is the complete answer.","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c","usage":{"input_tokens":12,"output_tokens":34}}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `type` | string | Literal `"text"`. |
-| `text` | string | A piece of the final reply body. May contain newlines. |
+| `type` | string | Literal `"result"`. |
+| `text` | string | The final reply body for this turn. MAY be `""` when the full body was already delivered via `partial` (the bridge skips a duplicate final send when appropriate). |
+| `session_id` | string | Per [`session_id` on events](#session_id-on-events). |
+| `usage` | object | Optional. Per [Optional `usage`](#optional-usage-on-terminal-events). |
 
-Multiple `text` events in one turn concatenate in order to form the final reply body, which is sent to the user after the process exits (if non-empty). If all content was already delivered via `partial` events and no `text` event is emitted, the final reply is empty and the bridge skips the final send.
+**At most one `result` per turn.** If a second `result` appears, the bridge SHOULD log a warning and MUST ignore it.
 
-A turn that produces no `text` (and no `partial`) and exits `0` is a **successful** turn (e.g. an agent that forwards everything via `partial` and then exits). An empty output is only a failure when paired with a non-zero exit code or an `error` event.
+**Assembling the user-visible body:**
 
-### `{"type":"session"}` — session event
+- When `streaming: true`: the user-visible body is the concatenation of forwarded `partial` texts. If `result.text` is non-empty and no `partial` was forwarded, the bridge uses `result.text` as the body. If one or more `partial`s were already forwarded, the bridge MUST NOT append `result.text` again (treat it as terminal metadata for `usage` / completeness only — many CLIs repeat the full assembled text in their own terminal event).
+- When `streaming: false`: the body is `result.text` only (all `partial` events are ignored).
 
-```json
-{"type":"session","id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
-```
+A turn that produces no `result` (and no `partial`) and exits `0` is a **successful** turn. A turn that streams only via `partial` and exits `0` without a `result` is also successful (the user-visible body is whatever partials were forwarded). Agents that have `usage` to publish SHOULD still emit a trailing `{"type":"result","text":"",...}` so stats have a home. An empty output is only a failure when paired with a non-zero exit code or an `error` event.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `type` | string | Literal `"session"`. |
-| `id` | string | The session id, carried as a JSON string. |
-
-**Session event rule (resolves ordering ambiguity):**
-
-- The session event MAY appear at **any position** in stdout — first line, interleaved with partials, or last line.
-- If multiple `session` events are emitted, the **last one wins**. The bridge stores the final value and passes it back as `session_id` on the next turn.
-- This rule accommodates the common case where the session id is only known after the underlying CLI exits (e.g., `claude --output-format stream-json` emits the session id in its terminal `result` event).
-- **Interaction with `error`** — a CLI's terminal event frequently carries both the session id and an error indication (e.g. `result{session_id, is_error: true}`). When a `session` event and an `error` event appear in the same turn, the bridge MUST still persist the session id for the next turn, even though the current turn is reported to the user as a failure. The error terminates the turn; it does not invalidate the session. Agents that emit `error` and have already learned their session id SHOULD emit the `session` event first (or at any point — the bridge honours last-wins either way).
-
-**Wire-level vs. storage-level id constraints.** On the wire, `id` is an arbitrary JSON string — it MAY contain colons, slashes, whitespace, or any other JSON-escapeable character. (0.3 drops the 0.2 charset restriction because there is no longer a colon-delimited line prefix to collide with.) However, SDK history helpers that store each session as `<id>.jsonl` impose a **storage-level** constraint: an id that is not safe as a filename component (e.g. contains `/`, `..`, or NUL) cannot round-trip through file storage. Bridges/SDKs that persist ids SHOULD either sanitise or reject such ids with a stderr warning, preserving the previously captured id; the wire itself places no restriction.
-
-This event is consumed by the bridge and does **not** appear in the reply sent to the user.
+After the first `error` in a turn, the bridge MUST treat the turn as failed; subsequent `error` or `result` events SHOULD be ignored. `usage` on a `partial` event MUST be ignored (bridges MAY warn).
 
 ### `{"type":"error"}` — error event
 
 ```json
-{"type":"error","message":"Upstream API rate limited. Try again in 60s."}
+{"type":"error","message":"Upstream API rate limited. Try again in 60s.","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `type` | string | Literal `"error"`. |
 | `message` | string | A user-readable error message. |
+| `session_id` | string | Per [`session_id` on events](#session_id-on-events). Present when the agent has a session (including the common “CLI result with `is_error`” case) so the bridge can still persist continuity after a failed turn. |
+| `usage` | object | Optional. Per [Optional `usage`](#optional-usage-on-terminal-events). |
 
-This event is honored **regardless** of `streaming` mode. The bridge forwards the message to the user as an error reply and MUST stop forwarding any further `partial` events from the same turn (already-delivered chunks are not retracted, only future ones are suppressed — see "Interaction with already-delivered partials" below). `text` events that arrive after an `error` MUST also be discarded (they cannot contribute to the reply body of a failed turn). The `session` event is exempt — last-wins still applies, so a `session` event arriving after an `error` still updates the id persisted for the next turn.
+This event is honored **regardless** of `streaming` mode. The bridge forwards the message to the user as an error reply and MUST stop forwarding any further `partial` events from the same turn (already-delivered chunks are not retracted, only future ones are suppressed — see "Interaction with already-delivered partials" below). A `result` event that arrives after an `error` MUST be discarded (it cannot contribute to the reply body of a failed turn).
 
-Once an `error` event has been emitted, the bridge MAY stop reading the agent's stdout entirely — it has already captured the error and (per the session-event rule) the final session id if one appeared before the error. The agent process is expected to exit shortly after; if it does not, the bridge's normal timeout applies.
+Once an `error` event has been emitted, the bridge MAY stop reading the agent's stdout entirely — it has already captured the error and (when present) the session id. The agent process is expected to exit shortly after; if it does not, the bridge's normal timeout applies.
 
 If an `error` event is emitted, the bridge MUST treat the turn as failed even if the process exits 0. The agent SHOULD exit with a non-zero code after emitting `error`, but a bridge MUST NOT rely on that — the `error` event alone is sufficient to mark the turn failed.
 
-Any `text` event produced alongside an `error` event is discarded.
-
-**SDK convention.** SDKs that wrap this protocol (e.g. the official Python and Node `create_profile`/`createProfile` helpers) treat `send_error()` as **terminal**: the agent SHOULD NOT emit further `partial` or `text` after calling it. The SDK MAY enforce this by exiting the process immediately after `send_error()`. This is a stricter rule than the raw protocol requires (the protocol allows an agent to emit `error` and continue writing — the bridge just discards the rest), but it is the recommended SDK ergonomic because mixing an error with subsequent content is confusing to users.
+**SDK convention.** SDKs that wrap this protocol (e.g. the official Python and Node `create_profile`/`createProfile` helpers) treat `send_error()` as **terminal**: the agent SHOULD NOT emit further `partial` or `result` after calling it. The SDK MAY enforce this by exiting the process immediately after `send_error()`. This is a stricter rule than the raw protocol requires (the protocol allows an agent to emit `error` and continue writing — the bridge just discards the rest), but it is the recommended SDK ergonomic because mixing an error with subsequent content is confusing to users.
 
 #### Interaction with already-delivered partials
 
@@ -328,49 +335,54 @@ Agents that prefer a clean failure MAY choose to buffer their output and emit no
 
 ### Malformed lines
 
-A stdout line that is not valid JSON, is valid JSON but not an object, or lacks a recognised `type` is a protocol violation. The bridge SHOULD log a warning to stderr and **ignore the line**. It is **not** forwarded to the user as reply body — in 0.3, reply body is carried only by `text` events. (This is stricter than 0.2, which treated any non-prefixed line as body. The cost is that a hand-written `echo "hello"` shell agent is no longer a valid agent; see [Design Rationale](#design-rationale).)
+A stdout line that is not valid JSON, is valid JSON but not an object, or lacks a recognised `type` is a protocol violation. The bridge SHOULD log a warning to stderr and **ignore the line**. It is **not** forwarded to the user as reply body — in 0.4, reply body is carried only by `result` (and live `partial` when streaming). (This is stricter than 0.2, which treated any non-prefixed line as body. The cost is that a hand-written `echo "hello"` shell agent is no longer a valid agent; see [Design Rationale](#design-rationale).)
 
 ### `max_reply_chars` — length cap (applies to both modes)
 
 `max_reply_chars` (default 8000) caps the total character length of the user-visible output:
 
-- **Non-streaming (`streaming: false`):** the assembled `text` body is truncated to `max_reply_chars` characters before delivery.
+- **Non-streaming (`streaming: false`):** the `result.text` body is truncated to `max_reply_chars` characters before delivery.
 - **Streaming (default):** the cumulative length of all forwarded `partial` chunks is tracked. Once it reaches `max_reply_chars`, the bridge appends a truncation notice (the profile's `truncation_suffix`) and stops forwarding further partials from the current turn.
 
 **Implementation-defined: the boundary chunk.** When a `partial` chunk straddles the cap (the chunk itself is larger than the remaining budget), the bridge MAY either (a) forward a tail-truncated slice that fits the remaining budget, then the truncation notice, or (b) drop the chunk entirely and forward only the truncation notice. Both are conformant. The truncation notice is what tells the user the reply was capped; whether the user sees the slice that fits is a per-bridge UX choice.
 
-The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profile has the same effect whether the agent streams (`partial`) or returns a single body (`text`). Agents that buffer all output and emit it as `text` — or agents that forward everything as `partial` — both hit the same wall.
+The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profile has the same effect whether the agent streams (`partial`) or returns a single body (`result`). Agents that buffer all output and emit it as `result` — or agents that forward everything as `partial` — both hit the same wall.
 
 ### Complete examples
 
-**Streaming with session discovered at the end (the common CLI-wrapping case):**
+**Streaming with session id on every event (resume-capable agent):**
 
 ```
-{"type":"partial","text":"Here is the first part of the answer. "}
-{"type":"partial","text":"And here is the second part."}
-{"type":"session","id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"partial","text":"Here is the first part of the answer. ","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"partial","text":"And here is the second part.","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c"}
+{"type":"result","text":"","session_id":"cli-sess-9f3a2c1e-4b8d-4a2f-b6c1-2e8d4f5a7b9c","usage":{"input_tokens":12,"output_tokens":34}}
 ```
 
-**One-shot with session declared up front:**
+**One-shot with session (body only in `result`):**
 
 ```
-{"type":"session","id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
-{"type":"text","text":"Here is the complete answer."}
+{"type":"result","text":"Here is the complete answer.","session_id":"f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+```
+
+**Stateless agent (no `session_id` field):**
+
+```
+{"type":"result","text":"Here is the complete answer."}
 ```
 
 **Thinking + output, streamed:**
 
 ```
-{"type":"partial","role":"thinking","text":"Let me consider the options... "}
-{"type":"partial","role":"output","text":"The answer is 42."}
-{"type":"session","id":"cli-sess-…"}
+{"type":"partial","role":"thinking","text":"Let me consider the options... ","session_id":"cli-sess-…"}
+{"type":"partial","role":"output","text":"The answer is 42.","session_id":"cli-sess-…"}
+{"type":"result","text":"","session_id":"cli-sess-…"}
 ```
 
-**Error mid-stream:**
+**Error mid-stream (session still carried):**
 
 ```
-{"type":"partial","text":"Let me look that up... "}
-{"type":"error","message":"Upstream API rate limited. Try again in 60s."}
+{"type":"partial","text":"Let me look that up... ","session_id":"cli-sess-…"}
+{"type":"error","message":"Upstream API rate limited. Try again in 60s.","session_id":"cli-sess-…"}
 ```
 
 **Multi-attachment turn (bridge writes to stdin):**
@@ -378,14 +390,14 @@ The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profil
 ```
 {"type":"turn","message":"compare these two","session_id":"","from_user":"u1",
  "attachments":[{"kind":"image","url":"https://.../a.png"},{"kind":"image","url":"https://.../b.png"}],
- "permission":false,"protocol_version":"0.3"}
+ "permission":false,"protocol_version":"0.4"}
 ```
 
 **Optional permission mid-turn** (profile `permission: true`; bridge keeps stdin open):
 
 ```
-{"type":"partial","text":"I'll create that file."}
-{"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}
+{"type":"partial","text":"I'll create that file.","session_id":"cli-sess-…"}
+{"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"},"session_id":"cli-sess-…"}
 ```
 
 Bridge writes on stdin after the user approves in the messaging UI:
@@ -397,8 +409,8 @@ Bridge writes on stdin after the user approves in the messaging UI:
 Agent continues, then finishes:
 
 ```
-{"type":"partial","text":"Done."}
-{"type":"session","id":"cli-sess-…"}
+{"type":"partial","text":"Done.","session_id":"cli-sess-…"}
+{"type":"result","text":"","session_id":"cli-sess-…"}
 ```
 
 ---
@@ -410,7 +422,7 @@ This section is **optional**. A conformant bridge or agent MAY ignore it entirel
 ### What this is (and is not)
 
 - **Is:** a channel for **tool execution authorization** while a turn is in progress — the agent (or a wrapped CLI) needs allow/deny before running Bash, Write, etc.
-- **Is not:** a general human-in-the-loop Q&A protocol. Clarifying questions belong in the normal `text` / `partial` content; the user answers on the **next** IM turn. Disabling interactive questionnaire tools (e.g. Claude Code's `AskUserQuestion`) in headless IM bridges is therefore reasonable and recommended.
+- **Is not:** a general human-in-the-loop Q&A protocol. Clarifying questions belong in the normal `result` / `partial` content; the user answers on the **next** IM turn. Disabling interactive questionnaire tools (e.g. Claude Code's `AskUserQuestion`) in headless IM bridges is therefore reasonable and recommended.
 
 ### Enabling
 
@@ -426,7 +438,7 @@ When `permission` is absent or `false`, bridges MUST NOT require agents to speak
 ### `{"type":"permission_request"}` — agent → bridge (stdout)
 
 ```json
-{"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok"},"description":"Write a file"}
+{"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok"},"description":"Write a file","session_id":"cli-sess-…"}
 ```
 
 Required fields:
@@ -444,6 +456,7 @@ Optional fields the agent MAY include for UI / policy:
 |-------|------|-------------|
 | `description` | string | Short human-readable summary for the messaging UI. |
 | `tool_use_id` | string | Underlying CLI / model tool-use id, if any. |
+| `session_id` | string | Per [`session_id` on events](#session_id-on-events). SHOULD be included once known; MUST NOT delay the request to wait for it. |
 
 On a malformed event (invalid JSON or missing required fields), the bridge SHOULD log a warning to stderr and MUST NOT block the turn waiting for a user decision; it SHOULD write a deny response only if it can still parse a `request_id`, otherwise ignore the event.
 
@@ -479,9 +492,9 @@ Optional:
 
 ### Interaction with other events
 
-- `partial` / `text` MAY appear before and after permission traffic in the same turn.
+- `partial` / `result` MAY appear before and after permission traffic in the same turn.
 - `error` still fails the turn. A pending permission request becomes moot; the bridge SHOULD stop waiting for user approval.
-- `session` last-wins is unchanged; session events MAY appear before or after permission traffic.
+- When the turn has a known `session_id`, `permission_request` events SHOULD include it (see [`session_id` on events](#session_id-on-events)). Agents MUST NOT delay emitting `permission_request` to wait for session discovery.
 
 ### Relationship to auto-approve modes
 
@@ -508,7 +521,7 @@ The agent MUST NOT block on stdin after reading the turn line when `permission` 
 
 | Code | Meaning |
 |------|---------|
-| `0` | Success — stdout content (assembled from `text` events and forwarded `partial` events) is sent as the reply |
+| `0` | Success — stdout content (assembled from `result` and forwarded `partial` events) is sent as the reply |
 | `1` | Generic agent error |
 | `124` | Timeout (bridge-imposed; matches GNU `timeout` convention) |
 | `130` | Interrupted by SIGINT (Ctrl-C) |
@@ -571,7 +584,7 @@ Built-in shortcuts (e.g. `type: claude-code`) are platform extensions, not P0. I
 
 0.2 used sentinel-prefixed plain text (`AGENT_PARTIAL:...`) so that a hand-written bash agent (`echo "You said: $AGENT_MESSAGE"`) was a valid agent. The cost was threefold: (a) a collision rule — reply body had to avoid lines starting with `AGENT_*:`; (b) an encoding asymmetry — `AGENT_PARTIAL:` carried a JSON-encoded string while the final body was plain text, so the same logical "chunk of text" was encoded two different ways; (c) the `partial` payload was a bare string, leaving no room for metadata (e.g. distinguishing thinking from output).
 
-0.3 makes every stdout line a JSON object with a `type` field. This removes the collision rule (body is now `{"type":"text"}`), unifies encoding (`partial` and `text` both carry a `text` string field), and lets `partial` grow fields like `role`. The cost is that a bare `echo "hello"` is no longer a valid agent — it must emit `{"type":"text","text":"hello"}`. Real agents are wrapper scripts (every hub profile is a Python or Node wrapper around an underlying CLI that already emits NDJSON internally), so they were already doing JSON; the only thing lost is the 5-minute bash smoke test, which a 3-line Python/Node script replaces.
+0.3 makes every stdout line a JSON object with a `type` field. This removes the collision rule (body is now `{"type":"result"}` in 0.4; was `{"type":"text"}` in 0.3), unifies encoding (`partial` and the terminal body event both carry a `text` string field), and lets `partial` grow fields like `role`. The cost is that a bare `echo "hello"` is no longer a valid agent — it must emit a JSON event. Real agents are wrapper scripts (every hub profile is a Python or Node wrapper around an underlying CLI that already emits NDJSON internally), so they were already doing JSON; the only thing lost is the 5-minute bash smoke test, which a 3-line Python/Node script replaces.
 
 **Why a stdin turn object for input, rather than environment variables?**
 
@@ -583,15 +596,21 @@ Built-in shortcuts (e.g. `type: claude-code`) are platform extensions, not P0. I
 - **argv** — launch params via `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}`, for agents that pass the message to an underlying CLI as a CLI argument.
 - **env** — secrets and configuration (the profile `env` block), kept in env deliberately so they are not logged as part of the turn payload.
 
-Debuggability is barely changed: `AGENT_MESSAGE="hello" ./agent.sh` becomes `echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.3"}' | ./agent` — still a one-liner, just no longer an env-var assignment.
+Debuggability is barely changed: `AGENT_MESSAGE="hello" ./agent.sh` becomes `echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.4"}' | ./agent` — still a one-liner, just no longer an env-var assignment.
 
 **Why drop `env_inherit`?**
 
 0.2 added `env_inherit: minimal|all` so the secure-by-default (`minimal`) could be escaped with `all` for legacy profiles that relied on ambient shell variables. In practice the escape hatch kept the trust boundary fuzzy. 0.3 fixes the child base env at the infra set always; ambient variables a profile needs must be declared in the `env` block. This makes "what the agent sees" equal to "what the profile declares" plus the fixed infra set — a cleaner boundary. Profiles that set `env_inherit: all` in 0.2 must declare the variables they relied on.
 
-**Why "last session event wins"?**
+**Why `session_id` as a field on events, instead of a `session` event?**
 
-Because the underlying CLI often doesn't know its own session id until it exits. `claude --output-format stream-json` emits the session id in the terminal `result` event, which is the last event of the run. A "must be first event" rule would force bridge authors into awkward buffering. "Last wins" lets the agent emit the session event whenever it learns it.
+0.3 inherited a dedicated `{"type":"session"}` event (and a “last wins” rule) from the 0.2 `AGENT_SESSION:` line prefix. That shape treated session continuity as a discrete event, which is the wrong abstraction: the id is turn-level metadata. Coding CLIs already attach `session_id` / `sessionID` / `thread_id` to their own NDJSON events (often from the first `init` / `thread.started`); hub bridges were inventing a second event solely to re-declare it.
+
+0.4 puts `session_id` on the events themselves. The bridge persists the **first** non-empty value; agents SHOULD attach it to subsequent events once known. Early events MAY omit it so streaming and mid-turn `permission_request` are not delayed. A different non-empty value later is a protocol violation (fail-soft: keep the first). Stateless agents omit the field entirely; they MUST NOT mint an id the underlying tool cannot resume with (generating an id a CLI requires as `--session` input is fine). When `turn.session_id` is already non-empty, agents SHOULD stamp it from the first event — no discovery wait.
+
+**Why `result` instead of `text`?**
+
+`text` sounded like “another body fragment” and invited multiple concatenating lines, which made turn-level metadata (`session_id`, `usage`) ambiguous. `result` is the terminal success outcome — at most one per turn — matching the `result`-shaped events many CLIs already emit, and giving a natural home for optional `usage`.
 
 **Why an `error` event in addition to non-zero exit codes?**
 
@@ -629,7 +648,7 @@ The overlap is only superficial. An ACP client must implement file-system, termi
 
 NDJSON is one JSON object per line, newline-delimited. It's the wire format used internally by Claude Code, Codex, Gemini CLI streaming modes, and by MCP.
 
-**Relationship to AgentProc:** **Same wire format as of 0.3.** AgentProc 0.3 is NDJSON in both directions: one JSON object per line on stdin (the turn, then optional permission responses) and on stdout (events). The difference from raw NDJSON is the fixed, small event vocabulary (`turn` / `partial` / `text` / `session` / `error` / `permission_request` / `permission_response`) and the one-turn-per-process lifecycle, rather than a long-lived bidirectional RPC stream.
+**Relationship to AgentProc:** **Same wire format as of 0.3 (refined in 0.4).** AgentProc is NDJSON in both directions: one JSON object per line on stdin (the turn, then optional permission responses) and on stdout (events). The difference from raw NDJSON is the fixed, small event vocabulary (`turn` / `partial` / `result` / `error` / `permission_request` / `permission_response` in 0.4) and the one-turn-per-process lifecycle, rather than a long-lived bidirectional RPC stream.
 
 - Spec: https://jsonlines.org/
 
@@ -653,7 +672,7 @@ LSP and DAP connect an editor to a language server or debugger. Transport: JSON-
 
 The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on success" — formalized in Eric Raymond's *The Art of Unix Programming*.
 
-**Relationship to AgentProc:** **Philosophical foundation.** AgentProc extends the Unix filter convention with two things filters don't have: session-continuity handoff (`{"type":"session"}`) and streaming events (`{"type":"partial"}`). Everything else is ordinary Unix. 0.3 makes the filter "JSON lines in, JSON lines out" rather than raw text, but the shape is still a filter.
+**Relationship to AgentProc:** **Philosophical foundation.** AgentProc extends the Unix filter convention with two things filters don't have: session-continuity handoff (`session_id` on events) and streaming events (`{"type":"partial"}`). Everything else is ordinary Unix. 0.3 onwards makes the filter "JSON lines in, JSON lines out" rather than raw text, but the shape is still a filter.
 
 - Reference: http://www.catb.org/~esr/writings/taoup/html/ch01s06.html
 
@@ -666,10 +685,28 @@ The POSIX-derived convention of "read from stdin, write to stdout, exit 0 on suc
 
 ---
 
+## Migration from 0.3
+
+Wire 0.4 is a **hard cutover** (same posture as 0.2 → 0.3). There is no dual-read period.
+
+| 0.3 | 0.4 |
+|-----|-----|
+| `{"type":"session","id":"..."}` | Remove. Put `session_id` on `partial` / `result` / `error` / `permission_request` as appropriate. |
+| `{"type":"text","text":"..."}` (may repeat; concatenate) | Single `{"type":"result","text":"..."}`. Extra body chunks → `partial`. |
+| Session “last wins” | Persist **first** non-empty `session_id`; later different value = violation (keep first). |
+| `protocol_version`: `"0.3"` | `"0.4"` — bump only when stdout vocabulary matches 0.4. |
+
+Bridges that still emit or expect `type:session` / `type:text` are not 0.4-conformant. Under a 0.4 bridge, those lines are unknown `type` values and are handled per [Malformed lines](#malformed-lines) (warn + ignore) — they do **not** contribute session id or reply body. Opaque-version fail-soft (“unrecognised version → behave as unset”) does **not** mean a 0.3 agent remains usable under a 0.4 bridge.
+
+Hub wrappers that previously read `session_id` only from a CLI’s terminal `result` event SHOULD also read it from the earliest CLI event that carries it (e.g. `system/init`) so streaming need not wait until process exit. They MUST NOT buffer an entire turn’s `partial`s solely to satisfy session tagging, and MUST NOT buffer `permission_request` while waiting for an id.
+
+---
+
 ## Changelog
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **wire 0.4 / doc 1.1** — Breaking stdout shape. Removes `{"type":"session"}` and `{"type":"text"}`. Session continuity is an optional `session_id` field on stdout events: bridge persists the first non-empty value; agents SHOULD attach it once known; early omit is allowed; a conflicting later value is a violation (keep first). Never mint an id the tool cannot resume with; never use `""` on output. Final success body is a single `{"type":"result","text":...}` (optional `usage`). Streaming body assembly: forwarded `partial`s win over a duplicate `result.text`. Hard cutover from 0.3 (see [Migration from 0.3](#migration-from-03)). Rationale for 0.3’s “last session event wins” is retired.
 - **wire 0.3 / doc 1.0** — NDJSON on both directions. Input: a single [turn object](#input--stdin-turn-object) on stdin replaces all `AGENT_*` environment variables; secrets/config stay in env; argv placeholders unchanged. Output: stdout is now NDJSON events (`partial` / `text` / `session` / `error` / `permission_request`) distinguished by a `type` field, replacing the `AGENT_*:` sentinel prefixes. `partial` gains an optional `role` (`output` | `thinking`). Attachments collapse to a single `attachments` array in the turn object (each element `{kind, url, ...}`), replacing the 0.2 `AGENT_IMAGE_URL` / `AGENT_FILE_URL` single-attachment convenience vars — there is no longer a dual single/multi representation. Session id is now an arbitrary JSON string on the wire (charset restriction moved to a storage-level concern). Profile changes: `command` is always argv[0] and never split (the `args`-absent whitespace-split shorthand is removed; `args` defaults to `[]`); the `stdin` field is removed (stdin always carries the turn); `streaming` becomes a bridge-side hint rather than a wire field; `env_inherit` is removed (child base env is always the infra set). Malformed stdout lines are logged and ignored rather than treated as reply body. The event vocabulary is declared closed to resist drift toward ACP-style richer events. This is a hard cutover from 0.2; the runner does not support both.
 - **wire 0.2 / doc 0.9** — Secure-by-default child environment inheritance. New profile field `env_inherit: minimal|all` (default `minimal`). Inheritance is decoupled from `env_allowlist`: the allowlist only gates `${VAR}` expansion; full `process.env` / `os.environ` inheritance requires explicit `env_inherit: all`. SDK packages bumped to 0.6.1; wire protocol stays `0.2`.
 - **wire 0.2 / doc 0.8** — Optional tool permission channel: profile `permission: true`, env `AGENT_PERMISSION`, stdout `AGENT_PERMISSION_REQUEST:<json>`, stdin `AGENT_PERMISSION_RESPONSE:<json>`, and the keep-stdin-open turn rule. Opt-in only; default profiles and auto-approve / skip-permissions deployments are unchanged. Wire protocol string becomes `0.2` because new protocol line prefixes and mid-turn stdin frames are on the wire.

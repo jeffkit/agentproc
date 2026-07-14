@@ -1,4 +1,4 @@
-"""Hub bridge engine conformance (wire 0.3).
+"""Hub bridge engine conformance (wire 0.4).
 
 Drives the shared ``hub/_shared/stream_utils.run_bridge`` with a minimal
 identity ``parse_event`` against the shared
@@ -7,8 +7,9 @@ fixture in ``sdk/node/src/hub_bridge_conformance.test.js``.
 
 Together they guarantee the Python and Node hub bridge engines agree on
 multi-line interaction semantics that ``run_bridge`` owns: error-mid-stream
-preserving session, session-discovered-at-end ordering, empty-message +
-attachment accepted, exit-code mapping, partial-as-reply fallback.
+preserving session_id on the error event, session-discovered-at-end ordering,
+empty-message + attachment accepted, exit-code mapping, partial-as-reply
+fallback.
 
 Per-CLI ``parse_event`` variations are NOT covered here — each hub profile
 has its own ``test_bridges.py`` cases for that. This file pins the engine.
@@ -41,15 +42,26 @@ def _load_scenarios():
 
 def _identity_parse_event(event: dict) -> "EventResult | None":
     t = event.get("type")
+    sid = event.get("session_id")
+    session_id = sid if isinstance(sid, str) else None
     if t == "partial":
-        return EventResult(partial_text=event.get("text", ""))
-    if t == "text":
-        return EventResult(final_text=event.get("text", ""))
-    if t == "session":
-        sid = event.get("id")
-        return EventResult(session_id=sid) if isinstance(sid, str) else None
+        return EventResult(
+            partial_text=event.get("text", "") if isinstance(event.get("text"), str) else "",
+            session_id=session_id,
+        )
+    if t == "result":
+        kwargs: dict = {}
+        if session_id is not None:
+            kwargs["session_id"] = session_id
+        if "text" in event:
+            text = event.get("text")
+            kwargs["final_text"] = text if isinstance(text, str) else ""
+        return EventResult(**kwargs) if kwargs else None
     if t == "error":
-        return EventResult(error=event.get("message", ""))
+        return EventResult(
+            error=event.get("message", "") if isinstance(event.get("message"), str) else "",
+            session_id=session_id,
+        )
     return None
 
 

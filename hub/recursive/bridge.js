@@ -2,7 +2,7 @@
 'use strict';
 /**
  * AgentProc bridge for the `recursive` CLI (self-improving Rust coding agent,
- * wire 0.3).
+ * wire 0.4).
  *
  * Parity implementation of hub/recursive/bridge.py. See that file for the
  * full design rationale; this file mirrors it in behaviour.
@@ -13,7 +13,7 @@
  *
  * The bridge always passes `--stream` and always emits {"type":"partial"}
  * events; the runner forwards them only when the profile's streaming is true.
- * A single {"type":"text"} event with the assembled reply is emitted at the
+ * A single {"type":"result"} event with the assembled reply is emitted at the
  * end so the reply body is populated regardless of streaming mode.
  */
 
@@ -42,20 +42,22 @@ function emitObj(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-function emitSession(sessionId) {
-  emitObj({ type: 'session', id: sessionId });
+function emitPartial(text, sessionId) {
+  const obj = { type: 'partial', text };
+  if (sessionId) obj.session_id = sessionId;
+  emitObj(obj);
 }
 
-function emitPartial(text) {
-  emitObj({ type: 'partial', text });
+function emitResult(text, sessionId) {
+  const obj = { type: 'result', text };
+  if (sessionId) obj.session_id = sessionId;
+  emitObj(obj);
 }
 
-function emitText(text) {
-  emitObj({ type: 'text', text });
-}
-
-function emitError(text) {
-  emitObj({ type: 'error', message: text });
+function emitError(text, sessionId) {
+  const obj = { type: 'error', message: text };
+  if (sessionId) obj.session_id = sessionId;
+  emitObj(obj);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,15 +193,11 @@ async function main() {
     ? buildResumeArgs(resumeDir, message)
     : buildRunArgs(message);
 
-  // Emit the session id FIRST so the runner captures it even if recursive
-  // later fails to produce any output.
-  emitSession(sid);
-
   let child;
   try {
     child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
-    emitError(`${CLI_NAME} CLI not found. ${INSTALL_HINT}`);
+    emitError(`${CLI_NAME} CLI not found. ${INSTALL_HINT}`, sid);
     return 1;
   }
 
@@ -249,7 +247,7 @@ async function main() {
           }
           stepBuffers.get(step).push(text);
         }
-        emitPartial(text);
+        emitPartial(text, sid);
         return;
       }
 
@@ -267,7 +265,7 @@ async function main() {
           }
           stepBuffers.get(step).push(text);
         }
-        emitPartial(text);
+        emitPartial(text, sid);
         return;
       }
 
@@ -301,21 +299,21 @@ async function main() {
       }
 
       if (errorMessage) {
-        emitError(errorMessage);
+        emitError(errorMessage, sid);
         return resolve(1);
       }
       if (code !== 0 && !replyText) {
         let msg = `${CLI_NAME} exited with ${code}`;
         const tail = stderrOutput.trim();
         if (tail) msg += `: ${tail.slice(0, 500)}`;
-        emitError(msg);
+        emitError(msg, sid);
         return resolve(1);
       }
       if (!replyText) {
-        emitError(`${CLI_NAME} produced no reply text`);
+        emitError(`${CLI_NAME} produced no reply text`, sid);
         return resolve(1);
       }
-      emitText(replyText);
+      emitResult(replyText, sid);
       resolve(0);
     });
   });

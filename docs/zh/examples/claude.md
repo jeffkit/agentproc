@@ -15,9 +15,8 @@ claude CLI
   │  stream-json 事件
   ▼
 claude_bridge.py / .js
-  │  {"type":"partial","text":"分块内容..."}
-  │  {"type":"session","id":"<uuid>"}
-  │  {"type":"text","text":"<最终回复>"}
+  │  {"type":"partial","text":"chunk...","session_id":"<uuid>"}
+  │  {"type":"result","text":"<final reply>","session_id":"<uuid>"}
   ▼
 Bridge → 用户
 ```
@@ -58,14 +57,23 @@ for line in proc.stdout:
     except json.JSONDecodeError:
         continue
 
-    if event.get("type") == "assistant":
+    if event.get("type") == "system" and event.get("subtype") == "init":
+        sid = event.get("session_id")
+        if isinstance(sid, str) and sid:
+            found_session_id = sid
+    elif event.get("type") == "assistant":
         text = "".join(b.get("text", "") for b in (event.get("message") or {}).get("content", [])
                        if b.get("type") == "text")
         if text:
-            emit({"type": "partial", "text": text})
+            partial = {"type": "partial", "text": text}
+            if found_session_id:
+                partial["session_id"] = found_session_id
+            emit(partial)
             last_partial = text
     elif event.get("type") == "result":
-        found_session_id = event.get("session_id")
+        sid = event.get("session_id")
+        if isinstance(sid, str) and sid:
+            found_session_id = sid
         if event.get("is_error"):
             error_message = event.get("result", "claude reported an error")
         else:
@@ -76,9 +84,10 @@ for line in proc.stdout:
 proc.wait()
 
 if error_message:
+    err = {"type": "error", "message": error_message}
     if found_session_id:
-        emit({"type": "session", "id": found_session_id})
-    emit({"type": "error", "message": error_message})
+        err["session_id"] = found_session_id
+    emit(err)
     sys.exit(1)
 
 if proc.returncode != 0 and not found_session_id:
@@ -86,15 +95,15 @@ if proc.returncode != 0 and not found_session_id:
     emit({"type": "error", "message": f"claude exited with {proc.returncode}: {stderr[:500]}"})
     sys.exit(1)
 
-if found_session_id:
-    emit({"type": "session", "id": found_session_id})
 reply = last_final if last_final is not None else last_partial
-if reply:
-    emit({"type": "text", "text": reply})
+out = {"type": "result", "text": reply or ""}
+if found_session_id:
+    out["session_id"] = found_session_id
+emit(out)
 sys.exit(0)
 ```
 
-Profile YAML：
+Profile YAML:
 
 ```yaml
 command: python3
@@ -149,12 +158,19 @@ function emit(obj) {
     let event;
     try { event = JSON.parse(line); } catch { return; }
 
-    if (event.type === 'assistant') {
+    if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
+      foundSessionId = event.session_id;
+    } else if (event.type === 'assistant') {
       const text = (event.message?.content || [])
         .filter(b => b.type === 'text').map(b => b.text).join('');
-      if (text) { emit({ type: 'partial', text }); lastPartial = text; }
+      if (text) {
+        const partial = { type: 'partial', text };
+        if (foundSessionId) partial.session_id = foundSessionId;
+        emit(partial);
+        lastPartial = text;
+      }
     } else if (event.type === 'result') {
-      foundSessionId = event.session_id;
+      if (event.session_id) foundSessionId = event.session_id;
       if (event.is_error) errorMessage = event.result || 'claude reported an error';
       else { const rt = event.result || ''; if (rt) lastFinal = rt; }
     }
@@ -162,23 +178,25 @@ function emit(obj) {
 
   child.on('close', code => {
     if (errorMessage) {
-      if (foundSessionId) emit({ type: 'session', id: foundSessionId });
-      emit({ type: 'error', message: errorMessage });
+      const err = { type: 'error', message: errorMessage };
+      if (foundSessionId) err.session_id = foundSessionId;
+      emit(err);
       process.exit(1);
     }
     if (code !== 0 && !foundSessionId) {
       emit({ type: 'error', message: `claude exited with ${code}: ${stderrBuf.trim().slice(0, 500)}` });
       process.exit(1);
     }
-    if (foundSessionId) emit({ type: 'session', id: foundSessionId });
     const reply = (lastFinal !== null) ? lastFinal : lastPartial;
-    if (reply) emit({ type: 'text', text: reply });
+    const out = { type: 'result', text: reply || '' };
+    if (foundSessionId) out.session_id = foundSessionId;
+    emit(out);
     process.exit(0);
   });
 })();
 ```
 
-Profile YAML：
+Profile YAML:
 
 ```yaml
 command: node
@@ -190,9 +208,9 @@ streaming: true
 
 ## 本地测试
 
-像 runner 那样驱动 bridge——把 turn 对象 pipe 给 stdin：
+用与 runner 相同的方式驱动 bridge——把 turn 对象写入 stdin：
 
 ```bash
-echo '{"type":"turn","message":"你好","session_id":"","from_user":"test","protocol_version":"0.3"}' \
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' \
   | python3 ./claude_bridge.py
 ```

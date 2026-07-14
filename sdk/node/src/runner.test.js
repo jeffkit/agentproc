@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Tests for runner.js — the AgentProc canonical bridge implementation (wire 0.3).
+ * Tests for runner.js — the AgentProc canonical bridge implementation (wire 0.4).
  *
  * Run with: `node --test src/runner.test.js`
  *
@@ -10,9 +10,11 @@
  *   2. run() end-to-end tests: spawn a tiny bash/node helper script that emits
  *      NDJSON events on stdout, assert the runner classifies them correctly.
  *
- * Wire 0.3: every agent stdout line is a JSON object (an NDJSON event); the
+ * Wire 0.4: every agent stdout line is a JSON object (an NDJSON event); the
  * per-turn request travels on stdin as a {"type":"turn",...} object (no
  * AGENT_* env vars). `command` is always argv[0] and is never split.
+ * Session continuity is an optional `session_id` field (first-wins); terminal
+ * body is a single `{"type":"result"}`.
  */
 
 const { test, describe } = require('node:test');
@@ -39,16 +41,11 @@ const {
 // ---------------------------------------------------------------------------
 
 describe('classifyLine', () => {
-  test('identifies {"type":"session"}', () => {
-    assert.deepStrictEqual(classifyLine('{"type":"session","id":"abc-123"}'), { kind: 'session', value: 'abc-123' });
-  });
-
-  test('session missing id → empty string', () => {
-    assert.deepStrictEqual(classifyLine('{"type":"session"}'), { kind: 'session', value: '' });
-  });
-
-  test('session non-string id → empty string', () => {
-    assert.deepStrictEqual(classifyLine('{"type":"session","id":123}'), { kind: 'session', value: '' });
+  test('legacy {"type":"session"} → malformed', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"session","id":"abc-123"}'),
+      { kind: 'malformed', value: '{"type":"session","id":"abc-123"}' },
+    );
   });
 
   test('identifies {"type":"partial"}', () => {
@@ -71,12 +68,40 @@ describe('classifyLine', () => {
     assert.deepStrictEqual(classifyLine('{"type":"partial","text":"y","role":42}'), { kind: 'partial', value: 'y' });
   });
 
-  test('identifies {"type":"text"}', () => {
-    assert.deepStrictEqual(classifyLine('{"type":"text","text":"hello world"}'), { kind: 'text', value: 'hello world' });
+  test('partial with session_id carries sessionId', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"partial","text":"x","session_id":"s1"}'),
+      { kind: 'partial', value: 'x', session_id: 's1' },
+    );
+  });
+
+  test('identifies {"type":"result"}', () => {
+    assert.deepStrictEqual(classifyLine('{"type":"result","text":"hello world"}'), { kind: 'result', value: 'hello world' });
+  });
+
+  test('result with session_id carries sessionId', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"result","text":"ok","session_id":"abc"}'),
+      { kind: 'result', value: 'ok', session_id: 'abc' },
+    );
+  });
+
+  test('legacy {"type":"text"} → malformed', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"text","text":"hello world"}'),
+      { kind: 'malformed', value: '{"type":"text","text":"hello world"}' },
+    );
   });
 
   test('identifies {"type":"error"}', () => {
     assert.deepStrictEqual(classifyLine('{"type":"error","message":"rate limited"}'), { kind: 'error', value: 'rate limited' });
+  });
+
+  test('error with session_id carries sessionId', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"error","message":"boom","session_id":"s-err"}'),
+      { kind: 'error', value: 'boom', session_id: 's-err' },
+    );
   });
 
   test('identifies {"type":"permission_request"}', () => {
@@ -386,8 +411,8 @@ function nodeProfile(script) {
 }
 
 describe('run() — end-to-end', () => {
-  test('simple text event → reply', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho \'{"type":"text","text":"hello"}\'\n');
+  test('simple result event → reply', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\necho \'{"type":"result","text":"hello"}\'\n');
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.reply, 'hello');
     assert.strictEqual(r.sessionId, '');
@@ -395,24 +420,25 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.exitCode, 0);
   });
 
-  test('session last wins', async () => {
+  test('session_id first-wins (conflicting later ignored)', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo \'{"type":"session","id":"first"}\'\n' +
-      'echo \'{"type":"session","id":"second"}\'\n' +
-      'echo \'{"type":"text","text":"done"}\'\n'
+      'echo \'{"type":"result","text":"done","session_id":"first"}\'\n' +
+      'echo \'{"type":"result","text":"ignored","session_id":"second"}\'\n'
     );
-    const r = await run({ command: agent }, { message: 'hi' });
-    assert.strictEqual(r.sessionId, 'second');
+    const warnings = [];
+    const r = await run({ command: agent }, { message: 'hi', onStderr: (s) => warnings.push(s) });
+    assert.strictEqual(r.sessionId, 'first');
     assert.strictEqual(r.reply, 'done');
+    assert.ok(warnings.some((w) => w.includes('conflicting session_id') || w.includes('subsequent')));
   });
 
-  test('partial triggers onPartial callback', async () => {
+  test('partial triggers onPartial; reply empty when partials forwarded', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'echo \'{"type":"partial","text":"chunk1"}\'\n' +
       'echo \'{"type":"partial","text":"chunk2"}\'\n' +
-      'echo \'{"type":"text","text":"final"}\'\n'
+      'echo \'{"type":"result","text":"final"}\'\n'
     );
     const partials = [];
     const r = await run(
@@ -420,25 +446,26 @@ describe('run() — end-to-end', () => {
       { message: 'hi', onPartial: (t) => partials.push(t) },
     );
     assert.deepStrictEqual(partials, ['chunk1', 'chunk2']);
-    assert.strictEqual(r.reply, 'final');
+    // Streaming + partials forwarded → do not append result.text
+    assert.strictEqual(r.reply, '');
   });
 
   test('partial role is passed to onPartial', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'echo \'{"type":"partial","text":"thinking...","role":"thinking"}\'\n' +
-      'echo \'{"type":"text","text":"ok"}\'\n'
+      'echo \'{"type":"result","text":"ok"}\'\n'
     );
     const seen = [];
     await run({ command: agent }, { message: 'hi', onPartial: (t, role) => seen.push({ t, role }) });
     assert.deepStrictEqual(seen, [{ t: 'thinking...', role: 'thinking' }]);
   });
 
-  test('streaming=false → onPartial NOT called, text still captured', async () => {
+  test('streaming=false → onPartial NOT called, result.text is reply', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'echo \'{"type":"partial","text":"chunk1"}\'\n' +
-      'echo \'{"type":"text","text":"final"}\'\n'
+      'echo \'{"type":"result","text":"final"}\'\n'
     );
     const partials = [];
     const r = await run(
@@ -472,21 +499,21 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.exitCode, 1);
   });
 
-  test('multiple text events concatenate with no separator', async () => {
+  test('second result is ignored (at most one)', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo \'{"type":"text","text":"a"}\'\n' +
-      'echo \'{"type":"text","text":"b"}\'\n' +
-      'echo \'{"type":"text","text":"c"}\'\n'
+      'echo \'{"type":"result","text":"a"}\'\n' +
+      'echo \'{"type":"result","text":"b"}\'\n' +
+      'echo \'{"type":"result","text":"c"}\'\n'
     );
     const r = await run({ command: agent }, { message: 'hi' });
-    assert.strictEqual(r.reply, 'abc');
+    assert.strictEqual(r.reply, 'a');
   });
 
-  test('text event preserves embedded newlines', async () => {
+  test('result event preserves embedded newlines', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      "echo '{\"type\":\"text\",\"text\":\"line 1\\nline 2\\nline 3\"}'\n"
+      "echo '{\"type\":\"result\",\"text\":\"line 1\\nline 2\\nline 3\"}'\n"
     );
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.reply, 'line 1\nline 2\nline 3');
@@ -495,9 +522,10 @@ describe('run() — end-to-end', () => {
   test('malformed stdout lines are ignored, never appended to reply', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo " AGENT_SESSION:foo"\n' +   // plain text → malformed (leading space irrelevant)
+      'echo " AGENT_SESSION:foo"\n' +   // plain text → malformed
       'echo "not json"\n' +             // malformed
-      'echo \'{"type":"text","text":"real reply"}\'\n'
+      'echo \'{"type":"session","id":"old"}\'\n' +  // legacy → malformed
+      'echo \'{"type":"result","text":"real reply"}\'\n'
     );
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.sessionId, '');
@@ -510,12 +538,12 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.exitCode, 3);
   });
 
-  test('wire 0.3: AGENT_* env vars are NOT injected', async () => {
+  test('wire 0.4: AGENT_* env vars are NOT injected', async () => {
     // The per-turn request travels on stdin, not env. An agent reading
     // $AGENT_MESSAGE must see it unset.
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"m=<${AGENT_MESSAGE:-unset}>\\"}"\n'
+      'echo "{\\"type\\":\\"result\\",\\"text\\":\\"m=<${AGENT_MESSAGE:-unset}>\\"}"\n'
     );
     const r = await run({ command: agent }, { message: 'payload' });
     assert.strictEqual(r.reply, 'm=<unset>');
@@ -526,7 +554,7 @@ describe('run() — end-to-end', () => {
       "const fs=require('fs');\n" +
       "const line=fs.readFileSync(0,'utf8').split('\\n')[0];\n" +
       "const t=JSON.parse(line);\n" +
-      "const out={type:'text',text:['msg='+t.message,'sid='+t.session_id,'sname='+t.session_name,'from='+t.from_user,'pv='+t.protocol_version].join('|')};\n" +
+      "const out={type:'result',text:['msg='+t.message,'sid='+t.session_id,'sname='+t.session_name,'from='+t.from_user,'pv='+t.protocol_version].join('|')};\n" +
       "process.stdout.write(JSON.stringify(out)+'\\n');\n"
     );
     const r = await run(
@@ -542,7 +570,7 @@ describe('run() — end-to-end', () => {
       "const line=fs.readFileSync(0,'utf8').split('\\n')[0];\n" +
       "const t=JSON.parse(line);\n" +
       "const atts=(t.attachments||[]).map(a=>a.kind+':'+a.url).join(',');\n" +
-      "process.stdout.write(JSON.stringify({type:'text',text:'atts='+atts})+'\\n');\n"
+      "process.stdout.write(JSON.stringify({type:'result',text:'atts='+atts})+'\\n');\n"
     );
     const r = await run(
       nodeProfile(agent),
@@ -558,7 +586,7 @@ describe('run() — end-to-end', () => {
   });
 
   test('{{MESSAGE}} placeholder in args', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"text\\",\\"text\\":\\"args:$1\\"}"\n');
+    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"result\\",\\"text\\":\\"args:$1\\"}"\n');
     const r = await run(
       { command: agent, args: ['{{MESSAGE}}'] },
       { message: 'hello' },
@@ -567,7 +595,7 @@ describe('run() — end-to-end', () => {
   });
 
   test('profile.env injects env vars with ${VAR} expansion', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"text\\",\\"text\\":\\"MY_KEY=$MY_KEY\\"}"\n');
+    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"result\\",\\"text\\":\\"MY_KEY=$MY_KEY\\"}"\n');
     const r = await run(
       { command: agent, env: { MY_KEY: '${HOME}' } },
       { message: 'hi' },
@@ -576,7 +604,7 @@ describe('run() — end-to-end', () => {
   });
 
   test('extraEnv from options is applied', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"text\\",\\"text\\":\\"x=$X\\"}"\n');
+    const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"result\\",\\"text\\":\\"x=$X\\"}"\n');
     const r = await run(
       { command: agent },
       { message: 'hi', extraEnv: { X: 'extra' } },
@@ -607,7 +635,7 @@ describe('run() — end-to-end', () => {
     process.env.SECRET_KEY = 'top-secret';
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"ALLOWED=$ALLOWED_KEY SECRET=$SECRET_KEY\\"}"\n',
+      'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ALLOWED=$ALLOWED_KEY SECRET=$SECRET_KEY\\"}"\n',
     );
     try {
       const warnings = [];
@@ -637,7 +665,7 @@ describe('run() — end-to-end', () => {
     process.env.AGENTPROC_SECURE_DEFAULT_LEAK = 'should-not-leak';
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"DB=${BRIDGE_DB_PASSWORD:-unset} LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset} PATH_SET=${PATH:+yes}\\"}"\n',
+      'echo "{\\"type\\":\\"result\\",\\"text\\":\\"DB=${BRIDGE_DB_PASSWORD:-unset} LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset} PATH_SET=${PATH:+yes}\\"}"\n',
     );
     try {
       const r = await run(
@@ -657,25 +685,23 @@ describe('run() — end-to-end', () => {
     }
   });
 
-  test('invalid session id (path separator) ignored, preserves previous valid id', async () => {
+  test('invalid session_id (path separator) ignored, preserves previous valid id', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo \'{"type":"session","id":"valid-id-1"}\'\n' +
-      'echo \'{"type":"session","id":"bad/path"}\'\n' +
-      'echo \'{"type":"text","text":"done"}\'\n',
+      'echo \'{"type":"partial","text":"x","session_id":"valid-id-1"}\'\n' +
+      'echo \'{"type":"result","text":"done","session_id":"bad/path"}\'\n',
     );
     const warnings = [];
-    const r = await run({ command: agent }, { message: 'hi', onStderr: (s) => warnings.push(s) });
+    const r = await run({ command: agent }, { message: 'hi', onPartial: () => {}, onStderr: (s) => warnings.push(s) });
     assert.strictEqual(r.sessionId, 'valid-id-1');
-    assert.strictEqual(r.reply, 'done');
+    assert.strictEqual(r.reply, ''); // partials forwarded
     assert.ok(warnings.some((w) => w.includes('invalid') && w.includes('session id')));
   });
 
-  test('invalid session id when no previous → session stays empty', async () => {
+  test('invalid session_id when no previous → session stays empty', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
-      'echo \'{"type":"session","id":"bad/path"}\'\n' +
-      'echo \'{"type":"text","text":"done"}\'\n',
+      'echo \'{"type":"result","text":"done","session_id":"bad/path"}\'\n',
     );
     const r = await run({ command: agent }, { message: 'hi' });
     assert.strictEqual(r.sessionId, '');
@@ -699,17 +725,12 @@ describe('run() — end-to-end', () => {
   });
 
   test('permission:true — turn carries permission:true, request → allow → response on stdin', async () => {
-    // The agent reads the turn line (discards it), emits a permission_request,
-    // then reads the permission_response line the runner writes back. We grep
-    // the response (it contains quotes, so we must not embed it raw into JSON)
-    // and emit a fixed text event reporting what we saw.
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'read -r turn\n' +
-      'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{"command":"true"}}\'\n' +
+      'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{"command":"true"},"session_id":"sess-perm-1"}\'\n' +
       'IFS= read -r resp\n' +
-      "if echo \"$resp\" | grep -q '\"behavior\":\"allow\"'; then echo '{\"type\":\"text\",\"text\":\"ALLOWED\"}'; fi\n" +
-      'echo \'{"type":"session","id":"sess-perm-1"}\'\n'
+      "if echo \"$resp\" | grep -q '\"behavior\":\"allow\"'; then echo '{\"type\":\"result\",\"text\":\"ALLOWED\",\"session_id\":\"sess-perm-1\"}'; fi\n"
     );
     const seen = [];
     const r = await run(
@@ -734,7 +755,7 @@ describe('run() — end-to-end', () => {
       '#!/usr/bin/env bash\n' +
       'read -r turn\n' +   // consume turn; runner closes stdin after (permission off)
       'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{}}\'\n' +
-      'echo \'{"type":"text","text":"done"}\'\n'
+      'echo \'{"type":"result","text":"done"}\'\n'
     );
     const stderr = [];
     let called = false;
@@ -752,13 +773,16 @@ describe('run() — end-to-end', () => {
   });
 
   test('permission deny is written when onPermission returns deny', async () => {
+    // Emit a single result whose text encodes both checks (0.4: at most one result).
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'read -r turn\n' +
       'echo \'{"type":"permission_request","request_id":"r2","tool_name":"Bash","input":{}}\'\n' +
       'IFS= read -r resp\n' +
-      "if echo \"$resp\" | grep -q '\"behavior\":\"deny\"'; then echo '{\"type\":\"text\",\"text\":\"DENIED\"}'; fi\n" +
-      "if echo \"$resp\" | grep -q 'not allowed'; then echo '{\"type\":\"text\",\"text\":\"HASMSG\"}'; fi\n"
+      "deny=0; msg=0\n" +
+      "echo \"$resp\" | grep -q '\"behavior\":\"deny\"' && deny=1\n" +
+      "echo \"$resp\" | grep -q 'not allowed' && msg=1\n" +
+      "echo \"{\\\"type\\\":\\\"result\\\",\\\"text\\\":\\\"deny=$deny msg=$msg\\\"}\"\n"
     );
     const r = await run(
       { command: agent, permission: true },
@@ -767,16 +791,11 @@ describe('run() — end-to-end', () => {
         onPermission: () => ({ behavior: 'deny', message: 'not allowed' }),
       },
     );
-    assert.ok(r.reply.includes('DENIED'), `reply: ${r.reply}`);
-    assert.ok(r.reply.includes('HASMSG'), `reply: ${r.reply}`);
+    assert.ok(r.reply.includes('deny=1'), `reply: ${r.reply}`);
+    assert.ok(r.reply.includes('msg=1'), `reply: ${r.reply}`);
   });
 
   test('concurrent permission responses are written in request-arrival order', async () => {
-    // Agent emits two requests back-to-back. onPermission for r1 resolves
-    // SLOWER than r2 (50ms vs 5ms). Without serial chaining, r2's response
-    // would land on stdin before r1's; the agent reads responses in arrival
-    // order and would pair r1's first-read line with r2's response payload.
-    // We assert the first response line matches r1 and the second matches r2.
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
       'read -r turn\n' +
@@ -784,19 +803,15 @@ describe('run() — end-to-end', () => {
       'echo \'{"type":"permission_request","request_id":"r2","tool_name":"Bash","input":{}}\'\n' +
       'IFS= read -r resp1\n' +
       'IFS= read -r resp2\n' +
-      // Report the request_id each response claims, in arrival order.
       'rid1=$(echo "$resp1" | sed -n \'s/.*"request_id":"\\([^"]*\\)".*/\\1/p\')\n' +
       'rid2=$(echo "$resp2" | sed -n \'s/.*"request_id":"\\([^"]*\\)".*/\\1/p\')\n' +
-      'echo "{\\"type\\":\\"text\\",\\"text\\":\\"order=$rid1,$rid2\\"}"\n' +
-      'echo \'{"type":"session","id":"sess-order"}\'\n'
+      'echo "{\\"type\\":\\"result\\",\\"text\\":\\"order=$rid1,$rid2\\",\\"session_id\\":\\"sess-order\\"}"\n'
     );
     const r = await run(
       { command: agent, permission: true },
       {
         message: 'hi',
         onPermission: (req) => {
-          // r1 resolves slower than r2 — without the writeQueue the runner
-          // would write r2's response first.
           const delay = req.request_id === 'r1' ? 50 : 5;
           return new Promise(resolve => {
             setTimeout(() => resolve({ behavior: 'allow' }), delay);
@@ -833,6 +848,6 @@ test('formatPermissionResponse / isValidPermissionRequest', () => {
   assert.ok(!isValidPermissionRequest(null));
 });
 
-test('PROTOCOL_VERSION is "0.3"', () => {
-  assert.strictEqual(PROTOCOL_VERSION, '0.3');
+test('PROTOCOL_VERSION is "0.4"', () => {
+  assert.strictEqual(PROTOCOL_VERSION, '0.4');
 });

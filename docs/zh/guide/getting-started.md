@@ -18,7 +18,7 @@
 # echo_agent.sh —— 从 stdin 读 turn，把消息原样回复
 read -r turn
 message=$(printf '%s' "$turn" | python3 -c 'import json,sys; t=json.loads(sys.stdin.read() or "{}"); print(t.get("message","") if isinstance(t.get("message"),str) else "")')
-python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"你说：'"$message"'"},separators=(",",":"))+"\n")'
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"result","text":"你说：'"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]
@@ -27,7 +27,7 @@ python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"
 import json, sys
 turn = json.loads(sys.stdin.readline() or "{}")
 msg = turn.get("message", "") if isinstance(turn.get("message"), str) else ""
-sys.stdout.write(json.dumps({"type": "text", "text": f"你说：{msg}"}, separators=(",", ":")) + "\n")
+sys.stdout.write(json.dumps({"type": "result", "text": f"你说：{msg}"}, separators=(",", ":")) + "\n")
 ```
 
 ```js [node]
@@ -36,7 +36,7 @@ sys.stdout.write(json.dumps({"type": "text", "text": f"你说：{msg}"}, separat
 const fs = require('node:fs');
 const raw = fs.readFileSync(0, 'utf8');
 const turn = JSON.parse(raw.split('\n')[0] || '{}');
-process.stdout.write(JSON.stringify({ type: 'text', text: `你说：${turn.message || ''}` }) + '\n');
+process.stdout.write(JSON.stringify({ type: 'result', text: `你说：${turn.message || ''}` }) + '\n');
 ```
 
 :::
@@ -59,7 +59,7 @@ agentproc --profile ./myagent.yaml --prompt "你好"
 # → 你说：你好
 ```
 
-NDJSON 事件（`{"type":"partial"}`、`{"type":"session"}`、`{"type":"error"}`）出现在 stderr，回复正文（由 `{"type":"text"}` 事件拼接）出现在 stdout。CLI 的退出码和 bridge 看到的一致：`0` 成功、`1` 错误、`124` 超时。
+NDJSON 事件（`{"type":"partial"}`、`{"type":"result"}`、`{"type":"error"}`；可选 `session_id`）出现在 stderr，回复正文（来自 `{"type":"result"}` / 流式 `partial`）出现在 stdout。CLI 的退出码和 bridge 看到的一致：`0` 成功、`1` 错误、`124` 超时。
 
 <details>
 <summary>不想用 CLI 测试？</summary>
@@ -67,7 +67,7 @@ NDJSON 事件（`{"type":"partial"}`、`{"type":"session"}`、`{"type":"error"}`
 也可以直接把 turn 对象 pipe 给脚本。CLI 内部就是这么做的：
 
 ```bash
-echo '{"type":"turn","message":"你好","session_id":"","from_user":"test","protocol_version":"0.3"}' | bash ./echo_agent.sh
+echo '{"type":"turn","message":"你好","session_id":"","from_user":"test","protocol_version":"0.4"}' | bash ./echo_agent.sh
 ```
 
 调试脚本本身时有用；但端到端行为请优先用上面的 `agentproc --profile ...`。
@@ -94,7 +94,7 @@ if [ -z "$message" ]; then
   echo '{"type":"error","message":"消息不能为空。"}'
   exit 1
 fi
-python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"text","text":"你说：'"$message"'"},separators=(",",":"))+"\n")'
+python3 -c 'import json,sys; sys.stdout.write(json.dumps({"type":"result","text":"你说：'"$message"'"},separators=(",",":"))+"\n")'
 ```
 
 ```python [python]

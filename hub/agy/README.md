@@ -61,14 +61,14 @@ Expected output (on stdout):
 agy ok
 ```
 
-(No `{"type":"session"}` line — see "Session continuity" below.)
+(No `session_id` on events — see "Session continuity" below.)
 
 <details>
 <summary>Drive the bridge script directly (without the CLI)</summary>
 
 ```bash
 cd hub/agy
-echo '{"type":"turn","message":"reply with exactly: agy ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: agy ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 </details>
@@ -83,12 +83,12 @@ bridge.py / bridge.js
 agy CLI
   ↓ plain text reply on stdout (after the turn completes)
 bridge.py / bridge.js
-  ↓ reply body (no {"type":"session"} line, no {"type":"partial"} lines)
+  ↓ reply body (no session_id on events, no {"type":"partial"} lines)
 ```
 
 ## Session continuity
 
-**agy's `--print` mode does not expose a session id on stdout.** The bridge therefore emits no `{"type":"session"}` line. Each AgentProc turn spawns a fresh agy process.
+**agy's `--print` mode does not expose a session id on stdout.** The bridge therefore omits `session_id` on events. Each AgentProc turn spawns a fresh agy process.
 
 If your messaging bridge needs multi-turn context, use the [AgentProc SDK](https://agentproc.dev/sdk/python)'s history helpers (`load_history` / `append_history`) to maintain context in a JSONL file keyed by the messaging bridge's own session id. The [Python SDK history example](https://agentproc.dev/sdk/python#conversation-history) shows the pattern.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.3).
+AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.4).
 
 Default:
     codex exec --json <message>
@@ -35,8 +35,7 @@ from _shared.stream_utils import (  # noqa: E402
     emit,
     emit_error,
     emit_partial,
-    emit_session,
-    emit_text,
+    emit_result,
     main_entry,
     read_turn,
 )
@@ -301,9 +300,9 @@ def _run_permission_mode(turn: dict, env) -> int:
         if result.error:
             error_message = result.error
         if result.partial_text:
-            emit_partial(result.partial_text)
+            emit_partial(result.partial_text, session_id=found_session_id)
             last_partial_text = result.partial_text
-        if result.final_text:
+        if result.final_text is not None:
             last_final_text = result.final_text
 
     code = proc.wait()
@@ -321,9 +320,7 @@ def _run_permission_mode(turn: dict, env) -> int:
     shutil.rmtree(tmp, ignore_errors=True)
 
     if error_message:
-        if found_session_id:
-            emit_session(found_session_id)
-        emit_error(error_message)
+        emit_error(error_message, session_id=found_session_id)
         return 1
     if code != 0 and not found_session_id:
         msg = f"{CLI_NAME} exited with {code}"
@@ -332,11 +329,8 @@ def _run_permission_mode(turn: dict, env) -> int:
             msg += f": {s[:500]}"
         emit_error(msg)
         return 1
-    if found_session_id:
-        emit_session(found_session_id)
     reply_text = last_final_text if last_final_text is not None else last_partial_text
-    if reply_text:
-        emit_text(reply_text)
+    emit_result(reply_text or "", session_id=found_session_id)
     return 0
 
 

@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Tests for agentproc (agent-side SDK entry, wire 0.3).
+ * Tests for agentproc (agent-side SDK entry, wire 0.4).
  *
  * Run with: `node --test src/index.test.js`
  *
@@ -110,17 +110,17 @@ describe('loadHistory / appendHistory', () => {
   });
 });
 
-describe('attachments (wire 0.3)', () => {
+describe('attachments (wire 0.4)', () => {
   test('no parseAttachments / Attachment helpers are exported — attachments live in the turn', () => {
-    // Wire 0.3 carries attachments as `turn.attachments` (read by createProfile
+    // Wire 0.4 carries attachments as `turn.attachments` (read by createProfile
     // from stdin); there is no separate parser helper on the SDK surface.
     assert.strictEqual(SDK.parseAttachments, undefined);
     assert.strictEqual(SDK.Attachment, undefined);
   });
 });
 
-test('PROTOCOL_VERSION is "0.3"', () => {
-  assert.strictEqual(SDK.PROTOCOL_VERSION, '0.3');
+test('PROTOCOL_VERSION is "0.4"', () => {
+  assert.strictEqual(SDK.PROTOCOL_VERSION, '0.4');
 });
 
 // ---------------------------------------------------------------------------
@@ -163,11 +163,11 @@ function runAgent(turn, handlerSrc) {
 }
 
 function turn(extra = {}) {
-  return { type: 'turn', message: 'hi', session_id: '', session_name: 'default', from_user: '', protocol_version: '0.3', ...extra };
+  return { type: 'turn', message: 'hi', session_id: '', session_name: 'default', from_user: '', protocol_version: '0.4', ...extra };
 }
 
 describe('createProfile end-to-end', () => {
-  test('returns a plain string → emitted as a {"type":"text"} event', async () => {
+  test('returns a plain string → emitted as a {"type":"result"} event', async () => {
     const r = await runAgent(
       turn(),
       `(async (sdk) => {
@@ -177,10 +177,10 @@ describe('createProfile end-to-end', () => {
       })`
     );
     assert.strictEqual(r.code, 0, 'stderr=' + r.stderr);
-    assert.ok(r.stdout.includes('{"type":"text","text":"You said: hi"}\n'), 'stdout=' + JSON.stringify(r.stdout));
+    assert.ok(r.stdout.includes('{"type":"result","text":"You said: hi"}\n'), 'stdout=' + JSON.stringify(r.stdout));
   });
 
-  test('returns AgentResult with session_id → session + text events emitted', async () => {
+  test('returns AgentResult with sessionId → result event with session_id field', async () => {
     const r = await runAgent(
       turn(),
       `(async (sdk) => {
@@ -190,8 +190,10 @@ describe('createProfile end-to-end', () => {
       })`
     );
     assert.strictEqual(r.code, 0, 'stderr=' + r.stderr);
-    assert.ok(r.stdout.includes('{"type":"session","id":"sess-123"}\n'), 'stdout=' + JSON.stringify(r.stdout));
-    assert.ok(r.stdout.includes('{"type":"text","text":"ok"}\n'));
+    assert.ok(
+      r.stdout.includes('{"type":"result","text":"ok","session_id":"sess-123"}\n'),
+      'stdout=' + JSON.stringify(r.stdout),
+    );
   });
 
   test('sendPartial emits {"type":"partial"} events', async () => {
@@ -208,7 +210,10 @@ describe('createProfile end-to-end', () => {
     assert.strictEqual(r.code, 0, 'stderr=' + r.stderr);
     assert.ok(r.stdout.includes('{"type":"partial","text":"chunk 1"}\n'), 'stdout=' + JSON.stringify(r.stdout));
     assert.ok(r.stdout.includes('{"type":"partial","text":"chunk 2"}\n'));
-    assert.ok(r.stdout.includes('{"type":"session","id":"s1"}\n'));
+    assert.ok(
+      r.stdout.includes('{"type":"result","text":"","session_id":"s1"}\n'),
+      'stdout=' + JSON.stringify(r.stdout),
+    );
   });
 
   test('sendPartial with role emits the role field', async () => {
@@ -301,16 +306,16 @@ describe('createProfile end-to-end', () => {
       })`
     );
     assert.strictEqual(r.code, 0, 'stderr=' + r.stderr);
-    // The returned string is wrapped in a {"type":"text"} event; parse it out.
-    const line = r.stdout.split('\n').find(l => l.includes('"type":"text"'));
-    assert.ok(line, 'no text event in stdout: ' + r.stdout);
+    // The returned string is wrapped in a {"type":"result"} event; parse it out.
+    const line = r.stdout.split('\n').find(l => l.includes('"type":"result"'));
+    assert.ok(line, 'no result event in stdout: ' + r.stdout);
     const parsed = JSON.parse(line);
     const ctx = JSON.parse(parsed.text);
     assert.strictEqual(ctx.msg, 'hi');
     assert.strictEqual(ctx.sid, 'prev-sess');
     assert.strictEqual(ctx.sname, 'work');
     assert.strictEqual(ctx.from, 'u123');
-    assert.strictEqual(ctx.pv, '0.3');
+    assert.strictEqual(ctx.pv, '0.4');
     assert.deepStrictEqual(ctx.atts, ['image:https://x/img.png']);
   });
 
@@ -330,7 +335,7 @@ describe('createProfile end-to-end', () => {
     assert.ok(!r.stdout.includes('undefined'));
   });
 
-  test('default protocolVersion is 0.3', async () => {
+  test('default protocolVersion is 0.4', async () => {
     const r = await runAgent(
       turn(),
       `(async (sdk) => {
@@ -340,6 +345,6 @@ describe('createProfile end-to-end', () => {
       })`
     );
     assert.strictEqual(r.code, 0);
-    assert.ok(r.stdout.includes('pv=0.3'));
+    assert.ok(r.stdout.includes('pv=0.4'));
   });
 });

@@ -1,21 +1,28 @@
 {
-  "_comment": "Multi-line stdout NDJSON scenarios for the bridge-side runner. Each scenario feeds the listed lines (in order) as the agent's stdout, then asserts the runner's observable outputs: final reply (assembled from {type:text} events), session_id, error, exit_code, and (when streaming) the list of partial chunks delivered via on_partial. In wire 0.3 every line is a JSON event; non-event lines are malformed and ignored (logged, never appended to the reply). Both the Python runner.run() and Node runner.run() MUST produce the listed result. Add scenarios here when a spec change touches multi-line interaction semantics (last-wins, error-mid-stream, session-with-error, invalid-session handling, etc.); both SDK test suites pick this file up automatically.",
+  "_comment": "Multi-line stdout NDJSON scenarios for the bridge-side runner (wire 0.4). Each scenario feeds the listed lines as the agent's stdout, then asserts reply (from result / streaming rules), session_id (first non-empty), error, exit_code, and partials. Both Python and Node runners MUST match. session/text event types are unknown in 0.4 and are ignored as malformed.",
   "scenarios": [
     {
-      "name": "session last-wins (two session events)",
-      "lines": ["{\"type\":\"session\",\"id\":\"first\"}", "{\"type\":\"session\",\"id\":\"second\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
+      "name": "session_id first-non-empty wins (conflicting later ignored)",
+      "lines": [
+        "{\"type\":\"result\",\"text\":\"done\",\"session_id\":\"first\"}",
+        "{\"type\":\"result\",\"text\":\"ignored\",\"session_id\":\"second\"}"
+      ],
       "streaming": true,
-      "expect": {"reply": "done", "session_id": "second", "error": "", "exit_code": 0, "partials": []}
+      "expect": {"reply": "done", "session_id": "first", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "session discovered at end (common CLI-wrapping case)",
-      "lines": ["{\"type\":\"partial\",\"text\":\"Here is the first part. \"}", "{\"type\":\"partial\",\"text\":\"And the second.\"}", "{\"type\":\"session\",\"id\":\"cli-sess-9f3a2c1e\"}"],
+      "name": "session_id discovered late on result after partials without id",
+      "lines": [
+        "{\"type\":\"partial\",\"text\":\"Here is the first part. \"}",
+        "{\"type\":\"partial\",\"text\":\"And the second.\"}",
+        "{\"type\":\"result\",\"text\":\"\",\"session_id\":\"cli-sess-9f3a2c1e\"}"
+      ],
       "streaming": true,
       "expect": {"reply": "", "session_id": "cli-sess-9f3a2c1e", "error": "", "exit_code": 0, "partials": ["Here is the first part. ", "And the second."]}
     },
     {
-      "name": "one-shot with session declared up front",
-      "lines": ["{\"type\":\"session\",\"id\":\"f47ac10b-58cc-4372\"}", "{\"type\":\"text\",\"text\":\"Here is the complete answer.\"}"],
+      "name": "one-shot result with session_id",
+      "lines": ["{\"type\":\"result\",\"text\":\"Here is the complete answer.\",\"session_id\":\"f47ac10b-58cc-4372\"}"],
       "streaming": true,
       "expect": {"reply": "Here is the complete answer.", "session_id": "f47ac10b-58cc-4372", "error": "", "exit_code": 0, "partials": []}
     },
@@ -26,8 +33,8 @@
       "expect": {"reply": "", "session_id": "", "error": "Upstream API rate limited. Try again in 60s.", "exit_code": 1, "partials": ["Let me look that up... "]}
     },
     {
-      "name": "session preserved when error follows",
-      "lines": ["{\"type\":\"session\",\"id\":\"sess-before-error\"}", "{\"type\":\"error\",\"message\":\"turn failed\"}"],
+      "name": "session_id on error is persisted",
+      "lines": ["{\"type\":\"error\",\"message\":\"turn failed\",\"session_id\":\"sess-before-error\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "sess-before-error", "error": "turn failed", "exit_code": 1, "partials": []}
     },
@@ -38,28 +45,28 @@
       "expect": {"reply": "", "session_id": "", "error": "boom", "exit_code": 1, "partials": ["before"]}
     },
     {
-      "name": "text after error is discarded",
-      "lines": ["{\"type\":\"error\",\"message\":\"boom\"}", "{\"type\":\"text\",\"text\":\"should not appear\"}"],
+      "name": "result after error is discarded",
+      "lines": ["{\"type\":\"error\",\"message\":\"boom\"}", "{\"type\":\"result\",\"text\":\"should not appear\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "", "error": "boom", "exit_code": 1, "partials": []}
     },
     {
-      "name": "session after error still updates id (last-wins)",
-      "lines": ["{\"type\":\"error\",\"message\":\"boom\"}", "{\"type\":\"session\",\"id\":\"learned-after-error\"}"],
+      "name": "session_id on error after partials without id still captured",
+      "lines": ["{\"type\":\"partial\",\"text\":\"x\"}", "{\"type\":\"error\",\"message\":\"boom\",\"session_id\":\"learned-after-error\"}"],
       "streaming": true,
-      "expect": {"reply": "", "session_id": "learned-after-error", "error": "boom", "exit_code": 1, "partials": []}
+      "expect": {"reply": "", "session_id": "learned-after-error", "error": "boom", "exit_code": 1, "partials": ["x"]}
     },
     {
-      "name": "text event carries newlines verbatim",
-      "lines": ["{\"type\":\"text\",\"text\":\"line 1\\nline 2\\nline 3\"}"],
+      "name": "result text carries newlines verbatim",
+      "lines": ["{\"type\":\"result\",\"text\":\"line 1\\nline 2\\nline 3\"}"],
       "streaming": true,
       "expect": {"reply": "line 1\nline 2\nline 3", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "multiple text events concatenate with no separator",
-      "lines": ["{\"type\":\"text\",\"text\":\"a\"}", "{\"type\":\"text\",\"text\":\"b\"}", "{\"type\":\"text\",\"text\":\"c\"}"],
+      "name": "second result is ignored (at most one)",
+      "lines": ["{\"type\":\"result\",\"text\":\"a\"}", "{\"type\":\"result\",\"text\":\"b\"}"],
       "streaming": true,
-      "expect": {"reply": "abc", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+      "expect": {"reply": "a", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "empty output → empty reply, success",
@@ -68,52 +75,70 @@
       "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "streaming=false ignores partials, keeps text",
-      "lines": ["{\"type\":\"partial\",\"text\":\"ignored\"}", "{\"type\":\"session\",\"id\":\"abc-123\"}", "{\"type\":\"text\",\"text\":\"final body\"}"],
+      "name": "streaming=false ignores partials, uses result",
+      "lines": ["{\"type\":\"partial\",\"text\":\"ignored\"}", "{\"type\":\"result\",\"text\":\"final body\",\"session_id\":\"abc-123\"}"],
       "streaming": false,
       "expect": {"reply": "final body", "session_id": "abc-123", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "invalid session id (path separator) is ignored",
-      "lines": ["{\"type\":\"session\",\"id\":\"bad/path\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
+      "name": "invalid session_id (path separator) is ignored",
+      "lines": ["{\"type\":\"result\",\"text\":\"done\",\"session_id\":\"bad/path\"}"],
       "streaming": true,
       "expect": {"reply": "done", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "invalid session id after valid one preserves the valid",
-      "lines": ["{\"type\":\"session\",\"id\":\"valid-1\"}", "{\"type\":\"session\",\"id\":\"bad/path\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
+      "name": "invalid session_id after valid one preserves the valid",
+      "lines": [
+        "{\"type\":\"partial\",\"text\":\"x\",\"session_id\":\"valid-1\"}",
+        "{\"type\":\"result\",\"text\":\"done\",\"session_id\":\"bad/path\"}"
+      ],
       "streaming": true,
-      "expect": {"reply": "done", "session_id": "valid-1", "error": "", "exit_code": 0, "partials": []}
+      "expect": {"reply": "", "session_id": "valid-1", "error": "", "exit_code": 0, "partials": ["x"]}
     },
     {
-      "name": "session id with spaces and colons is valid on the wire",
-      "lines": ["{\"type\":\"session\",\"id\":\"ok: spaced\"}", "{\"type\":\"text\",\"text\":\"done\"}"],
+      "name": "session_id with spaces and colons is valid on the wire",
+      "lines": ["{\"type\":\"result\",\"text\":\"done\",\"session_id\":\"ok: spaced\"}"],
       "streaming": true,
       "expect": {"reply": "done", "session_id": "ok: spaced", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "partial with role streams normally (role is not part of partials)",
-      "lines": ["{\"type\":\"partial\",\"text\":\"thinking...\",\"role\":\"thinking\"}", "{\"type\":\"text\",\"text\":\"answer\"}"],
+      "name": "partial with role streams; empty result text does not duplicate body",
+      "lines": ["{\"type\":\"partial\",\"text\":\"thinking...\",\"role\":\"thinking\"}", "{\"type\":\"result\",\"text\":\"\"}"],
       "streaming": true,
-      "expect": {"reply": "answer", "session_id": "", "error": "", "exit_code": 0, "partials": ["thinking..."]}
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": ["thinking..."]}
     },
     {
-      "name": "malformed lines are ignored, never appended to reply",
-      "lines": ["hello world", "not json", "{\"type\":\"text\",\"text\":\"ok\"}"],
+      "name": "streaming with partials: non-empty result.text is not appended to reply",
+      "lines": [
+        "{\"type\":\"partial\",\"text\":\"hello\"}",
+        "{\"type\":\"result\",\"text\":\"hello\"}"
+      ],
+      "streaming": true,
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "partials": ["hello"]}
+    },
+    {
+      "name": "legacy session/text events are malformed and ignored",
+      "lines": ["{\"type\":\"session\",\"id\":\"old\"}", "{\"type\":\"text\",\"text\":\"old body\"}", "{\"type\":\"result\",\"text\":\"ok\"}"],
       "streaming": true,
       "expect": {"reply": "ok", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "non-streaming text truncated at max_reply_chars",
+      "name": "malformed lines are ignored, never appended to reply",
+      "lines": ["hello world", "not json", "{\"type\":\"result\",\"text\":\"ok\"}"],
+      "streaming": true,
+      "expect": {"reply": "ok", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "non-streaming result truncated at max_reply_chars",
       "profile_overrides": {"max_reply_chars": 10},
-      "lines": ["{\"type\":\"text\",\"text\":\"0123456789ABCDEF\"}"],
+      "lines": ["{\"type\":\"result\",\"text\":\"0123456789ABCDEF\"}"],
       "streaming": false,
       "expect": {"reply": "0123456789\n\n…(truncated)", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
       "name": "streaming partials truncated at max_reply_chars",
       "profile_overrides": {"max_reply_chars": 10},
-      "lines": ["{\"type\":\"partial\",\"text\":\"hello \"}", "{\"type\":\"partial\",\"text\":\"world!!\"}", "{\"type\":\"session\",\"id\":\"sess-1\"}"],
+      "lines": ["{\"type\":\"partial\",\"text\":\"hello \"}", "{\"type\":\"partial\",\"text\":\"world!!\"}", "{\"type\":\"result\",\"text\":\"\",\"session_id\":\"sess-1\"}"],
       "streaming": true,
       "expect": {"reply": "", "session_id": "sess-1", "error": "", "exit_code": 0, "partials": ["hello ", "worl", "\n\n…(truncated)"]}
     },
@@ -125,7 +150,7 @@
       "expect": {
         "reply": "", "session_id": "", "error": "", "exit_code": 0,
         "partials_any_of": [["hel", "\n\n…(truncated)"], ["\n\n…(truncated)"]],
-        "_note": "Spec 5.3 leaves it implementation-defined whether a chunk that exceeds the remaining cap is forwarded as a tail-truncated slice (\"hel\") or dropped entirely; either way the truncation notice follows. Both candidates are conformant."
+        "_note": "Spec leaves it implementation-defined whether a chunk that exceeds the remaining cap is forwarded as a tail-truncated slice or dropped entirely."
       }
     }
   ]

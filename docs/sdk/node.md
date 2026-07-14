@@ -16,7 +16,7 @@ createProfile(async (ctx) => {
   // ctx.sessionId         — previous session id (empty = new session)
   // ctx.sessionName       — human-readable session name
   // ctx.fromUser          — sender identifier
-  // ctx.protocolVersion   — protocol version string (e.g. "0.3")
+  // ctx.protocolVersion   — protocol version string (e.g. "0.4")
   // ctx.attachments       — array of {kind, url, ...} objects (empty = none)
   // ctx.permission        — true if the bridge enabled the permission channel
   const reply = await myLLM(ctx.message);
@@ -41,7 +41,7 @@ createProfile(async ({ message, sessionId }) => {
 });
 ```
 
-The SDK emits a `{"type":"session","id":...}` event (then a `{"type":"text"}` event for the reply). The bridge passes the session id back as `sessionId` on the next turn.
+The SDK emits a `{"type":"result","text":...}` event with optional `session_id`. The bridge persists the first non-empty `session_id` and passes it back as `sessionId` on the next turn.
 
 ## Streaming
 
@@ -148,7 +148,7 @@ timeout_secs: 60
 Write the turn object to stdin the way the bridge does:
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | node ./agent.js
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | node ./agent.js
 ```
 
 Useful when debugging the script in isolation.

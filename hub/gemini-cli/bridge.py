@@ -8,13 +8,13 @@ Invokes:
         [--model <model>]
 
 Parses the NDJSON stream and re-emits as AgentProc protocol output:
-    init    → captures session_id (forwarded as {"type":"session"})
+    init    → captures session_id (stamped on later partial/result/error)
     message → text delta or full text → {"type":"partial"}
     error   → {"type":"error"}
     result  → terminal event (status=error → {"type":"error"})
 
-Gemini emits session_id up-front in `init`, so the bridge forwards it
-immediately. The "last wins" rule also tolerates a later session_id.
+Gemini emits session_id up-front in `init`, so subsequent partials can carry
+it. The "last wins" rule also tolerates a later session_id.
 
 Env vars:
     turn.message          User message

@@ -26,5 +26,5 @@ tags: [coding, google, ai]
 notes: |
   The bridge script invokes `gemini -p <message> --output-format stream-json
   --yolo` and re-emits the stream as {"type":"partial"} lines. The session id
-  emitted by gemini's `init` event is forwarded via {"type":"session"} and replayed
+  emitted by gemini's `init` event is stamped as session_id on events and replayed
   as `--resume <id>` on the next turn.

@@ -1,4 +1,4 @@
-"""Tests for the agentproc SDK (agent-side entry, wire 0.3).
+"""Tests for the agentproc SDK (agent-side entry, wire 0.4).
 
 Run with: `pytest -q`
 
@@ -117,15 +117,15 @@ class TestLoadAppendHistory:
 
 class TestAttachmentsSurface:
     def test_no_legacy_attachment_helpers_exported(self):
-        # Wire 0.3 carries attachments as `turn.attachments` (read by
+        # Wire 0.4 carries attachments as `turn.attachments` (read by
         # create_profile from stdin); there is no separate parser helper.
         assert not hasattr(agentproc, "Attachment")
         assert not hasattr(agentproc, "_parse_attachments")
         assert not hasattr(agentproc, "parseAttachments")
 
 
-def test_protocol_version_is_0_3():
-    assert agentproc.PROTOCOL_VERSION == "0.3"
+def test_protocol_version_is_0_4():
+    assert agentproc.PROTOCOL_VERSION == "0.4"
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ def _turn(**extra) -> dict:
         "session_id": "",
         "session_name": "default",
         "from_user": "",
-        "protocol_version": "0.3",
+        "protocol_version": "0.4",
     }
     base.update(extra)
     return base
@@ -186,7 +186,7 @@ class TestCreateProfileE2E:
             "return 'You said: ' + ctx.message",
         )
         assert code == 0, f"stderr={err}"
-        assert '{"type":"text","text":"You said: hi"}\n' in out
+        assert '{"type":"result","text":"You said: hi"}\n' in out
 
     def test_session_id_emitted(self):
         out, err, code = _run_agent(
@@ -195,8 +195,7 @@ class TestCreateProfileE2E:
             "return AgentResult(response='ok', session_id='sess-123')",
         )
         assert code == 0, f"stderr={err}"
-        assert '{"type":"session","id":"sess-123"}\n' in out
-        assert '{"type":"text","text":"ok"}\n' in out
+        assert '{"type":"result","text":"ok","session_id":"sess-123"}\n' in out
 
     def test_send_partial(self):
         out, err, code = _run_agent(
@@ -211,7 +210,7 @@ class TestCreateProfileE2E:
         assert code == 0, f"stderr={err}"
         assert '{"type":"partial","text":"chunk 1"}\n' in out
         assert '{"type":"partial","text":"chunk 2"}\n' in out
-        assert '{"type":"session","id":"s1"}\n' in out
+        assert '{"type":"result","text":"","session_id":"s1"}\n' in out
 
     def test_send_partial_with_role(self):
         out, err, code = _run_agent(
@@ -223,7 +222,7 @@ class TestCreateProfileE2E:
         )
         assert code == 0, f"stderr={err}"
         assert '{"type":"partial","text":"thinking...","role":"thinking"}\n' in out
-        assert '{"type":"text","text":"answer"}\n' in out
+        assert '{"type":"result","text":"answer"}\n' in out
 
     def test_send_error(self):
         out, err, code = _run_agent(
@@ -273,14 +272,14 @@ class TestCreateProfileE2E:
             """,
         )
         assert code == 0, f"stderr={err}"
-        # The returned JSON string is wrapped in a {"type":"text"} event.
-        text_line = next(ln for ln in out.splitlines() if '"type":"text"' in ln)
+        # The returned JSON string is wrapped in a {"type":"result"} event.
+        text_line = next(ln for ln in out.splitlines() if '"type":"result"' in ln)
         ctx = json.loads(json.loads(text_line)["text"])
         assert ctx["msg"] == "hi"
         assert ctx["sid"] == "prev-sess"
         assert ctx["sname"] == "work"
         assert ctx["from"] == "u123"
-        assert ctx["pv"] == "0.3"
+        assert ctx["pv"] == "0.4"
         assert ctx["atts"] == ["image:https://x/img.png"]
 
     def test_default_protocol_version(self):
@@ -289,10 +288,10 @@ class TestCreateProfileE2E:
             "return 'pv=' + ctx.protocol_version",
         )
         assert code == 0
-        assert "pv=0.3" in out
+        assert "pv=0.4" in out
 
     def test_session_id_with_colons_emitted_verbatim(self):
-        # Wire 0.3: session ids are opaque JSON strings; colons are fine and
+        # Wire 0.4: session ids are opaque JSON strings; colons are fine and
         # must not be split or re-encoded.
         out, err, code = _run_agent(
             _turn(),
@@ -300,7 +299,7 @@ class TestCreateProfileE2E:
             "return AgentResult(response='ok', session_id='thread:abc')",
         )
         assert code == 0
-        assert '{"type":"session","id":"thread:abc"}\n' in out
+        assert '{"type":"result","text":"ok","session_id":"thread:abc"}\n' in out
 
     def test_handler_can_return_none(self):
         out, err, code = _run_agent(
@@ -318,7 +317,7 @@ class TestCreateProfileE2E:
             is_async=False,
         )
         assert code == 0, f"stderr={err}"
-        assert '{"type":"text","text":"sync reply"}\n' in out
+        assert '{"type":"result","text":"sync reply"}\n' in out
         assert "Traceback" not in err
 
     def test_sync_handler_send_partial_bare(self):
@@ -329,7 +328,7 @@ class TestCreateProfileE2E:
         )
         assert code == 0, f"stderr={err}"
         assert '{"type":"partial","text":"bare chunk"}\n' in out
-        assert '{"type":"text","text":"final"}\n' in out
+        assert '{"type":"result","text":"final"}\n' in out
         assert "never awaited" not in err
 
 

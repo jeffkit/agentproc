@@ -8,7 +8,7 @@
  *
  * aider modifies files in cwd and may make git commits. Its stdout (a
  * human-readable summary) is forwarded as the reply body (a single
- * {"type":"text"} event). No session id is emitted.
+ * {"type":"result"} event). No session id is emitted.
  *
  * Per-CLI config (read from the process env the runner injects):
  *   AIDER_MODEL   Optional model override (e.g. "claude-opus-4-5")

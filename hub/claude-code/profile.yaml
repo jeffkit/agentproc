@@ -12,7 +12,7 @@ agentproc:
   # bridge script regardless of cwd.
   timeout_secs: 600
   streaming: true
-  # Opt-in mid-turn tool authorization (wire 0.3). Default false keeps the
+  # Opt-in mid-turn tool authorization (wire 0.4). Default false keeps the
   # unattended --dangerously-skip-permissions path. Set true to translate
   # Claude Code control_request ↔ {"type":"permission_request"} / RESPONSE.
   # permission: true

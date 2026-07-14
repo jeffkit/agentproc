@@ -24,7 +24,7 @@ notes: |
   Uses `deepseek exec -p <message> [--model <model>]` for non-interactive mode.
 
   `deepseek exec` is stateless — context is NOT persisted between separate exec
-  invocations (regardless of --session). No {"type":"session"} line is emitted.
+  invocations (regardless of --session). No session_id is stamped on events.
   Multi-turn continuity must be maintained externally via the AgentProc SDK's
   load_history / append_history helpers.
 
@@ -33,4 +33,4 @@ notes: |
     deepseek-v4-flash — faster, lighter
 
   If deepseek later adds native session persistence in exec mode, this bridge
-  can be upgraded to emit {"type":"session"}.
+  can be upgraded to stamp session_id on result events.

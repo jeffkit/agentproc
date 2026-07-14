@@ -4,7 +4,7 @@ AgentProc bridge for the `pi` coding agent CLI (wire 0.3).
 
 pi's --print mode returns the full reply as plain text — no streaming, no
 exposed session id. The bridge forwards the text as the reply body (a single
-{"type":"text"} event).
+{"type":"result"} event).
 
 Per-CLI config (read from the process env the runner injects):
     PI_MODEL         Optional model override (e.g. "anthropic/claude-opus-4-5")

@@ -16,7 +16,7 @@ async def handler(ctx):
     # ctx.session_id        — previous session id (empty = new session)
     # ctx.session_name      — human-readable session name
     # ctx.from_user         — sender identifier
-    # ctx.protocol_version  — protocol version string (e.g. "0.3")
+    # ctx.protocol_version  — protocol version string (e.g. "0.4")
     # ctx.attachments       — list of {kind, url, ...} dicts (empty = none)
     # ctx.permission        — True if the bridge enabled the permission channel
     reply = await my_llm(ctx.message)
@@ -47,7 +47,7 @@ async def handler(ctx):
 create_profile(handler)
 ```
 
-The SDK emits a `{"type":"session","id":...}` event (then a `{"type":"text"}` event for the reply). The bridge passes the session id back as `session_id` on the next turn.
+The SDK emits a `{"type":"result","text":...}` event with optional `session_id`. The bridge persists the first non-empty `session_id` and passes it back on the next turn.
 
 ## Streaming
 
@@ -156,7 +156,7 @@ timeout_secs: 60
 Write the turn object to stdin the way the bridge does:
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./agent.py
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./agent.py
 ```
 
 Useful when debugging the script in isolation.

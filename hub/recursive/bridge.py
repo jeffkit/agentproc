@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AgentProc bridge for the `recursive` CLI (self-improving Rust coding agent,
-wire 0.3).
+wire 0.4).
 
 recursive emits its lifecycle as NDJSON `AgentEvent` objects when run with
 `--json`. This bridge wraps:
@@ -13,8 +13,8 @@ recursive emits its lifecycle as NDJSON `AgentEvent` objects when run with
 and translates the event stream to AgentProc NDJSON output. The bridge always
 passes `--stream` and always emits {"type":"partial"} events; the runner
 forwards them only when the profile's streaming is true (and drops them
-otherwise). A single {"type":"text"} event with the assembled reply is emitted
-at the end so the reply body is populated regardless of streaming mode.
+otherwise). A single {"type":"result"} event with the assembled reply is
+emitted at the end so the reply body is populated regardless of streaming mode.
 
 Multi-turn continuity (native session resume)
 ----------------------------------------------
@@ -76,20 +76,25 @@ def _emit_obj(obj: dict) -> None:
     sys.stdout.flush()
 
 
-def emit_session(session_id: str) -> None:
-    _emit_obj({"type": "session", "id": session_id})
+def emit_partial(text: str, session_id: Optional[str] = None) -> None:
+    obj: dict = {"type": "partial", "text": text}
+    if session_id:
+        obj["session_id"] = session_id
+    _emit_obj(obj)
 
 
-def emit_partial(text: str) -> None:
-    _emit_obj({"type": "partial", "text": text})
+def emit_result(text: str, session_id: Optional[str] = None) -> None:
+    obj: dict = {"type": "result", "text": text}
+    if session_id:
+        obj["session_id"] = session_id
+    _emit_obj(obj)
 
 
-def emit_text(text: str) -> None:
-    _emit_obj({"type": "text", "text": text})
-
-
-def emit_error(text: str) -> None:
-    _emit_obj({"type": "error", "message": text})
+def emit_error(text: str, session_id: Optional[str] = None) -> None:
+    obj: dict = {"type": "error", "message": text}
+    if session_id:
+        obj["session_id"] = session_id
+    _emit_obj(obj)
 
 
 # ---------------------------------------------------------------------------
@@ -211,10 +216,6 @@ def main() -> int:
         else build_run_args(message)
     )
 
-    # Emit the session id FIRST so the runner captures it even if recursive
-    # later fails to produce any output.
-    emit_session(sid)
-
     try:
         proc = subprocess.Popen(
             args,
@@ -223,7 +224,7 @@ def main() -> int:
             text=True,
         )
     except FileNotFoundError:
-        emit_error(f"{CLI_NAME} CLI not found. {INSTALL_HINT}")
+        emit_error(f"{CLI_NAME} CLI not found. {INSTALL_HINT}", session_id=sid)
         return 1
 
     # Per-step text buffers (ordered) so we can assemble the final reply.
@@ -253,7 +254,7 @@ def main() -> int:
                         step_buffers[step] = []
                         step_order.append(step)
                     step_buffers[step].append(text)
-                emit_partial(text)
+                emit_partial(text, session_id=sid)
             continue
 
         if etype == "assistant_text":
@@ -271,7 +272,7 @@ def main() -> int:
                     step_buffers[step] = []
                     step_order.append(step)
                 step_buffers[step].append(text)
-            emit_partial(text)
+            emit_partial(text, session_id=sid)
             continue
 
         if etype == "turn_finished":
@@ -299,19 +300,19 @@ def main() -> int:
             reply_text = recovered.strip()
 
     if error_message:
-        emit_error(error_message)
+        emit_error(error_message, session_id=sid)
         return 1
     if proc.returncode != 0 and not reply_text:
         msg = f"{CLI_NAME} exited with {proc.returncode}"
         stderr_tail = stderr_output.strip()
         if stderr_tail:
             msg += f": {stderr_tail[:500]}"
-        emit_error(msg)
+        emit_error(msg, session_id=sid)
         return 1
     if not reply_text:
-        emit_error(f"{CLI_NAME} produced no reply text")
+        emit_error(f"{CLI_NAME} produced no reply text", session_id=sid)
         return 1
-    emit_text(reply_text)
+    emit_result(reply_text, session_id=sid)
     return 0
 
 

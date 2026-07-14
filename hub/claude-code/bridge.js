@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * AgentProc bridge for the `claude` CLI (Anthropic Claude Code, wire 0.3).
+ * AgentProc bridge for the `claude` CLI (Anthropic Claude Code, wire 0.4).
  *
  * Default (unattended):
  *   claude -p <message> --output-format stream-json \
@@ -25,8 +25,7 @@ const {
   emit,
   emitError,
   emitPartial,
-  emitSession,
-  emitText,
+  emitResult,
 } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
 const CLI_NAME = 'claude';
@@ -65,6 +64,10 @@ function buildPermissionArgs(sessionId, env) {
 
 function parseEvent(event) {
   const etype = event.type;
+  if (etype === 'system' && event.subtype === 'init') {
+    const sessionId = event.session_id;
+    return (typeof sessionId === 'string' && sessionId) ? { sessionId } : null;
+  }
   if (etype === 'assistant') {
     const text = (event.message?.content || [])
       .filter(b => b.type === 'text')
@@ -260,10 +263,10 @@ async function runPermissionMode(turn, env) {
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
     if (result.partialText) {
-      emitPartial(result.partialText);
+      emitPartial(result.partialText, foundSessionId);
       lastPartialText = result.partialText;
     }
-    if (result.finalText) {
+    if (result.finalText !== undefined && result.finalText !== null) {
       lastFinalText = result.finalText;
     }
   }
@@ -273,8 +276,7 @@ async function runPermissionMode(turn, env) {
   bridgeRl.close();
 
   if (errorMessage) {
-    if (foundSessionId) emitSession(foundSessionId);
-    emitError(errorMessage);
+    emitError(errorMessage, foundSessionId);
     process.exit(1);
   }
   if (code !== 0 && !foundSessionId) {
@@ -285,9 +287,8 @@ async function runPermissionMode(turn, env) {
     process.exit(1);
   }
 
-  if (foundSessionId) emitSession(foundSessionId);
   const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
-  if (replyText) emitText(replyText);
+  emitResult(replyText || '', foundSessionId);
   process.exit(0);
 }
 

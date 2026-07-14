@@ -58,7 +58,7 @@ Homebrew 的 Python 默认不暴露 `pip`。可以跑 `python3 -m ensurepip && p
 
 ```bash
 agentproc --version
-# agentproc 0.7.1 (protocol 0.3)
+# agentproc 0.9.0 (protocol 0.4)
 ```
 
 ## ② 浏览 hub
@@ -109,8 +109,8 @@ agentproc hub run claude-code \
 stderr 上会实时看到 NDJSON 事件，stdout 是最终回复：
 
 ```
-{"type":"partial","text":"This codebase is..."}
-{"type":"session","id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
+{"type":"partial","text":"This codebase is...","session_id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
+{"type":"result","text":"","session_id":"13c2f6ec-1f97-42c4-be9e-9475129e243c"}
 agentproc:session:13c2f6ec-1f97-42c4-be9e-9475129e243c
 ```
 
@@ -124,7 +124,7 @@ agentproc hub run claude-code \
 ```
 
 ::: tip 短回复可能看不到 {"type":"partial"}
-有些 agent 在回答较短时一次性吐完全部内容——你只会看到 `{"type":"session"}` 和回复正文，没有 `{"type":"partial"}` 行。这是正常的；流式只分片长回复。
+有些 agent 在回答较短时一次性吐完全部内容——你只会看到单条 `{"type":"result","text":"..."}`（可选带 `session_id`），没有 `{"type":"partial"}` 行。这是正常的；流式只分片长回复。
 :::
 
 ## ④ 接到你的消息平台

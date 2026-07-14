@@ -20,7 +20,7 @@ notes: |
   completes — it does not stream chunks and does not expose a resumable
   session id on stdout. As a result:
 
-    - No {"type":"session"} line is emitted (AgentProc allows this).
+    - No session_id is stamped on events (AgentProc allows this).
     - Each turn is a fresh agy process; multi-turn continuity must be
       maintained by the messaging bridge (e.g. via the AgentProc SDK's
       load_history / append_history helpers) rather than by agy itself.

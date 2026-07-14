@@ -8,14 +8,14 @@ Invokes:
         [--model <model>]
 
 Parses the NDJSON stream and re-emits as AgentProc protocol output:
-    step_start  → captures sessionID (forwarded as {"type":"session"})
+    step_start  → captures sessionID (stamped on partial/result/error)
     text        → part.text → {"type":"partial"} (streaming) or reply body (one-shot)
     step_finish → terminal event; part.reason="stop" signals the final turn
     tool_use    → captures sessionID (content not forwarded to user)
     error       → {"type":"error"}
 
 The sessionID field is present on every event (format: ses_XXX). The bridge
-captures it from the first event and forwards it at the end via {"type":"session"}.
+captures it from the first event and stamps it on partial/result/error events.
 
 Env vars:
     turn.message          User message

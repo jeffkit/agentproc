@@ -28,7 +28,7 @@ notes: |
 
   Session management: on the first turn the bridge generates a UUID and uses it
   as the kimi session ID (creating a new session). The same UUID is forwarded as
-  {"type":"session"} so the SDK can pass it back on the next turn as turn.session_id,
+  session_id on partial/result so the SDK can pass it back on the next turn as turn.session_id,
   enabling kimi's native --session <id> resume mechanism.
 
   The bridge parses kimi's role-based NDJSON events:

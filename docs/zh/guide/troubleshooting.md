@@ -199,7 +199,7 @@ agentproc hub run claude-code -p "hi" --env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 2. **被包装的 CLI 把所有内容写到了它自己的 stderr，没写到 stdout。** 某些 CLI 对警告这么做。用 `--verbose`（默认）跑，检查 stderr。如果你想把 stderr 也带进回复，在 profile 里设 `include_stderr_in_reply: true`。
 3. **agent 退出码 0 但什么都没写。** 这是 agent 脚本本身的 bug，不是 AgentProc 的问题。直接把一个 turn 写进 stdin 看它实际行为：
    ```bash
-   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./bridge.py
+   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./bridge.py
    ```
 
 ---

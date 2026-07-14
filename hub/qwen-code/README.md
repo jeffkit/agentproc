@@ -69,8 +69,8 @@ bridge.py / bridge.js
 qwen CLI
   ↓ NDJSON stream: init / message / error / result events (gemini-cli shape)
 bridge.py / bridge.js
-  ↓ {"type":"session","id":"<id>"}   (session_id from init event)
-  ↓ {"type":"partial","text":"..."}   (assistant message deltas)
+  ↓ {"type":"partial","text":"...","session_id":"<id>"}   (deltas; session_id from init)
+  ↓ {"type":"result","text":"","session_id":"<id>"}
   ↓ {"type":"error","message":"..."}      (on error or result.status=error)
 ```
 

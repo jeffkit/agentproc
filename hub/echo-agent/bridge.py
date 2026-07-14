@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Minimal AgentProc echo agent (Python, wire 0.3).
+Minimal AgentProc echo agent (Python, wire 0.4).
 
 Reads the {"type":"turn",...} object from stdin and writes the message back
-as a single {"type":"text"} event. No external dependencies, no AI calls.
+as a single {"type":"result"} event. No external dependencies, no AI calls.
 Use this to verify your messaging bridge speaks the protocol correctly.
 """
 
@@ -19,7 +19,7 @@ def main() -> int:
         turn = {}
     message = turn.get("message") if isinstance(turn.get("message"), str) else ""
     sys.stdout.write(
-        json.dumps({"type": "text", "text": f"You said: {message}"}, ensure_ascii=False, separators=(",", ":")) + "\n"
+        json.dumps({"type": "result", "text": f"You said: {message}"}, ensure_ascii=False, separators=(",", ":")) + "\n"
     )
     sys.stdout.flush()
     return 0

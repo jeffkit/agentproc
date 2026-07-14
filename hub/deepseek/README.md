@@ -53,7 +53,7 @@ env_allowlist: [DEEPSEEK_MODEL, DEEPSEEK_API_KEY]
 
 ```bash
 cd hub/deepseek
-echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output:
@@ -62,14 +62,14 @@ Expected output:
 deepseek ok
 ```
 
-(No `{"type":"session"}` line — see "Session continuity" below.)
+(No `session_id` on events — see "Session continuity" below.)
 
 <details>
 <summary>Run with Node bridge</summary>
 
 ```bash
 cd hub/deepseek
-echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | node bridge.js
+echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | node bridge.js
 ```
 
 </details>
@@ -84,12 +84,12 @@ bridge.py / bridge.js
 DeepSeek TUI CLI
   ↓ plain text reply on stdout (after the turn completes)
 bridge.py / bridge.js
-  ↓ reply body (no {"type":"session"} line, no {"type":"partial"} lines)
+  ↓ reply body (no session_id on events, no {"type":"partial"} lines)
 ```
 
 ## Session continuity
 
-**`deepseek exec` is stateless.** Each invocation is independent; context is NOT persisted between separate `deepseek exec` calls, even when passing the same `--session` ID. No `{"type":"session"}` line is emitted.
+**`deepseek exec` is stateless.** Each invocation is independent; context is NOT persisted between separate `deepseek exec` calls, even when passing the same `--session` ID. No `session_id` is stamped on events.
 
 For multi-turn context, use the [AgentProc SDK](https://agentproc.dev/sdk/python)'s history helpers (`load_history` / `append_history`) to maintain a JSONL conversation file keyed by your messaging bridge's own session ID.
 

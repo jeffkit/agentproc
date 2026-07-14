@@ -50,7 +50,7 @@ env_allowlist: [PI_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/pi
-echo '{"type":"turn","message":"reply with exactly: pi ok","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: pi ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output:
@@ -69,12 +69,12 @@ bridge.py / bridge.js
 pi CLI
   ↓ plain text reply on stdout (after the turn completes)
 bridge.py / bridge.js
-  ↓ reply body (no {"type":"session"} line, no {"type":"partial"} lines)
+  ↓ reply body (no session_id on events, no {"type":"partial"} lines)
 ```
 
 ## Session continuity
 
-**pi's `-p` mode does not expose a session id on stdout.** The bridge therefore emits no `{"type":"session"}` line. Each AgentProc turn spawns a fresh pi process.
+**pi's `-p` mode does not expose a session id on stdout.** The bridge therefore omits `session_id` on events. Each AgentProc turn spawns a fresh pi process.
 
 If your messaging bridge needs multi-turn context, use the [AgentProc SDK](https://agentproc.dev/sdk/python)'s history helpers (`load_history` / `append_history`) to maintain context in a JSONL file.
 

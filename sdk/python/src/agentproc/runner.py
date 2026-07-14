@@ -1,14 +1,15 @@
 """AgentProc runner — the canonical bridge-side engine.
 
 This module is the canonical implementation of the AgentProc bridge-side
-contract (spec/protocol.md, wire protocol 0.3). The CLI (cli.py) is a thin
+contract (spec/protocol.md, wire protocol 0.4). The CLI (cli.py) is a thin
 wrapper around it.
 
-Wire 0.3 is NDJSON in both directions:
+Wire 0.4 is NDJSON in both directions:
   - stdin:  one {"type":"turn",...} line, then optional
             {"type":"permission_response",...} lines when permission is on.
   - stdout: one JSON object per line, discriminated by `type`:
-            partial | text | session | error | permission_request.
+            partial | result | error | permission_request.
+            Optional ``session_id`` field on events (first non-empty wins).
 
 Responsibilities:
   - Parse and validate a profile dict
@@ -19,7 +20,8 @@ Responsibilities:
     profile.permission is true, for permission_response traffic)
   - Read stdout line by line, parse each line as a JSON event
   - Forward {"type":"partial"} in real time (via on_partial callback)
-  - Capture the last {"type":"session"} event (last-wins rule)
+  - Persist the first non-empty valid ``session_id`` on events
+  - Honor at most one {"type":"result"} (body assembly vs streamed partials)
   - Honor {"type":"error"} events
   - Optional tool permission: honor permission_request / write permission_response
   - Enforce timeout_secs with SIGTERM → kill_grace_secs → SIGKILL
@@ -69,7 +71,7 @@ __all__ = [
     "diagnose_stderr_failure",
 ]
 
-PROTOCOL_VERSION = "0.3"
+PROTOCOL_VERSION = "0.4"
 
 DEFAULT_TIMEOUT_SECS = 1800
 DEFAULT_KILL_GRACE_SECS = 5
@@ -385,7 +387,7 @@ def diagnose_stderr_failure(stderr_text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Event parsing (wire 0.3 — every stdout line is a JSON object)
+# Event parsing (wire 0.4 — every stdout line is a JSON object)
 # ---------------------------------------------------------------------------
 
 def parse_json_line(line: str) -> Optional[Dict[str, Any]]:
@@ -402,18 +404,27 @@ def parse_json_line(line: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _attach_session_id(out: Dict[str, Any], obj: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy optional non-empty ``session_id`` onto a classified event."""
+    sid = obj.get("session_id")
+    if isinstance(sid, str) and sid != "":
+        out["session_id"] = sid
+    return out
+
+
 def classify_line(line: str) -> Dict[str, Any]:
     """Classify one stdout line into a typed event.
 
     Returns a dict with ``kind``:
-      session | partial | text | error | permission_request | malformed
+      partial | result | error | permission_request | malformed
+
+    ``session`` and ``text`` (wire 0.3) are unknown in 0.4 → malformed.
+    Recognised events MAY carry a string ``session_id`` field on the result.
     """
     obj = parse_json_line(line)
     if not obj or not isinstance(obj.get("type"), str):
         return {"kind": "malformed", "value": line}
     t = obj["type"]
-    if t == "session":
-        return {"kind": "session", "value": obj.get("id") if isinstance(obj.get("id"), str) else ""}
     if t == "partial":
         out: Dict[str, Any] = {
             "kind": "partial",
@@ -421,11 +432,23 @@ def classify_line(line: str) -> Dict[str, Any]:
         }
         if isinstance(obj.get("role"), str):
             out["role"] = obj.get("role")
-        return out
-    if t == "text":
-        return {"kind": "text", "value": obj.get("text") if isinstance(obj.get("text"), str) else ""}
+        return _attach_session_id(out, obj)
+    if t == "result":
+        return _attach_session_id(
+            {
+                "kind": "result",
+                "value": obj.get("text") if isinstance(obj.get("text"), str) else "",
+            },
+            obj,
+        )
     if t == "error":
-        return {"kind": "error", "value": obj.get("message") if isinstance(obj.get("message"), str) else ""}
+        return _attach_session_id(
+            {
+                "kind": "error",
+                "value": obj.get("message") if isinstance(obj.get("message"), str) else "",
+            },
+            obj,
+        )
     if t == "permission_request":
         return {"kind": "permission_request", "value": obj}
     return {"kind": "malformed", "value": line}
@@ -464,7 +487,7 @@ def is_valid_permission_request(obj: Any) -> bool:
     return True
 
 
-# Wire 0.3: the session id is an arbitrary JSON string on the wire (no
+# Wire 0.4: the session id is an arbitrary JSON string on the wire (no
 # colon/whitespace restriction — that was an artifact of the 0.2
 # colon-delimited prefix). The only remaining constraint is STORAGE safety:
 # the SDK history helpers store each session as <id>.jsonl, so an id
@@ -472,7 +495,7 @@ def is_valid_permission_request(obj: Any) -> bool:
 # ``.`` / ``..`` would path-traverse out of the sessions directory. The
 # runner rejects such ids (preserving the previously captured id + a stderr
 # warning) so they do not round-trip. Colons, spaces, ``+``, and unicode are
-# all fine.
+# all fine. Persistence is first-non-empty (not last-wins).
 _SESSION_ID_RE = re.compile(r"[\/\\\x00-\x1f]")
 
 
@@ -536,7 +559,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     for k, v in options.extra_env.items():
         env[k] = str(v)
 
-    # Build the turn object (wire 0.3 stdin payload). No AGENT_* env in 0.3.
+    # Build the turn object (wire 0.4 stdin payload). No AGENT_* env in 0.4.
     turn: Dict[str, Any] = {
         "type": "turn",
         "message": options.message,
@@ -553,12 +576,16 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         turn["permission"] = True
 
     result = RunResult()
-    text_chunks: List[str] = []
-    # Spec 5.4: once an error event arrives, subsequent partial/text events
+    result_text: Optional[str] = None
+    result_seen = False
+    # Spec: once an error event arrives, subsequent partial/result events
     # MUST be discarded (they cannot contribute to a failed turn's reply).
-    # `session` is exempt — last-wins still applies so the id for the next
-    # turn can be captured even after an error.
+    # session_id on events is still noted (first-non-empty), including on
+    # the error event itself and on post-error partials.
     error_seen = False
+    # True once at least one partial was forwarded under streaming — then
+    # result.text must not become the runner reply (body already streamed).
+    partials_forwarded = False
     pending_permission_ids: set = set()
     stdin_lock = threading.Lock()
     stdin_closed = False
@@ -588,6 +615,29 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             marker = "\n[agentproc runner] stderr capped at 1 MB; trailing output dropped\n"
             stderr_full.append(marker)
             stderr_full_truncated = True
+
+    def _note_session_id(sid: Any) -> None:
+        """Persist the first non-empty valid session_id; warn on conflict/invalid."""
+        if not isinstance(sid, str) or not sid:
+            return
+        if not is_valid_session_id(sid):
+            if options.on_stderr:
+                options.on_stderr(
+                    f"[agentproc runner] ignoring invalid session id "
+                    f"{sid!r} (must be non-empty, no path separators "
+                    "or control chars); previous session id preserved"
+                )
+            return
+        if not result.session_id:
+            result.session_id = sid
+            if options.on_session:
+                options.on_session(sid)
+            return
+        if sid != result.session_id and options.on_stderr:
+            options.on_stderr(
+                f"[agentproc runner] ignoring conflicting session_id {sid!r}; "
+                f"keeping first {result.session_id!r}"
+            )
 
     try:
         proc = subprocess.Popen(
@@ -674,29 +724,14 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     def _handle_line(raw_line: str) -> None:
         nonlocal _cumulative_partial_chars, _partials_truncated, error_seen
+        nonlocal result_text, result_seen, partials_forwarded
         line = raw_line.rstrip("\r")
         c = classify_line(line)
         kind = c["kind"]
-        if kind == "session":
-            if not is_valid_session_id(c["value"]):
-                if options.on_stderr:
-                    options.on_stderr(
-                        f"[agentproc runner] ignoring invalid session id "
-                        f"{c['value']!r} (must be non-empty, no path separators "
-                        "or control chars); previous session id preserved"
-                    )
-                if options.on_protocol_line:
-                    options.on_protocol_line(line)
-            else:
-                result.session_id = c["value"]
-                if options.on_session:
-                    options.on_session(c["value"])
-                if options.on_protocol_line:
-                    options.on_protocol_line(line)
-        elif kind == "partial":
-            # Spec 5.4: post-error partials are discarded (not forwarded, not
-            # appended). on_protocol_line still fires so debug traces stay
-            # complete.
+        if kind == "partial":
+            _note_session_id(c.get("session_id"))
+            # Spec: post-error partials are discarded (not forwarded).
+            # on_protocol_line still fires so debug traces stay complete.
             if (
                 not error_seen
                 and streaming
@@ -707,21 +742,38 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 if len(c["value"]) >= remaining:
                     if remaining > 0:
                         options.on_partial(c["value"][:remaining])
+                        partials_forwarded = True
                     if _trunc_suffix:
                         options.on_partial(_trunc_suffix)
+                        partials_forwarded = True
                     _partials_truncated = True
                 else:
                     options.on_partial(c["value"])
+                    partials_forwarded = True
                     _cumulative_partial_chars += len(c["value"])
             if options.on_protocol_line:
                 options.on_protocol_line(line)
-        elif kind == "text":
-            # Spec 5.4: post-error text is discarded.
-            if not error_seen:
-                text_chunks.append(c["value"])
-            if options.on_protocol_line:
-                options.on_protocol_line(line)
+        elif kind == "result":
+            # At most one result; post-error result discarded.
+            if error_seen:
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
+            elif result_seen:
+                if options.on_stderr:
+                    options.on_stderr(
+                        '[agentproc runner] ignoring extra {"type":"result"} '
+                        "(at most one per turn)"
+                    )
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
+            else:
+                result_seen = True
+                _note_session_id(c.get("session_id"))
+                result_text = c["value"]
+                if options.on_protocol_line:
+                    options.on_protocol_line(line)
         elif kind == "error":
+            _note_session_id(c.get("session_id"))
             result.error = c["value"]
             error_seen = True
             if options.on_error:
@@ -730,6 +782,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 options.on_protocol_line(line)
             pending_permission_ids.clear()
         elif kind == "permission_request":
+            if isinstance(c["value"], dict):
+                _note_session_id(c["value"].get("session_id"))
             if not profile["permission"]:
                 if options.on_stderr:
                     options.on_stderr(
@@ -800,7 +854,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                         })
                 # No on_permission: leave the agent blocked until turn timeout.
         else:
-            # malformed: log + ignore (not forwarded as body in 0.3).
+            # malformed: log + ignore (not forwarded as body in 0.4).
+            # Includes legacy {"type":"session"} / {"type":"text"}.
             if options.on_stderr:
                 options.on_stderr(
                     f"[agentproc runner] ignoring malformed stdout line: {line[:200]!r}"
@@ -887,8 +942,17 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         if options.on_stderr:
             options.on_stderr("[agentproc runner] warning: stderr drain timed out; diagnosis may be incomplete")
 
-    # Reply body = concatenation of {"type":"text"} events (direct, no separator).
-    result.reply = "".join(text_chunks)
+    # Reply body assembly (wire 0.4):
+    # - streaming true + any partial forwarded → reply stays empty (body via
+    #   on_partial; do not duplicate result.text)
+    # - otherwise, if a result was seen → reply = result.text
+    # - streaming false → partials never forward, so reply = result.text
+    if streaming and partials_forwarded:
+        result.reply = ""
+    elif result_text is not None:
+        result.reply = result_text
+    else:
+        result.reply = ""
     if len(result.reply) > profile["max_reply_chars"]:
         result.reply = result.reply[: profile["max_reply_chars"]] + profile["truncation_suffix"]
 

@@ -4,13 +4,15 @@
  * protocol-compliant agent invocation.
  *
  * This module is the canonical implementation of the AgentProc bridge-side
- * contract (spec/protocol.md, wire protocol 0.3). The CLI (cli.js) is a thin wrapper around it.
+ * contract (spec/protocol.md, wire protocol 0.4). The CLI (cli.js) is a thin wrapper around it.
  *
- * Wire 0.3 is NDJSON in both directions:
+ * Wire 0.4 is NDJSON in both directions:
  *   - stdin:  one {"type":"turn",...} line, then optional
  *             {"type":"permission_response",...} lines when permission is on.
  *   - stdout: one JSON object per line, discriminated by `type`:
- *             partial | text | session | error | permission_request.
+ *             partial | result | error | permission_request.
+ *             Optional `session_id` field on those events (first non-empty wins).
+ *             Legacy `session` / `text` types are unknown → malformed.
  *
  * Responsibilities:
  *   - Parse and validate a profile object
@@ -21,7 +23,8 @@
  *     profile.permission is true, for permission_response traffic)
  *   - Read stdout line by line, parse each line as a JSON event
  *   - Forward {"type":"partial"} in real time (via onPartial callback)
- *   - Capture the last {"type":"session"} event (last-wins rule)
+ *   - Persist the first non-empty valid `session_id` on any event (first-wins)
+ *   - Capture at most one {"type":"result"}; assemble reply per streaming rules
  *   - Honor {"type":"error"} events
  *   - Optional tool permission: honor permission_request / write permission_response
  *   - Enforce timeout_secs with SIGTERM → kill_grace_secs → SIGKILL
@@ -30,7 +33,7 @@
  * Exports:
  *   run(profile, options) -> Promise<RunResult>
  *   parseProfileYaml(yamlString) -> Profile   (re-exported from yaml.js where used)
- *   classifyLine(line) -> { kind: 'session'|'partial'|'text'|'error'|'permission_request'|'malformed', value }
+ *   classifyLine(line) -> { kind: 'partial'|'result'|'error'|'permission_request'|'malformed', value, session_id? }
  */
 
 const { spawn } = require('node:child_process');
@@ -42,7 +45,7 @@ const os = require('node:os');
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION = '0.3';
+const PROTOCOL_VERSION = '0.4';
 
 const DEFAULT_TIMEOUT_SECS = 1800;
 const DEFAULT_KILL_GRACE_SECS = 5;
@@ -148,7 +151,7 @@ function normalizeProfile(raw) {
       ? src.truncation_suffix
       : DEFAULT_TRUNCATION_SUFFIX,
     // Bridge-side hint: when false, the runner ignores {"type":"partial"} events
-    // and assembles the reply from {"type":"text"} events only. Not a wire field.
+    // and assembles the reply from {"type":"result"} only. Not a wire field.
     streaming: src.streaming !== false,
   };
 }
@@ -316,7 +319,7 @@ function expandEnvRef(value, env, allowlist = null, onBlocked = null) {
 }
 
 // ---------------------------------------------------------------------------
-// Event parsing (wire 0.3 — every stdout line is a JSON object)
+// Event parsing (wire 0.4 — every stdout line is a JSON object)
 // ---------------------------------------------------------------------------
 
 /**
@@ -335,17 +338,25 @@ function parseJsonLine(line) {
   return null;
 }
 
+/** Non-empty string `session_id` from an event object, else undefined. */
+function sessionIdFrom(obj) {
+  return (typeof obj.session_id === 'string' && obj.session_id !== '')
+    ? obj.session_id
+    : undefined;
+}
+
 /**
  * Classify one stdout line into a typed event.
  * @param {string} line - Raw line, without trailing newline.
- * @returns {{ kind: string, value: any, role?: string }}
- *   kind is 'session' | 'partial' | 'text' | 'error' | 'permission_request' | 'malformed'.
- *   - session: value is the id string.
+ * @returns {{ kind: string, value: any, role?: string, session_id?: string }}
+ *   kind is 'partial' | 'result' | 'error' | 'permission_request' | 'malformed'.
  *   - partial: value is the text string; role is the optional role string.
- *   - text:    value is the text string.
+ *   - result:  value is the text string (at most one per turn).
  *   - error:   value is the message string.
- *   - permission_request: value is the parsed object (or null if malformed).
- *   - malformed: the line was not a recognised event; the bridge logs + ignores.
+ *   - permission_request: value is the parsed object.
+ *   - malformed: the line was not a recognised event (incl. legacy session/text);
+ *     the bridge logs + ignores.
+ *   session_id is set when the event carries a non-empty `session_id` field (wire key).
  */
 function classifyLine(line) {
   const obj = parseJsonLine(line);
@@ -353,19 +364,32 @@ function classifyLine(line) {
     return { kind: 'malformed', value: line };
   }
   switch (obj.type) {
-    case 'session':
-      return { kind: 'session', value: typeof obj.id === 'string' ? obj.id : '' };
     case 'partial': {
       const o = { kind: 'partial', value: typeof obj.text === 'string' ? obj.text : '' };
       if (typeof obj.role === 'string') o.role = obj.role;
+      const sid = sessionIdFrom(obj);
+      if (sid !== undefined) o.session_id = sid;
       return o;
     }
-    case 'text':
-      return { kind: 'text', value: typeof obj.text === 'string' ? obj.text : '' };
-    case 'error':
-      return { kind: 'error', value: typeof obj.message === 'string' ? obj.message : '' };
-    case 'permission_request':
-      return { kind: 'permission_request', value: obj };
+    case 'result': {
+      const o = { kind: 'result', value: typeof obj.text === 'string' ? obj.text : '' };
+      const sid = sessionIdFrom(obj);
+      if (sid !== undefined) o.session_id = sid;
+      return o;
+    }
+    case 'error': {
+      const o = { kind: 'error', value: typeof obj.message === 'string' ? obj.message : '' };
+      const sid = sessionIdFrom(obj);
+      if (sid !== undefined) o.session_id = sid;
+      return o;
+    }
+    case 'permission_request': {
+      const o = { kind: 'permission_request', value: obj };
+      const sid = sessionIdFrom(obj);
+      if (sid !== undefined) o.session_id = sid;
+      return o;
+    }
+    // Legacy wire 0.3 `session` / `text` are unknown types → malformed.
     default:
       return { kind: 'malformed', value: line };
   }
@@ -399,7 +423,7 @@ function isValidPermissionRequest(obj) {
   return true;
 }
 
-// Wire 0.3: the session id is an arbitrary JSON string on the wire (no
+// Wire 0.4: the session id is an arbitrary JSON string on the wire (no
 // colon/whitespace restriction — that was an artifact of the 0.2
 // colon-delimited prefix). The only remaining constraint is STORAGE safety:
 // the SDK history helpers store each session as <id>.jsonl, so an id
@@ -444,8 +468,9 @@ function isValidSessionId(value) {
 
 /**
  * @typedef {Object} RunResult
- * @property {string} reply - Concatenated reply body (from {"type":"text"} events).
- * @property {string} sessionId - Final session id (last {"type":"session"} wins; '' if none).
+ * @property {string} reply - Assembled reply body (`result.text`, or '' when
+ *   streaming forwarded at least one partial — do not duplicate).
+ * @property {string} sessionId - First non-empty valid `session_id` on any event; '' if none.
  * @property {string} error - Error message from {"type":"error"}, or '' if none.
  * @property {number} exitCode - Process exit code (124 = timeout, etc.).
  * @property {boolean} timedOut - Whether the run was killed by timeout.
@@ -565,13 +590,17 @@ async function run(profileRaw, options) {
     timedOut: false,
   };
 
-  const textChunks = [];
   let killed = false;
-  // Spec 5.4: once an error event arrives, subsequent partial/text events
+  // Spec: once an error event arrives, subsequent partial/result events
   // MUST be discarded (they cannot contribute to a failed turn's reply).
-  // `session` is exempt — last-wins still applies so the id for the next
-  // turn can be captured even after an error.
+  // `session_id` on later events is still observed (first-wins persistence).
   let errorSeen = false;
+  let resultSeen = false;
+  let resultText = '';
+  // True when onPartial actually forwarded at least one chunk (incl. truncation
+  // notice). When set under streaming, reply stays '' — result.text is not
+  // appended (CLIs often repeat the full body in their terminal event).
+  let partialsForwarded = false;
   /** @type {Set<string>} */
   const pendingPermissionIds = new Set();
   let stdinClosed = false;
@@ -628,48 +657,78 @@ async function run(profileRaw, options) {
     }
   });
 
+  function captureSessionId(sessionId) {
+    if (sessionId === undefined) return;
+    if (!isValidSessionId(sessionId)) {
+      if (options.onStderr) {
+        options.onStderr(`[agentproc runner] ignoring invalid session id ${JSON.stringify(sessionId)} (must be non-empty, no path separators or control chars); previous session id preserved`);
+      }
+      return;
+    }
+    if (!result.sessionId) {
+      // First non-empty valid id wins.
+      result.sessionId = sessionId;
+      if (options.onSession) options.onSession(sessionId);
+    } else if (sessionId !== result.sessionId) {
+      // Protocol violation — keep the first, warn.
+      if (options.onStderr) {
+        options.onStderr(`[agentproc runner] conflicting session_id ${JSON.stringify(sessionId)} after ${JSON.stringify(result.sessionId)}; keeping the first`);
+      }
+    }
+  }
+
   function handleLine(rawLine) {
     // Strip a trailing \r (CRLF tolerance) but otherwise treat raw.
     const line = rawLine.replace(/\r$/, '');
     const c = classifyLine(line);
-    if (c.kind === 'session') {
-      if (!isValidSessionId(c.value)) {
-        if (options.onStderr) {
-          options.onStderr(`[agentproc runner] ignoring invalid session id ${JSON.stringify(c.value)} (must be non-empty, no path separators or control chars); previous session id preserved`);
-        }
-        if (options.onProtocolLine) options.onProtocolLine(line);
-      } else {
-        result.sessionId = c.value; // last wins
-        if (options.onSession) options.onSession(c.value);
-        if (options.onProtocolLine) options.onProtocolLine(line);
-      }
-    } else if (c.kind === 'partial') {
-      // Spec 5.4: post-error partials are discarded (not forwarded, not
-      // appended). `onProtocolLine` still fires so debug traces stay complete.
+    if (c.session_id !== undefined) {
+      captureSessionId(c.session_id);
+    }
+    if (c.kind === 'partial') {
+      // Spec: post-error partials are discarded (not forwarded).
+      // `onProtocolLine` still fires so debug traces stay complete.
       if (!errorSeen && streaming && options.onPartial && !partialsTruncated) {
         const remaining = maxChars - cumulativePartialChars;
         if (c.value.length >= remaining) {
           // Emit whatever fits, then the truncation notice, then stop.
-          if (remaining > 0) options.onPartial(c.value.slice(0, remaining), c.role);
-          if (truncSuffix) options.onPartial(truncSuffix);
+          if (remaining > 0) {
+            options.onPartial(c.value.slice(0, remaining), c.role);
+            partialsForwarded = true;
+          }
+          if (truncSuffix) {
+            options.onPartial(truncSuffix);
+            partialsForwarded = true;
+          }
           partialsTruncated = true;
         } else {
           options.onPartial(c.value, c.role);
+          partialsForwarded = true;
           cumulativePartialChars += c.value.length;
         }
       }
       if (options.onProtocolLine) options.onProtocolLine(line);
-    } else if (c.kind === 'text') {
-      // Spec 5.4: post-error text is discarded.
-      if (!errorSeen) textChunks.push(c.value);
+    } else if (c.kind === 'result') {
+      // Spec: at most one result; post-error result is discarded for body.
+      if (errorSeen) {
+        // ignore body contribution
+      } else if (resultSeen) {
+        if (options.onStderr) {
+          options.onStderr('[agentproc runner] ignoring subsequent {"type":"result"} (at most one per turn)');
+        }
+      } else {
+        resultSeen = true;
+        resultText = c.value;
+      }
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'error') {
-      result.error = c.value;
-      errorSeen = true;
-      if (options.onError) options.onError(c.value);
+      if (!errorSeen) {
+        result.error = c.value;
+        errorSeen = true;
+        if (options.onError) options.onError(c.value);
+        // Pending permission requests become moot; stop waiting for UI approval.
+        pendingPermissionIds.clear();
+      }
       if (options.onProtocolLine) options.onProtocolLine(line);
-      // Pending permission requests become moot; stop waiting for UI approval.
-      pendingPermissionIds.clear();
     } else if (c.kind === 'permission_request') {
       if (!profile.permission) {
         if (options.onStderr) {
@@ -741,7 +800,7 @@ async function run(profileRaw, options) {
         // No onPermission: leave the agent blocked until turn timeout (spec).
       }
     } else {
-      // malformed: log + ignore (not forwarded as body in 0.3).
+      // malformed: log + ignore (not forwarded as body in 0.4).
       if (options.onStderr) {
         options.onStderr(`[agentproc runner] ignoring malformed stdout line: ${JSON.stringify(line.slice(0, 200))}`);
       }
@@ -874,8 +933,14 @@ async function run(profileRaw, options) {
     }
   }
 
-  // Reply body = concatenation of {"type":"text"} events (direct, no separator).
-  result.reply = textChunks.join('');
+  // Reply body assembly (wire 0.4):
+  //   streaming + any partial forwarded → '' (body already live; don't duplicate result.text)
+  //   otherwise → result.text (streaming false, or no partials forwarded)
+  if (streaming && partialsForwarded) {
+    result.reply = '';
+  } else {
+    result.reply = resultText;
+  }
   if (result.reply.length > profile.max_reply_chars) {
     result.reply = result.reply.slice(0, profile.max_reply_chars) + profile.truncation_suffix;
   }

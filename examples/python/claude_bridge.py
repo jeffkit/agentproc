@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Example: connect claude CLI to an AgentProc bridge (Python, wire 0.3).
+Example: connect claude CLI to an AgentProc bridge (Python, wire 0.4).
 
 This script wraps the `claude` CLI to implement the AgentProc P0 protocol.
 The bridge spawns this script, writes a {"type":"turn",...} object to its
@@ -66,20 +66,28 @@ def main():
         except json.JSONDecodeError:
             continue
 
-        if event.get("type") == "assistant":
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            sid = event.get("session_id")
+            if isinstance(sid, str) and sid:
+                found_session_id = sid
+
+        elif event.get("type") == "assistant":
             text = "".join(
                 b.get("text", "")
                 for b in (event.get("message") or {}).get("content", [])
                 if b.get("type") == "text"
             )
             if text:
-                # Live streaming chunk — the runner forwards it only when the
-                # profile's streaming is true.
-                emit({"type": "partial", "text": text})
+                partial = {"type": "partial", "text": text}
+                if found_session_id:
+                    partial["session_id"] = found_session_id
+                emit(partial)
                 last_partial = text
 
         elif event.get("type") == "result":
-            found_session_id = event.get("session_id")
+            sid = event.get("session_id")
+            if isinstance(sid, str) and sid:
+                found_session_id = sid
             if event.get("is_error"):
                 error_message = event.get("result", "claude reported an error")
             else:
@@ -90,9 +98,10 @@ def main():
     proc.wait()
 
     if error_message:
+        err = {"type": "error", "message": error_message}
         if found_session_id:
-            emit({"type": "session", "id": found_session_id})
-        emit({"type": "error", "message": error_message})
+            err["session_id"] = found_session_id
+        emit(err)
         sys.exit(1)
 
     if proc.returncode != 0 and not found_session_id:
@@ -100,11 +109,11 @@ def main():
         emit({"type": "error", "message": f"claude exited with {proc.returncode}: {stderr[:500]}"})
         sys.exit(1)
 
-    if found_session_id:
-        emit({"type": "session", "id": found_session_id})
     reply = last_final if last_final is not None else last_partial
-    if reply:
-        emit({"type": "text", "text": reply})
+    out = {"type": "result", "text": reply or ""}
+    if found_session_id:
+        out["session_id"] = found_session_id
+    emit(out)
     sys.exit(0)
 
 

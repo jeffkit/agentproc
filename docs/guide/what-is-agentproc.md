@@ -28,7 +28,7 @@ Messaging Platform
    Bridge                ← forwards the reply to the user
 ```
 
-The bridge writes a single `{"type":"turn",...}` line to the agent's stdin (message, session id, attachments, …), then closes stdin. Your script reads that line, calls whatever AI system it wants, and writes the response as NDJSON events (`{"type":"partial"}` to stream, `{"type":"text"}` for the final body, `{"type":"session"}` to declare an id). That's the entire protocol.
+The bridge writes a single `{"type":"turn",...}` line to the agent's stdin (message, session id, attachments, …), then closes stdin. Your script reads that line, calls whatever AI system it wants, and writes the response as NDJSON events (`{"type":"partial"}` to stream, `{"type":"result"}` for the final body with optional `session_id`). That's the entire protocol.
 
 ## What it is not
 
@@ -51,7 +51,7 @@ AgentProc occupies a specific niche. The neighboring protocols are similar in *s
 
 ### NDJSON / JSON Lines
 
-[NDJSON](https://jsonlines.org) is one JSON object per line — the wire format used internally by Claude Code, Codex, Gemini CLI streaming, and MCP. AgentProc 0.3 *is* NDJSON both directions: the turn arrives as one NDJSON line on stdin, and every line the agent emits is a typed JSON event (`partial`, `text`, `session`, `error`). The vocabulary is closed and small, so a bridge can classify each line in one line of code. The cost is that every emitted line must be valid JSON — a bare `echo "You said: hi"` is no longer a valid agent; the SDKs absorb that boilerplate for you.
+[NDJSON](https://jsonlines.org) is one JSON object per line — the wire format used internally by Claude Code, Codex, Gemini CLI streaming, and MCP. AgentProc 0.4 *is* NDJSON both directions: the turn arrives as one NDJSON line on stdin, and every line the agent emits is a typed JSON event (`partial`, `result`, `error`; optional `session_id` on events). The vocabulary is closed and small, so a bridge can classify each line in one line of code. The cost is that every emitted line must be valid JSON — a bare `echo "You said: hi"` is no longer a valid agent; the SDKs absorb that boilerplate for you.
 
 ### What AgentProc is *not*
 

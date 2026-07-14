@@ -31,15 +31,16 @@
  *   --help, -h                Show help
  *
  * Output (default mode):
- *   stderr  → NDJSON events ({"type":"partial"/"session"/"error"}) in real time
- *   stdout  → final reply body (assembled from {"type":"text"} events; after agent exits)
+ *   stderr  → NDJSON events ({"type":"partial"/"error"}) in real time
+ *   stdout  → final reply body (from {"type":"result"}, or '' when partials
+ *             were already forwarded; after agent exits)
  *   exit    → 0 success, 1 error, 124 timeout
  *
  * Output (--raw mode):
  *   stdout  → agent's stdout, verbatim, no parsing
  *   exit    → agent's exit code
  *
- * The last {"type":"session"} id is also printed on stderr at the very end,
+ * The first non-empty session_id is also printed on stderr at the very end,
  * prefixed with "agentproc:session:" so shell scripts can capture it:
  *   session=$(agentproc ... 2>&1 | grep '^agentproc:session:' | cut -d: -f3)
  */
@@ -485,8 +486,8 @@ Other:
   --help, -h                Show this help
 
 Output semantics:
-  stderr  → NDJSON events ({"type":"partial"/"session"/"error"})
-  stdout  → final reply body (assembled from {"type":"text"} events)
+  stderr  → NDJSON events ({"type":"partial"/"error"}; session via agentproc:session:)
+  stdout  → final reply body (from {"type":"result"}, or empty when partials streamed)
   exit    → 0 success · 1 error · 124 timeout (per spec)
 
 The final session id is printed on stderr as: agentproc:session:<id>

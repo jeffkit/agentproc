@@ -16,7 +16,7 @@ async def handler(ctx):
     # ctx.session_id        — 上一轮返回的 session ID（空 = 新会话）
     # ctx.session_name      — 会话可读名称
     # ctx.from_user         — 发送者标识符
-    # ctx.protocol_version  — bridge 实现的协议版本（如 "0.3"）
+    # ctx.protocol_version  — bridge 实现的协议版本（如 "0.4"）
     # ctx.attachments       — 附件列表，元素为 {kind, url, ...} 字典（空 = 无）
     # ctx.permission        — bridge 是否开启了权限通道
     reply = await my_llm(ctx.message)
@@ -47,7 +47,7 @@ async def handler(ctx):
 create_profile(handler)
 ```
 
-SDK 会输出 `{"type":"session","id":...}` 事件（随后是 `{"type":"text"}` 回复事件）。bridge 在下一轮把它作为 `session_id` 传回。
+SDK 会输出带可选 `session_id` 的 `{"type":"result","text":...}` 事件。bridge 持久化第一个非空 `session_id`，并在下一轮传回。
 
 ## 流式输出
 
@@ -156,7 +156,7 @@ timeout_secs: 60
 像 bridge 那样把 turn 对象写进 stdin：
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.3"}' | python3 ./agent.py
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./agent.py
 ```
 
 单独调试脚本时很有用。

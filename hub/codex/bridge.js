@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.3).
+ * AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.4).
  *
  * Default:
  *   codex exec --json <message>
@@ -29,8 +29,7 @@ const {
   emit,
   emitError,
   emitPartial,
-  emitSession,
-  emitText,
+  emitResult,
 } = require(path.join(HUB_DIR, '_shared', 'stream_utils.js'));
 
 const {
@@ -186,10 +185,10 @@ async function runPermissionMode(turn, env) {
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
     if (result.partialText) {
-      emitPartial(result.partialText);
+      emitPartial(result.partialText, foundSessionId);
       lastPartialText = result.partialText;
     }
-    if (result.finalText) {
+    if (result.finalText !== undefined && result.finalText !== null) {
       lastFinalText = result.finalText;
     }
   }
@@ -212,8 +211,7 @@ async function runPermissionMode(turn, env) {
   }
 
   if (errorMessage) {
-    if (foundSessionId) emitSession(foundSessionId);
-    emitError(errorMessage);
+    emitError(errorMessage, foundSessionId);
     process.exit(1);
   }
   if (code !== 0 && !foundSessionId) {
@@ -223,9 +221,8 @@ async function runPermissionMode(turn, env) {
     emitError(msg);
     process.exit(1);
   }
-  if (foundSessionId) emitSession(foundSessionId);
   const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
-  if (replyText) emitText(replyText);
+  emitResult(replyText || '', foundSessionId);
   process.exit(0);
 }
 

@@ -1,6 +1,6 @@
 # echo-agent
 
-The smallest valid AgentProc agent (wire 0.3). It reads the `{"type":"turn",...}` object from stdin and writes the message back to stdout as a `{"type":"text"}` event prefixed with "You said: ". Useful for verifying that your messaging bridge speaks the protocol correctly before plugging in a real AI CLI.
+The smallest valid AgentProc agent (wire 0.4). It reads the `{"type":"turn",...}` object from stdin and writes the message back to stdout as a `{"type":"result"}` event prefixed with "You said: ". Useful for verifying that your messaging bridge speaks the protocol correctly before plugging in a real AI CLI.
 
 Available in three languages — all produce identical output:
 
@@ -34,8 +34,8 @@ agentproc hub run echo-agent -p "hello"
 
 ```bash
 cd hub/echo-agent
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.3"}' | python3 bridge.py
-# → {"type":"text","text":"You said: hello"}
+echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+# → {"type":"result","text":"You said: hello"}
 ```
 
 </details>

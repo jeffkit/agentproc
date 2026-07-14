@@ -4,15 +4,15 @@ agentproc — AgentProc Protocol SDK (Python)
 Implements the AgentProc P0 protocol so you can write a single async handler
 instead of manually reading the turn from stdin and formatting stdout.
 
-Protocol contract (spec/protocol.md, wire protocol 0.3, NDJSON both directions):
+Protocol contract (spec/protocol.md, wire protocol 0.4, NDJSON both directions):
   Input  — stdin: one {"type":"turn",...} line (message, session_id,
                    session_name, from_user, attachments, permission,
                    protocol_version). Secrets/config stay in env.
   Output — stdout (one JSON object per line, discriminated by `type`):
              {"type":"partial","text":...}    — streaming chunk
-             {"type":"text","text":...}       — final reply body
-             {"type":"session","id":...}      — declare session id (last wins)
+             {"type":"result","text":...}     — terminal success body (at most one)
              {"type":"error","message":...}   — error message to forward to user
+           Optional ``session_id`` field on events (bridge persists first non-empty).
   Exit   — 0 success, 1 error, 124 timeout, 130 SIGINT, 143 SIGTERM
 
 Example::
@@ -253,7 +253,7 @@ def session_file_path(session_id: str, base_dir: Optional[str] = None) -> Path:
     Returns the path even if the file does not yet exist. Raises ``ValueError``
     when ``session_id`` is empty — callers should guard with ``if session_id``.
 
-    In wire 0.3 a session id is an arbitrary JSON string on the wire, but the
+    In wire 0.4 a session id is an arbitrary JSON string on the wire, but the
     SDK stores each session as ``<id>.jsonl``; an id that is not a storage-safe
     filename component (path separators, control chars, ``.``/``..``) would
     path-traverse out of the sessions directory and is rejected here. See
@@ -404,18 +404,13 @@ def create_profile(handler: Handler) -> None:
     if isinstance(result, str):
         result = AgentResult(response=result)
 
-    # session event — emitted last in the typical "I just learned it" flow,
-    # but the spec says last wins, so emitting it at the end is correct.
-    if result.session_id:
-        sys.stdout.write(
-            json.dumps({"type": "session", "id": result.session_id}, ensure_ascii=False, separators=(',', ':')) + "\n"
-        )
-        sys.stdout.flush()
-
-    if result.response:
-        sys.stdout.write(
-            json.dumps({"type": "text", "text": result.response}, ensure_ascii=False, separators=(',', ':')) + "\n"
-        )
+    # Emit a single {"type":"result"} carrying the reply body and optional
+    # session_id. Wire 0.4 removed dedicated session/text events.
+    if result.response or result.session_id:
+        evt: Dict[str, Any] = {"type": "result", "text": result.response or ""}
+        if result.session_id:
+            evt["session_id"] = result.session_id
+        sys.stdout.write(json.dumps(evt, ensure_ascii=False, separators=(',', ':')) + "\n")
         sys.stdout.flush()
 
     sys.exit(0)

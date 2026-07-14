@@ -1,5 +1,5 @@
 // Type declarations for agentproc
-// Protocol version: 0.3 (see spec/protocol.md)
+// Protocol version: 0.4 (see spec/protocol.md)
 
 declare module 'agentproc' {
 

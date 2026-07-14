@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AgentProc bridge for the `claude` CLI (Anthropic Claude Code, wire 0.3).
+AgentProc bridge for the `claude` CLI (Anthropic Claude Code, wire 0.4).
 
 Default (unattended) mode:
     claude -p <message> --output-format stream-json \\
@@ -38,8 +38,7 @@ from _shared.stream_utils import (  # noqa: E402
     emit,
     emit_error,
     emit_partial,
-    emit_session,
-    emit_text,
+    emit_result,
     main_entry,
     read_turn,
 )
@@ -89,6 +88,9 @@ def build_permission_args(session_id: str, env) -> list[str]:
 
 def parse_event(event: dict) -> Optional[EventResult]:
     etype = event.get("type")
+    if etype == "system" and event.get("subtype") == "init":
+        session_id = event.get("session_id")
+        return EventResult(session_id=session_id) if isinstance(session_id, str) and session_id else None
     if etype == "assistant":
         text = "".join(
             b.get("text", "")
@@ -298,9 +300,9 @@ def run_permission_mode(turn: dict, env) -> int:
         if result.error:
             error_message = result.error
         if result.partial_text:
-            emit_partial(result.partial_text)
+            emit_partial(result.partial_text, session_id=found_session_id)
             last_partial_text = result.partial_text
-        if result.final_text:
+        if result.final_text is not None:
             last_final_text = result.final_text
 
     stop.set()
@@ -312,9 +314,7 @@ def run_permission_mode(turn: dict, env) -> int:
     stderr_output = proc.stderr.read() if proc.stderr else ""
 
     if error_message:
-        if found_session_id:
-            emit_session(found_session_id)
-        emit_error(error_message)
+        emit_error(error_message, session_id=found_session_id)
         return 1
     if proc.returncode != 0 and not found_session_id:
         msg = f"{CLI_NAME} exited with {proc.returncode}"
@@ -323,11 +323,8 @@ def run_permission_mode(turn: dict, env) -> int:
         emit_error(msg)
         return 1
 
-    if found_session_id:
-        emit_session(found_session_id)
     reply_text = last_final_text if last_final_text is not None else last_partial_text
-    if reply_text:
-        emit_text(reply_text)
+    emit_result(reply_text or "", session_id=found_session_id)
     return 0
 
 

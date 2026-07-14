@@ -126,8 +126,8 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 
 | Stream | Content |
 |--------|---------|
-| stderr | NDJSON events (`{"type":"partial"}`, `{"type":"session"}`, `{"type":"error"}`) in real time |
-| stdout | Final reply body (assembled from `{"type":"text"}` events), printed after the agent exits |
+| stderr | NDJSON events (`{"type":"partial"}`, `{"type":"result"}`, `{"type":"error"}`; optional `session_id` on events) in real time |
+| stdout | Final reply body (from `{"type":"result"}` / streaming `partial`s), printed after the agent exits |
 | exit | `0` success · `1` error · `124` timeout (per spec) |
 
 The final session id is also printed on stderr as `agentproc:session:<id>`, so shell scripts can capture it:
@@ -189,7 +189,7 @@ The CLI is a thin wrapper over the SDK's `run()` function in [`sdk/node/src/runn
 - **Relative `cwd`**: when `cwd` is a relative path and `{{PROFILE_DIR}}` is known (i.e. the CLI was invoked with a profile path), it resolves against the profile's directory rather than the process cwd.
 - **Turn input (stdin)**: writes one `{"type":"turn",...}` NDJSON line to the agent's stdin (`message`, `session_id`, `session_name`, `from_user`, `attachments`, `permission`, `protocol_version`), then EOF — unless `permission: true`, in which case stdin stays open for `{"type":"permission_response"}` frames. The per-turn request does **not** travel in env vars.
 - **Env injection**: the profile `env` block (with `${VAR}` expansion gated by `env_allowlist`) plus a fixed infra set (`PATH`/`HOME`/`TERM`/…). `--env KEY=VALUE` adds per-run extras.
-- **stdout classification**: each line is a JSON object dispatched on `type` — `{"type":"session"}` (last wins), `{"type":"partial"}` (forwarded when `streaming: true`), `{"type":"text"}` (reply body, concatenated), `{"type":"error"}` (fails the turn). Non-JSON / unknown `type` lines are logged and ignored.
+- **stdout classification**: each line is a JSON object dispatched on `type` — `{"type":"partial"}` (forwarded when `streaming: true`), `{"type":"result"}` (terminal reply body; optional `session_id` / `usage`), `{"type":"error"}` (fails the turn). `session_id` is a field on events (first non-empty persisted; early omit OK; SHOULD attach once known). Non-JSON / unknown `type` lines are logged and ignored.
 - **Timeout handling**: SIGTERM → `kill_grace_secs` (default 5s) → SIGKILL. Exit code 124.
 - **Exit codes**: 0 success · 1 error (including when `{"type":"error"}` was emitted) · 124 timeout.
 

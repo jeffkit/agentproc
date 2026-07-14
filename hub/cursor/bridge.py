@@ -13,7 +13,7 @@ Invokes:
         [--model <model>]
 
 Schema (verified against agent 2026.06.24):
-    system/init     → session_id (forwarded as {"type":"session"})
+    system/init     → session_id (stamped on partial/result/error)
     assistant       → content[].text → {"type":"partial"} (delta chunks)
     result/success  → terminal; session_id (last wins) + final result text
     result/error    → {"type":"error"}

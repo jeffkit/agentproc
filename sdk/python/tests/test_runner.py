@@ -1,4 +1,4 @@
-"""Tests for agentproc.runner — the canonical bridge-side implementation (wire 0.3)."""
+"""Tests for agentproc.runner — the canonical bridge-side implementation (wire 0.4)."""
 
 from __future__ import annotations
 
@@ -32,14 +32,15 @@ from agentproc.runner import (
 # ---------------------------------------------------------------------------
 
 class TestClassifyLine:
-    def test_session(self):
-        assert classify_line('{"type":"session","id":"abc-123"}') == {"kind": "session", "value": "abc-123"}
+    def test_legacy_session_is_malformed(self):
+        assert classify_line('{"type":"session","id":"abc-123"}') == {
+            "kind": "malformed", "value": '{"type":"session","id":"abc-123"}'
+        }
 
-    def test_session_missing_id(self):
-        assert classify_line('{"type":"session"}') == {"kind": "session", "value": ""}
-
-    def test_session_non_string_id(self):
-        assert classify_line('{"type":"session","id":123}') == {"kind": "session", "value": ""}
+    def test_legacy_text_is_malformed(self):
+        assert classify_line('{"type":"text","text":"hello world"}') == {
+            "kind": "malformed", "value": '{"type":"text","text":"hello world"}'
+        }
 
     def test_partial(self):
         assert classify_line('{"type":"partial","text":"hello"}') == {"kind": "partial", "value": "hello"}
@@ -58,11 +59,31 @@ class TestClassifyLine:
     def test_partial_non_string_role_dropped(self):
         assert classify_line('{"type":"partial","text":"y","role":42}') == {"kind": "partial", "value": "y"}
 
-    def test_text(self):
-        assert classify_line('{"type":"text","text":"hello world"}') == {"kind": "text", "value": "hello world"}
+    def test_partial_with_session_id(self):
+        assert classify_line('{"type":"partial","text":"x","session_id":"s1"}') == {
+            "kind": "partial", "value": "x", "session_id": "s1"
+        }
+
+    def test_result(self):
+        assert classify_line('{"type":"result","text":"hello world"}') == {
+            "kind": "result", "value": "hello world"
+        }
+
+    def test_result_with_session_id(self):
+        assert classify_line('{"type":"result","text":"ok","session_id":"abc"}') == {
+            "kind": "result", "value": "ok", "session_id": "abc"
+        }
+
+    def test_result_missing_text(self):
+        assert classify_line('{"type":"result"}') == {"kind": "result", "value": ""}
 
     def test_error(self):
         assert classify_line('{"type":"error","message":"rate limited"}') == {"kind": "error", "value": "rate limited"}
+
+    def test_error_with_session_id(self):
+        assert classify_line('{"type":"error","message":"boom","session_id":"s1"}') == {
+            "kind": "error", "value": "boom", "session_id": "s1"
+        }
 
     def test_permission_request(self):
         c = classify_line('{"type":"permission_request","request_id":"1","tool_name":"Bash","input":{}}')
@@ -126,13 +147,13 @@ class TestIsValidSessionId:
     def test_empty_rejected(self):
         assert not is_valid_session_id("")
 
-    def test_wire_0_3_spaces_allowed(self):
+    def test_wire_spaces_allowed(self):
         assert is_valid_session_id("has space")
 
-    def test_wire_0_3_colons_allowed(self):
+    def test_wire_colons_allowed(self):
         assert is_valid_session_id("thread:abc")
 
-    def test_wire_0_3_plus_allowed(self):
+    def test_wire_plus_allowed(self):
         assert is_valid_session_id("a+b")
 
     def test_control_chars_rejected(self):
@@ -322,7 +343,7 @@ class TestNormalizeProfile:
         script = nested / "agent.sh"
         script.write_text(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"ok: $1\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ok: $1\\"}"\n'
         )
         script.chmod(script.stat().st_mode | 0o111)
         r = run(
@@ -333,8 +354,8 @@ class TestNormalizeProfile:
         assert r.exit_code == 0
 
 
-def test_protocol_version_is_0_3():
-    assert PROTOCOL_VERSION == "0.3"
+def test_protocol_version_is_0_4():
+    assert PROTOCOL_VERSION == "0.4"
 
 
 # ---------------------------------------------------------------------------
@@ -374,23 +395,22 @@ def py_agent(tmp_path):
 
 
 class TestRunEndToEnd:
-    def test_simple_text_event(self, agent_script):
-        agent = agent_script("#!/usr/bin/env bash\n" + _evt({"type": "text", "text": "hello"}) + "\n")
+    def test_simple_result_event(self, agent_script):
+        agent = agent_script("#!/usr/bin/env bash\n" + _evt({"type": "result", "text": "hello"}) + "\n")
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.reply == "hello"
         assert r.session_id == ""
         assert r.error == ""
         assert r.exit_code == 0
 
-    def test_session_last_wins(self, agent_script):
+    def test_session_id_first_non_empty_wins(self, agent_script):
         agent = agent_script(
             "#!/usr/bin/env bash\n"
-            + _evt({"type": "session", "id": "first"}) + "\n"
-            + _evt({"type": "session", "id": "second"}) + "\n"
-            + _evt({"type": "text", "text": "done"}) + "\n"
+            + _evt({"type": "result", "text": "done", "session_id": "first"}) + "\n"
+            + _evt({"type": "result", "text": "ignored", "session_id": "second"}) + "\n"
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
-        assert r.session_id == "second"
+        assert r.session_id == "first"
         assert r.reply == "done"
 
     def test_partial_triggers_callback(self, agent_script):
@@ -398,12 +418,13 @@ class TestRunEndToEnd:
             "#!/usr/bin/env bash\n"
             + _evt({"type": "partial", "text": "chunk1"}) + "\n"
             + _evt({"type": "partial", "text": "chunk2"}) + "\n"
-            + _evt({"type": "text", "text": "final"}) + "\n"
+            + _evt({"type": "result", "text": "final"}) + "\n"
         )
         partials: List[str] = []
         r = run({"command": str(agent)}, RunOptions(message="hi", on_partial=partials.append))
         assert partials == ["chunk1", "chunk2"]
-        assert r.reply == "final"
+        # Partials already forwarded → result.text must not become reply.
+        assert r.reply == ""
 
     def test_partial_with_role_streams_text(self, agent_script):
         # Python's on_partial receives only the text (role is not forwarded);
@@ -411,18 +432,18 @@ class TestRunEndToEnd:
         agent = agent_script(
             "#!/usr/bin/env bash\n"
             + _evt({"type": "partial", "text": "thinking...", "role": "thinking"}) + "\n"
-            + _evt({"type": "text", "text": "ok"}) + "\n"
+            + _evt({"type": "result", "text": ""}) + "\n"
         )
         partials: List[str] = []
         r = run({"command": str(agent)}, RunOptions(message="hi", on_partial=partials.append))
         assert partials == ["thinking..."]
-        assert r.reply == "ok"
+        assert r.reply == ""
 
     def test_partial_skipped_when_streaming_false(self, agent_script):
         agent = agent_script(
             "#!/usr/bin/env bash\n"
             + _evt({"type": "partial", "text": "chunk1"}) + "\n"
-            + _evt({"type": "text", "text": "final"}) + "\n"
+            + _evt({"type": "result", "text": "final"}) + "\n"
         )
         partials: List[str] = []
         r = run(
@@ -453,20 +474,19 @@ class TestRunEndToEnd:
         assert r.error == "soft fail"
         assert r.exit_code == 1
 
-    def test_multiple_text_events_concatenate(self, agent_script):
+    def test_second_result_ignored(self, agent_script):
         agent = agent_script(
             "#!/usr/bin/env bash\n"
-            + _evt({"type": "text", "text": "a"}) + "\n"
-            + _evt({"type": "text", "text": "b"}) + "\n"
-            + _evt({"type": "text", "text": "c"}) + "\n"
+            + _evt({"type": "result", "text": "a"}) + "\n"
+            + _evt({"type": "result", "text": "b"}) + "\n"
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
-        assert r.reply == "abc"
+        assert r.reply == "a"
 
-    def test_text_preserves_newlines(self, agent_script):
+    def test_result_preserves_newlines(self, agent_script):
         agent = agent_script(
             "#!/usr/bin/env bash\n"
-            + _evt({"type": "text", "text": "line 1\nline 2\nline 3"}) + "\n"
+            + _evt({"type": "result", "text": "line 1\nline 2\nline 3"}) + "\n"
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.reply == "line 1\nline 2\nline 3"
@@ -476,7 +496,7 @@ class TestRunEndToEnd:
             "#!/usr/bin/env bash\n"
             'echo " AGENT_SESSION:foo"\n'   # plain text → malformed
             'echo "not json"\n'             # malformed
-            + _evt({"type": "text", "text": "real reply"}) + "\n"
+            + _evt({"type": "result", "text": "real reply"}) + "\n"
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.session_id == ""
@@ -488,10 +508,10 @@ class TestRunEndToEnd:
         assert r.exit_code == 3
 
     def test_agent_env_vars_not_injected(self, agent_script):
-        # Wire 0.3: the per-turn request travels on stdin, not env.
+        # Wire 0.4: the per-turn request travels on stdin, not env.
         agent = agent_script(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"m=<${AGENT_MESSAGE:-unset}>\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"m=<${AGENT_MESSAGE:-unset}>\\"}"\n'
         )
         r = run({"command": str(agent)}, RunOptions(message="payload"))
         assert r.reply == "m=<unset>"
@@ -501,7 +521,7 @@ class TestRunEndToEnd:
             "import json, sys\n"
             "line = sys.stdin.readline()\n"
             "t = json.loads(line)\n"
-            "out = {'type':'text','text':'|'.join([\n"
+            "out = {'type':'result','text':'|'.join([\n"
             "  'msg='+t.get('message',''),\n"
             "  'sid='+t.get('session_id',''),\n"
             "  'sname='+t.get('session_name',''),\n"
@@ -522,7 +542,7 @@ class TestRunEndToEnd:
             "line = sys.stdin.readline()\n"
             "t = json.loads(line)\n"
             "atts = ','.join(a['kind']+':'+a['url'] for a in (t.get('attachments') or []))\n"
-            "sys.stdout.write(json.dumps({'type':'text','text':'atts='+atts})+'\\n')\n"
+            "sys.stdout.write(json.dumps({'type':'result','text':'atts='+atts})+'\\n')\n"
         )
         r = run(
             {"command": sys.executable, "args": [str(agent)]},
@@ -539,7 +559,7 @@ class TestRunEndToEnd:
     def test_message_placeholder_in_args(self, agent_script):
         agent = agent_script(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"args: $1\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"args: $1\\"}"\n'
         )
         r = run(
             {"command": str(agent), "args": ["{{MESSAGE}}"]},
@@ -551,7 +571,7 @@ class TestRunEndToEnd:
         monkeypatch.setenv("MY_TEST_VAR", "/some/path")
         agent = agent_script(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"v=$MY_KEY\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"v=$MY_KEY\\"}"\n'
         )
         r = run(
             {"command": str(agent), "env": {"MY_KEY": "${MY_TEST_VAR}"}},
@@ -562,7 +582,7 @@ class TestRunEndToEnd:
     def test_extra_env_applied(self, agent_script):
         agent = agent_script(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"x=$X\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"x=$X\\"}"\n'
         )
         r = run(
             {"command": str(agent)},
@@ -588,7 +608,7 @@ class TestRunEndToEnd:
         monkeypatch.setenv("SECRET_KEY", "top-secret")
         agent = agent_script(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"ALLOWED=$ALLOWED_KEY SECRET=$SECRET_KEY\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ALLOWED=$ALLOWED_KEY SECRET=$SECRET_KEY\\"}"\n'
         )
         warnings: List[str] = []
         r = run(
@@ -609,7 +629,7 @@ class TestRunEndToEnd:
         monkeypatch.setenv("AGENTPROC_SECURE_DEFAULT_LEAK", "should-not-leak")
         agent = agent_script(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"text\\",\\"text\\":\\"'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"'
             'DB=${BRIDGE_DB_PASSWORD:-unset} '
             'LEAK=${AGENTPROC_SECURE_DEFAULT_LEAK:-unset} '
             'PATH_SET=${PATH:+yes}\\"}"\n'
@@ -626,21 +646,24 @@ class TestRunEndToEnd:
     def test_invalid_session_id_ignored_preserves_previous(self, agent_script):
         agent = agent_script(
             "#!/usr/bin/env bash\n"
-            + _evt({"type": "session", "id": "valid-id-1"}) + "\n"
-            + _evt({"type": "session", "id": "bad/path"}) + "\n"
-            + _evt({"type": "text", "text": "done"}) + "\n"
+            + _evt({"type": "partial", "text": "x", "session_id": "valid-id-1"}) + "\n"
+            + _evt({"type": "result", "text": "done", "session_id": "bad/path"}) + "\n"
         )
         warnings: List[str] = []
-        r = run({"command": str(agent)}, RunOptions(message="hi", on_stderr=warnings.append))
+        partials: List[str] = []
+        r = run(
+            {"command": str(agent)},
+            RunOptions(message="hi", on_stderr=warnings.append, on_partial=partials.append),
+        )
         assert r.session_id == "valid-id-1"
-        assert r.reply == "done"
+        assert partials == ["x"]
+        assert r.reply == ""  # partials forwarded → empty reply
         assert any("invalid" in w and "session id" in w for w in warnings)
 
     def test_invalid_session_id_when_no_previous(self, agent_script):
         agent = agent_script(
             "#!/usr/bin/env bash\n"
-            + _evt({"type": "session", "id": "bad/path"}) + "\n"
-            + _evt({"type": "text", "text": "done"}) + "\n"
+            + _evt({"type": "result", "text": "done", "session_id": "bad/path"}) + "\n"
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.session_id == ""
@@ -670,8 +693,7 @@ class TestRunEndToEnd:
             + _evt({"type": "permission_request", "request_id": "r1", "tool_name": "Bash", "input": {"command": "true"}}) + "\n"
             'IFS= read -r resp\n'
             'if echo "$resp" | grep -q \'"behavior":"allow"\'; then '
-            + _evt({"type": "text", "text": "ALLOWED"}) + '; fi\n'
-            + _evt({"type": "session", "id": "sess-perm-1"}) + "\n"
+            + _evt({"type": "result", "text": "ALLOWED", "session_id": "sess-perm-1"}) + '; fi\n'
         )
         seen: List[dict] = []
 
@@ -694,7 +716,7 @@ class TestRunEndToEnd:
             "#!/usr/bin/env bash\n"
             "read -r turn\n"
             + _evt({"type": "permission_request", "request_id": "r1", "tool_name": "Bash", "input": {}}) + "\n"
-            + _evt({"type": "text", "text": "done"}) + "\n"
+            + _evt({"type": "result", "text": "done"}) + "\n"
         )
         stderr: List[str] = []
         called = False
@@ -719,9 +741,9 @@ class TestRunEndToEnd:
             + _evt({"type": "permission_request", "request_id": "r2", "tool_name": "Bash", "input": {}}) + "\n"
             'IFS= read -r resp\n'
             'if echo "$resp" | grep -q \'"behavior":"deny"\'; then '
-            + _evt({"type": "text", "text": "DENIED"}) + '; fi\n'
+            + _evt({"type": "result", "text": "DENIED"}) + '; fi\n'
             'if echo "$resp" | grep -q \'not allowed\'; then '
-            + _evt({"type": "text", "text": "HASMSG"}) + '; fi\n'
+            + _evt({"type": "result", "text": "HASMSG"}) + '; fi\n'
         )
         r = run(
             {"command": str(agent), "permission": True},
@@ -730,5 +752,5 @@ class TestRunEndToEnd:
                 on_permission=lambda _r: {"behavior": "deny", "message": "not allowed"},
             ),
         )
+        # First result wins; second is ignored — DENIED is emitted first.
         assert "DENIED" in r.reply
-        assert "HASMSG" in r.reply
