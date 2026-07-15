@@ -623,6 +623,16 @@ async function runViaExecutor(profile, options, executor) {
       return result;
     }
     result.reply = text;
+    // Plain executors that manage a session id (e.g. agy via --conversation)
+    // expose getSessionId() on their handlers so the runner can surface it in
+    // RunResult.sessionId without requiring the CLI to emit NDJSON.
+    if (typeof handlers.getSessionId === 'function') {
+      const sid = handlers.getSessionId();
+      if (isValidSessionId(sid) && !result.sessionId) {
+        result.sessionId = sid;
+        if (options.onSession) options.onSession(sid);
+      }
+    }
     result.exitCode = EXIT_SUCCESS;
     return result;
   }

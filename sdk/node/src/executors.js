@@ -18,12 +18,17 @@
  *     buildArgs:   (message: string, sessionId: string, env: object) => string[]
  *     parseEvent:  (event: object) => ParseResult | null
  *                  (omitted / irrelevant when plain: true)
- *     makeHandlers:  () => { buildArgs, parseEvent }
+ *     makeHandlers:  () => { buildArgs, parseEvent?, getSessionId? }
  *                  — optional factory for stateful executors (e.g. kimi-code,
  *                  cursor) that need fresh per-turn state shared between
  *                  buildArgs and parseEvent. When present, the runner calls
- *                  makeHandlers() once per turn; the returned { buildArgs,
- *                  parseEvent } pair is used for that turn only.
+ *                  makeHandlers() once per turn; the returned object is used
+ *                  for that turn only.
+ *                  For plain executors (plain: true) that generate or reuse a
+ *                  session id in buildArgs, makeHandlers may expose a
+ *                  getSessionId() method instead of parseEvent. The runner
+ *                  calls getSessionId() after the process exits to populate
+ *                  RunResult.sessionId.
  *                  Executors without makeHandlers use buildArgs / parseEvent
  *                  directly (they must be stateless / re-entrant).
  *   }
@@ -423,14 +428,28 @@ const agy = {
   installHint: 'See the agy project for installation instructions.',
   plain: true,
 
-  buildArgs(message, _sessionId, env) {
-    const args = ['agy', '--print', message];
-    if ((env.AGY_DANGEROUSLY_SKIP_PERMISSIONS || '1') === '1') {
-      args.push('--dangerously-skip-permissions');
+  // agy supports --conversation <id> for resuming prior conversations.
+  // makeHandlers generates or reuses the session id so it can be returned
+  // in RunResult.sessionId after the process exits.
+  makeHandlers() {
+    const session = { id: null };
+
+    function buildArgs(message, sessionId, env) {
+      session.id = sessionId || crypto.randomUUID();
+      const args = ['agy', '--print', message, '--conversation', session.id];
+      if ((env.AGY_DANGEROUSLY_SKIP_PERMISSIONS || '1') === '1') {
+        args.push('--dangerously-skip-permissions');
+      }
+      const model = (env.AGY_MODEL || '').trim();
+      if (model) args.push('--model', model);
+      return args;
     }
-    const model = (env.AGY_MODEL || '').trim();
-    if (model) args.push('--model', model);
-    return args;
+
+    function getSessionId() {
+      return session.id;
+    }
+
+    return { buildArgs, getSessionId };
   },
 };
 

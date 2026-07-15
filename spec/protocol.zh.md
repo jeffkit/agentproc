@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.1`
+**文档修订：** `1.2`
 **状态：** 草案
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -331,6 +331,11 @@ agent process 写入 stdout。bridge 逐行实时读取。**每行都是一个 J
 | 入站盖章 | 当 `turn.session_id` 非空时，可 resume 的 agent **SHOULD** 从第一条事件起在每条 stdout 事件上包含同一值（不做发现缓冲）。发现缓冲仅适用于新会话（`turn.session_id` 为 `""`）且 CLI 异步分配 id 的情形。 |
 | 不缓冲 permission | agent **MUST NOT** 为等待会话 id 而缓冲 `permission_request`（或任何需要 stdin 响应的事件）。优先在入站 `turn.session_id` 存在时盖章，或在 id 已知前不带该字段发出请求。 |
 | 不一致 | 在已观察到一个非空 `session_id` 之后出现**不同的**非空值，属于协议违规。bridge **SHOULD** 向 stderr 记警告，并 **MUST** 保留第一个非空值（fail-soft）。它 **MUST NOT** 发明 id。 |
+
+**纯文本 CLI executor。** 部分 SDK executor 实现运行输出纯文本（而非 NDJSON）的 CLI，因此无法通过 stdout 事件暴露 `session_id`。对于这类 executor，会话连续性完全在参数构建阶段处理：
+
+- 当 CLI 接受会话/对话标志时（例如 `agy` 的 `--conversation <id>`），executor 将入站 `session_id` 传给该标志。若 `session_id` 为空（新会话），executor 生成一个稳定 id（例如 UUID）并传入。进程成功退出后，SDK 将该 id 填入 `RunResult.sessionId`，以便 host 在下一轮传回。
+- 当 CLI 不支持恢复标志时（`aider`、`deepseek`、`pi`），`RunResult.sessionId` 为 `""`。host 负责持久化自己发送的 id 并在后续轮次传回；SDK 无法从进程输出中获取该值。
 
 线上的 `session_id` 是任意 JSON 字符串——**MAY** 含冒号、斜杠、空格或任何可 JSON 转义的字符。把每个会话存为 `<id>.jsonl` 的 SDK 历史助手施加了**存储级**约束：作为文件名组件不安全的 id 无法在文件存储中往返。持久化 id 的 bridge/SDK **SHOULD** 清洗或拒绝此类 id 并记 stderr 警告；线上本身不加限制。
 

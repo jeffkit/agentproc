@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.1`
+**Document revision:** `1.2`
 **Status:** Draft
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -333,6 +333,11 @@ Session continuity is carried as an optional field on stdout events, **not** as 
 | Inbound stamp | When `turn.session_id` is non-empty, resume-capable agents SHOULD include that same value on every stdout event from the first event onward (no discovery buffering). Discovery buffering applies only when starting a new session (`turn.session_id` is `""`) and the CLI assigns an id asynchronously. |
 | No permission buffering | Agents MUST NOT buffer a `permission_request` (or any event that requires a stdin response) while waiting for a session id. Prefer stamping the inbound `turn.session_id` when present, or emitting the request without the field until the id is known. |
 | Disagreement | A **different** non-empty `session_id` after one has already been observed is a protocol violation. The bridge SHOULD log a warning to stderr and MUST keep the first non-empty value (fail-soft). It MUST NOT invent an id. |
+
+**Plain-CLI executors.** Some SDK executor implementations run a CLI that emits plain text (not NDJSON) and therefore cannot surface a `session_id` via stdout events. For these executors, session continuity is handled entirely in the executor's argument-building step:
+
+- When the CLI accepts a session or conversation flag (e.g. `agy`'s `--conversation <id>`), the executor passes the inbound `session_id` to that flag. If `session_id` is empty (new session), the executor generates a stable id (e.g. a UUID) and passes it. After the process exits successfully, the SDK returns that id in `RunResult.sessionId` so the host can pass it back on the next turn.
+- When the CLI does not expose a resumption flag (`aider`, `deepseek`, `pi`), `RunResult.sessionId` is `""`. The host is responsible for persisting the id it sent and passing it back on subsequent turns; the SDK cannot learn it from the process output.
 
 `session_id` on the wire is an arbitrary JSON string — it MAY contain colons, slashes, whitespace, or any other JSON-escapeable character. SDK history helpers that store each session as `<id>.jsonl` impose a **storage-level** constraint: an id that is not safe as a filename component cannot round-trip through file storage. Bridges/SDKs that persist ids SHOULD either sanitise or reject such ids with a stderr warning; the wire itself places no restriction.
 
