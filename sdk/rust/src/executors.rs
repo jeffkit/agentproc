@@ -1494,8 +1494,15 @@ fn extract_assistant_text(event: &serde_json::Value) -> Option<String> {
 
 /// Helper for executors that need to substitute placeholders into pre-built
 /// argv. Exposed for custom executors; built-in executors do not use it.
-pub fn substitute_argv(argv: &[String], ctx: &SubstCtx) -> Vec<String> {
-    argv.iter().map(|a| crate::env::substitute(a, ctx)).collect()
+/// Returns a [`PlaceholderError`](crate::env::PlaceholderError) when a value
+/// contains an unsafe byte (SEC-003).
+pub fn substitute_argv(
+    argv: &[String],
+    ctx: &SubstCtx,
+) -> Result<Vec<String>, crate::env::PlaceholderError> {
+    argv.iter()
+        .map(|a| crate::env::substitute(a, ctx))
+        .collect()
 }
 
 #[cfg(test)]

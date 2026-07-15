@@ -43,6 +43,9 @@ pub enum RunnerError {
     #[error("profile.env_allowlist must be a list")]
     InvalidAllowlist,
 
+    #[error("placeholder substitution rejected an unsafe value: {0}")]
+    Placeholder(String),
+
     #[error("failed to spawn `{cli}`: {source}")]
     Spawn { cli: String, #[source] source: std::io::Error },
 
@@ -57,4 +60,10 @@ pub enum RunnerError {
 
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+impl From<crate::env::PlaceholderError> for RunnerError {
+    fn from(e: crate::env::PlaceholderError) -> Self {
+        RunnerError::Placeholder(e.to_string())
+    }
 }

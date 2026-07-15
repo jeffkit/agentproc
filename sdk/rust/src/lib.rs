@@ -30,7 +30,10 @@
 
 mod env;
 
-pub use env::{build_base_env, expand_env_ref, expand_env_ref_with_allowlist, substitute, SubstCtx};
+pub use env::{
+    build_base_env, expand_env_ref, expand_env_ref_with_allowlist, substitute, PlaceholderError,
+    SubstCtx,
+};
 mod error;
 pub mod history;
 mod protocol;

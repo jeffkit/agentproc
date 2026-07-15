@@ -112,6 +112,10 @@ pub struct RunResult {
     pub exit_code: i32,
     pub timed_out: bool,
     pub usage: Option<serde_json::Value>,
+    /// Wall-clock duration of the turn (process spawn to exit), in
+    /// milliseconds. Neutral observability field — hosts use it for logs,
+    /// metrics, billing. Zero when unset.
+    pub duration_ms: u64,
 }
 
 impl RunResult {
@@ -127,28 +131,38 @@ impl RunResult {
 /// 3. `executor` + unknown + no command → hard fail
 /// 4. no `executor`        → spawn command
 pub async fn run(profile: &crate::Profile, opts: RunOptions) -> Result<RunResult, RunnerError> {
+    let started = std::time::Instant::now();
     let cfg = ResolvedConfig::from(profile, &opts)?;
 
     #[cfg(feature = "executors")]
-    if let Some(name) = &profile.executor {
+    let result = if let Some(name) = &profile.executor {
         if let Some(exec) = lookup(name) {
-            return run_via_executor(profile, opts, cfg, exec).await;
+            run_via_executor(profile, opts, cfg, exec).await
+        } else {
+            // Unknown executor: warn + fallback to command.
+            if let Some(on_stderr) = &opts.on_stderr {
+                on_stderr(&format!(
+                    "[agentproc runner] unknown executor `{name}`; falling back to command spawn"
+                ));
+            }
+            if profile.command.trim().is_empty() {
+                return Err(RunnerError::UnknownExecutor(
+                    name.clone(),
+                    crate::executors::executor_names().join(", "),
+                ));
+            }
+            run_via_spawn(profile, opts, cfg).await
         }
-        // Unknown executor: warn + fallback to command.
-        if let Some(on_stderr) = &opts.on_stderr {
-            on_stderr(&format!(
-                "[agentproc runner] unknown executor `{name}`; falling back to command spawn"
-            ));
-        }
-        if profile.command.trim().is_empty() {
-            return Err(RunnerError::UnknownExecutor(
-                name.clone(),
-                crate::executors::executor_names().join(", "),
-            ));
-        }
-    }
+    } else {
+        run_via_spawn(profile, opts, cfg).await
+    };
 
-    run_via_spawn(profile, opts, cfg).await
+    #[cfg(not(feature = "executors"))]
+    let result = run_via_spawn(profile, opts, cfg).await;
+
+    let mut result = result?;
+    result.duration_ms = started.elapsed().as_millis() as u64;
+    Ok(result)
 }
 
 /// Pre-resolved, merged run configuration (profile + option overrides).
@@ -221,8 +235,12 @@ async fn run_via_spawn(
     opts: RunOptions,
     cfg: ResolvedConfig,
 ) -> Result<RunResult, RunnerError> {
-    let command = substitute(&profile.command, &cfg.subst);
-    let args: Vec<String> = profile.args.iter().map(|a| substitute(a, &cfg.subst)).collect();
+    let command = substitute(&profile.command, &cfg.subst)?;
+    let args: Vec<String> = profile
+        .args
+        .iter()
+        .map(|a| substitute(a, &cfg.subst))
+        .collect::<Result<_, _>>()?;
     if command.trim().is_empty() {
         return Err(RunnerError::EmptyCommand);
     }
@@ -232,7 +250,7 @@ async fn run_via_spawn(
     if let Some(cwd) = &opts.cwd {
         cmd.current_dir(cwd);
     } else if let Some(cwd) = &profile.cwd {
-        cmd.current_dir(substitute(cwd, &cfg.subst));
+        cmd.current_dir(substitute(cwd, &cfg.subst)?);
     }
     cmd.env_clear();
     for (k, v) in &cfg.env {
@@ -542,7 +560,7 @@ async fn run_via_executor(
     if let Some(cwd) = &opts.cwd {
         cmd.current_dir(cwd);
     } else if let Some(cwd) = &profile.cwd {
-        cmd.current_dir(substitute(cwd, &cfg.subst));
+        cmd.current_dir(substitute(cwd, &cfg.subst)?);
     }
     cmd.env_clear();
     for (k, v) in &cfg.env {

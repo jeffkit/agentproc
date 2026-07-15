@@ -110,14 +110,57 @@ fn is_valid_env_ident(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// SEC-003: values injected into `{{MESSAGE}}` / `{{SESSION_ID}}` /
+/// `{{SESSION_NAME}}` may be user-controlled (e.g. a forwarded chat message).
+/// When such a value is substituted into a command's argv via a placeholder,
+/// bytes that a shell-style wrapper would interpret as control characters
+/// (NUL, newline, carriage return) open a command-injection surface. Reject
+/// them before substitution.
+///
+/// Only validates a field when its placeholder actually appears in the
+/// template — callers that deliver the message via the stdin turn object
+/// (the 0.4 default) do not have `{{MESSAGE}}` in any arg template and must
+/// not be rejected just because the message contains newlines.
+fn validate_safe_placeholder_value(template: &str, field: &str, value: &str) -> Result<(), PlaceholderError> {
+    let token = match field {
+        "message" => "{{MESSAGE}}",
+        "session_id" => "{{SESSION_ID}}",
+        "session_name" => "{{SESSION_NAME}}",
+        _ => return Ok(()),
+    };
+    if !template.contains(token) {
+        return Ok(());
+    }
+    for b in value.bytes() {
+        if b == 0 || b == b'\n' || b == b'\r' {
+            return Err(PlaceholderError::UnsafeValue { field: field.to_string() });
+        }
+    }
+    Ok(())
+}
+
+/// Error returned by [`substitute`] when a placeholder value contains bytes
+/// that would be unsafe in a shell-style wrapper.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PlaceholderError {
+    #[error("placeholder `{field}` value contains an unsafe byte (NUL/newline/CR) — refusing to inject into command/args")]
+    UnsafeValue { field: String },
+}
+
 /// Substitute `{{PLACEHOLDER}}` tokens in a string. Supported tokens:
 /// `{{MESSAGE}}`, `{{SESSION_ID}}`, `{{SESSION_NAME}}`, `{{PROFILE_DIR}}`.
-pub fn substitute(value: &str, ctx: &SubstCtx) -> String {
-    value
+///
+/// Returns a [`PlaceholderError`] (SEC-003) when a user-controlled placeholder
+/// value contains NUL/newline/CR — see [`validate_safe_placeholder_value`].
+pub fn substitute(value: &str, ctx: &SubstCtx) -> Result<String, PlaceholderError> {
+    validate_safe_placeholder_value(value, "message", &ctx.message)?;
+    validate_safe_placeholder_value(value, "session_id", &ctx.session_id)?;
+    validate_safe_placeholder_value(value, "session_name", &ctx.session_name)?;
+    Ok(value
         .replace("{{MESSAGE}}", &ctx.message)
         .replace("{{SESSION_ID}}", &ctx.session_id)
         .replace("{{SESSION_NAME}}", &ctx.session_name)
-        .replace("{{PROFILE_DIR}}", &ctx.profile_dir)
+        .replace("{{PROFILE_DIR}}", &ctx.profile_dir))
 }
 
 /// Placeholder context.
@@ -193,8 +236,53 @@ mod tests {
             profile_dir: "/p".into(),
         };
         assert_eq!(
-            substitute("{{MESSAGE}}|{{SESSION_ID}}|{{SESSION_NAME}}|{{PROFILE_DIR}}", &ctx),
+            substitute("{{MESSAGE}}|{{SESSION_ID}}|{{SESSION_NAME}}|{{PROFILE_DIR}}", &ctx).unwrap(),
             "hi|s1|feat|/p"
         );
+    }
+
+    #[test]
+    fn substitute_rejects_unsafe_message_newline() {
+        let ctx = SubstCtx {
+            message: "hello\nworld".into(),
+            ..Default::default()
+        };
+        let err = substitute("echo {{MESSAGE}}", &ctx).unwrap_err();
+        assert!(matches!(err, PlaceholderError::UnsafeValue { field } if field == "message"));
+    }
+
+    #[test]
+    fn substitute_rejects_unsafe_message_nul_and_cr() {
+        let ctx_nul = SubstCtx { message: "a\0b".into(), ..Default::default() };
+        assert!(substitute("{{MESSAGE}}", &ctx_nul).is_err());
+        let ctx_cr = SubstCtx { message: "a\rb".into(), ..Default::default() };
+        assert!(substitute("{{MESSAGE}}", &ctx_cr).is_err());
+    }
+
+    #[test]
+    fn substitute_allows_newlines_when_no_placeholder() {
+        // Turn object path: message carries newlines but no {{MESSAGE}} in
+        // template — must NOT be rejected (SEC-003 only fires on injection).
+        let ctx = SubstCtx { message: "multi\nline".into(), ..Default::default() };
+        assert_eq!(substitute("no placeholders here", &ctx).unwrap(), "no placeholders here");
+    }
+
+    #[test]
+    fn substitute_rejects_unsafe_session_fields() {
+        let ctx = SubstCtx {
+            session_id: "s\n1".into(),
+            session_name: "feat\rname".into(),
+            ..Default::default()
+        };
+        assert!(substitute("--session {{SESSION_ID}}", &ctx).is_err());
+        assert!(substitute("--name {{SESSION_NAME}}", &ctx).is_err());
+    }
+
+    #[test]
+    fn substitute_profile_dir_not_validated() {
+        // PROFILE_DIR is host-controlled (a path), never user input — even
+        // with a newline it must pass (no injection surface).
+        let ctx = SubstCtx { profile_dir: "/a\nb".into(), ..Default::default() };
+        assert_eq!(substitute("{{PROFILE_DIR}}/script", &ctx).unwrap(), "/a\nb/script");
     }
 }
