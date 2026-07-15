@@ -83,6 +83,14 @@ pub trait TurnHandlers: Send {
     /// [`ParseResult`]. Return `None` for events the executor does not
     /// recognise. Not called when `Executor::plain()` returns `true`.
     fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult>;
+    /// For plain executors that mint/reuse a session id in `build_args`
+    /// (e.g. `agy --conversation <id>`): return that id so the runner can
+    /// populate `RunResult.session_id` after the process exits. NDJSON
+    /// executors derive session id from stdout events and leave this as
+    /// `None`. Called once after the turn ends.
+    fn get_session_id(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Stub type returned when an executor name is not registered. Lets the
@@ -100,6 +108,16 @@ static STATIC_EXECUTORS: Lazy<HashMap<&'static str, Factory>> = Lazy::new(|| {
     let mut m = HashMap::new();
     m.insert("codex", codex_factory as Factory);
     m.insert("claude-code", claude_code_factory as Factory);
+    m.insert("codebuddy", codebuddy_factory as Factory);
+    m.insert("cursor", cursor_factory as Factory);
+    m.insert("gemini-cli", gemini_cli_factory as Factory);
+    m.insert("kimi-code", kimi_code_factory as Factory);
+    m.insert("opencode", opencode_factory as Factory);
+    m.insert("qwen-code", qwen_code_factory as Factory);
+    m.insert("agy", agy_factory as Factory);
+    m.insert("aider", aider_factory as Factory);
+    m.insert("deepseek", deepseek_factory as Factory);
+    m.insert("pi", pi_factory as Factory);
     m
 });
 
@@ -112,6 +130,36 @@ fn codex_factory() -> Box<dyn Executor> {
 }
 fn claude_code_factory() -> Box<dyn Executor> {
     Box::new(ClaudeCodeExecutor)
+}
+fn codebuddy_factory() -> Box<dyn Executor> {
+    Box::new(CodebuddyExecutor)
+}
+fn cursor_factory() -> Box<dyn Executor> {
+    Box::new(CursorExecutor)
+}
+fn gemini_cli_factory() -> Box<dyn Executor> {
+    Box::new(GeminiCliExecutor)
+}
+fn kimi_code_factory() -> Box<dyn Executor> {
+    Box::new(KimiCodeExecutor)
+}
+fn opencode_factory() -> Box<dyn Executor> {
+    Box::new(OpencodeExecutor)
+}
+fn qwen_code_factory() -> Box<dyn Executor> {
+    Box::new(QwenCodeExecutor)
+}
+fn agy_factory() -> Box<dyn Executor> {
+    Box::new(AgyExecutor)
+}
+fn aider_factory() -> Box<dyn Executor> {
+    Box::new(AiderExecutor)
+}
+fn deepseek_factory() -> Box<dyn Executor> {
+    Box::new(DeepseekExecutor)
+}
+fn pi_factory() -> Box<dyn Executor> {
+    Box::new(PiExecutor)
 }
 
 /// Look up an executor by name. Checks dynamic registry first, then static.
@@ -168,23 +216,25 @@ impl TurnHandlers for CodexTurn {
         &self,
         message: &str,
         session_id: &str,
-        _env: &HashMap<String, String>,
+        env: &HashMap<String, String>,
     ) -> Vec<String> {
-        // codex exec [resume <session_id>] <message> --dangerously-bypass-approvals-and-sandbox --json
-        let mut args: Vec<String> = vec!["exec".into()];
+        // Mirrors node sdk: `codex exec [--json] [resume --json <id>] <msg> [-c model="..."]`
+        let model = env.get("CODEX_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty());
+        let mut args: Vec<String> = vec![CodexExecutor.cli_name().to_string(), "exec".into()];
         if !session_id.is_empty() {
             args.push("resume".into());
+            args.push("--json".into());
             args.push(session_id.to_string());
+            args.push(message.to_string());
+        } else {
+            args.push("--json".into());
+            args.push(message.to_string());
         }
-        args.push(message.to_string());
-        args.push("--dangerously-bypass-approvals-and-sandbox".into());
-        args.push("--json".into());
-        // argv[0] is the CLI binary name, prepended by the runner before spawn.
-        // Executors here return argv[1..] for clarity; the runner prepends
-        // cli_name. See runner::run_via_executor.
-        let mut full = vec![CodexExecutor.cli_name().to_string()];
-        full.extend(args);
-        full
+        if let Some(m) = model {
+            args.push("-c".into());
+            args.push(format!("model=\"{m}\""));
+        }
+        args
     }
 
     fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
@@ -203,18 +253,19 @@ impl TurnHandlers for CodexTurn {
                 if item.get("type").and_then(|v| v.as_str()) != Some("agent_message") {
                     return None;
                 }
-                let text = item.get("text")?.as_str()?;
-                if text.trim().is_empty() {
+                let text = item.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                if text.is_empty() {
                     None
                 } else {
                     Some(ParseResult::partial(text))
                 }
             }
-            "turn.completed" => {
-                // Terminal; optionally carry usage. No body text here — the
-                // accumulated partials form the reply.
-                let usage = event.get("usage").cloned();
-                Some(ParseResult { usage, ..Default::default() })
+            "turn.failed" => {
+                let msg = event
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("codex turn failed");
+                Some(ParseResult::error(msg))
             }
             _ => None,
         }
@@ -325,6 +376,726 @@ impl TurnHandlers for ClaudeCodeTurn {
             _ => None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// codebuddy
+// ---------------------------------------------------------------------------
+
+/// Tencent CodeBuddy Code CLI (`codebuddy -p --output-format stream-json`).
+/// NDJSON, stateless. Schema-compatible with claude-code.
+pub struct CodebuddyExecutor;
+
+impl Executor for CodebuddyExecutor {
+    fn cli_name(&self) -> &str {
+        "codebuddy"
+    }
+    fn install_hint(&self) -> &str {
+        "See your internal CodeBuddy installation docs."
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(CodebuddyTurn)
+    }
+}
+
+struct CodebuddyTurn;
+
+impl TurnHandlers for CodebuddyTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            CodebuddyExecutor.cli_name().to_string(),
+            "-p".into(),
+            message.to_string(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--dangerously-skip-permissions".into(),
+        ];
+        let disallow = env
+            .get("CODEBUDDY_DISALLOW_TOOLS")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "AskUserQuestion".to_string());
+        if !disallow.is_empty() {
+            args.push("--disallowedTools".into());
+            args.push(disallow);
+        }
+        if let Some(model) = env.get("CODEBUDDY_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        if !session_id.is_empty() {
+            args.push("-r".into());
+            args.push(session_id.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        let etype = event.get("type")?.as_str()?;
+        match etype {
+            "assistant" => {
+                let text = extract_assistant_text(&event)?;
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(ParseResult::partial(text))
+                }
+            }
+            "result" => {
+                let session_id = event.get("session_id").and_then(|v| v.as_str()).map(String::from);
+                if event.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                    let msg = event.get("result").and_then(|v| v.as_str()).unwrap_or("codebuddy reported an error");
+                    let mut r = ParseResult::error(msg);
+                    r.session_id = session_id;
+                    return Some(r);
+                }
+                let text = event.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                Some(ParseResult {
+                    final_text: Some(if text.is_empty() { None } else { Some(text.to_string()) }),
+                    session_id,
+                    ..Default::default()
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cursor
+// ---------------------------------------------------------------------------
+
+/// Cursor Agent CLI (`agent -p --output-format stream-json`). NDJSON,
+/// stateful: cursor emits a duplicate full-text assistant event at the end of
+/// a streamed turn, so parseEvent tracks accumulated text to suppress it.
+pub struct CursorExecutor;
+
+impl Executor for CursorExecutor {
+    fn cli_name(&self) -> &str {
+        "agent"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: brew install cursor-agent  (then run `agent login`)"
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(CursorTurn { accumulated: Vec::new() })
+    }
+}
+
+struct CursorTurn {
+    accumulated: Vec<String>,
+}
+
+impl TurnHandlers for CursorTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            CursorExecutor.cli_name().to_string(),
+            "-p".into(),
+            message.to_string(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--stream-partial-output".into(),
+        ];
+        let force = env.get("CURSOR_FORCE").map(|s| s.as_str()).unwrap_or("1");
+        if force == "1" {
+            args.push("--yolo".into());
+        }
+        if let Some(model) = env.get("CURSOR_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        if !session_id.is_empty() {
+            args.push("--resume".into());
+            args.push(session_id.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        let etype = event.get("type")?.as_str()?;
+        match etype {
+            "system" if event.get("subtype").and_then(|v| v.as_str()) == Some("init") => {
+                let sid = event.get("session_id")?.as_str()?;
+                if sid.is_empty() {
+                    None
+                } else {
+                    Some(ParseResult::session(sid))
+                }
+            }
+            "assistant" => {
+                let text = extract_assistant_text(&event)?;
+                if text.is_empty() {
+                    return None;
+                }
+                // Suppress the duplicate full-text event cursor emits at turn end.
+                if text == self.accumulated.join("") {
+                    return None;
+                }
+                self.accumulated.push(text.clone());
+                Some(ParseResult::partial(text))
+            }
+            "result" => {
+                let session_id = event.get("session_id").and_then(|v| v.as_str()).map(String::from);
+                let is_err = event.get("is_error").and_then(|v| v.as_bool()) == Some(true)
+                    || event.get("subtype").and_then(|v| v.as_str()) == Some("error");
+                if is_err {
+                    let msg = event.get("result").and_then(|v| v.as_str()).unwrap_or("cursor agent reported an error");
+                    let mut r = ParseResult::error(msg);
+                    r.session_id = session_id;
+                    return Some(r);
+                }
+                let text = event.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                Some(ParseResult {
+                    final_text: Some(if text.is_empty() { None } else { Some(text.to_string()) }),
+                    session_id,
+                    ..Default::default()
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// gemini-cli
+// ---------------------------------------------------------------------------
+
+/// Google Gemini CLI (`gemini -p --output-format stream-json`). NDJSON,
+/// stateless.
+pub struct GeminiCliExecutor;
+
+impl Executor for GeminiCliExecutor {
+    fn cli_name(&self) -> &str {
+        "gemini"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: npm install -g @google/gemini-cli"
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(GeminiCliTurn)
+    }
+}
+
+struct GeminiCliTurn;
+
+impl TurnHandlers for GeminiCliTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            GeminiCliExecutor.cli_name().to_string(),
+            "-p".into(),
+            message.to_string(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--yolo".into(),
+        ];
+        if env.get("GEMINI_SANDBOX").map(|s| s.trim().to_lowercase()).as_deref() == Some("false") {
+            args.push("--sandbox".into());
+            args.push("false".into());
+        }
+        if let Some(model) = env.get("GEMINI_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        if !session_id.is_empty() {
+            args.push("--resume".into());
+            args.push(session_id.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        let etype = event.get("type")?.as_str()?;
+        match etype {
+            "init" => {
+                let sid = event.get("session_id")?.as_str()?;
+                if sid.is_empty() {
+                    None
+                } else {
+                    Some(ParseResult::session(sid))
+                }
+            }
+            "message" => {
+                if event.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                    return None;
+                }
+                let text = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return None;
+                }
+                if event.get("delta").and_then(|v| v.as_bool()) == Some(true) {
+                    Some(ParseResult::partial(text))
+                } else {
+                    Some(ParseResult::final_text(text))
+                }
+            }
+            "error" => {
+                if event.get("severity").and_then(|v| v.as_str()) == Some("error") {
+                    let msg = event.get("message").and_then(|v| v.as_str()).unwrap_or("gemini reported an error");
+                    Some(ParseResult::error(msg))
+                } else {
+                    None
+                }
+            }
+            "result" if event.get("status").and_then(|v| v.as_str()) == Some("error") => {
+                let msg = event
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("gemini turn failed");
+                Some(ParseResult::error(msg))
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// kimi-code
+// ---------------------------------------------------------------------------
+
+/// Moonshot Kimi CLI (`kimi --print --output-format=stream-json`). NDJSON,
+/// stateful: kimi always generates/reuses a session id embedded in CLI args,
+/// shared between build_args and parse_event.
+pub struct KimiCodeExecutor;
+
+impl Executor for KimiCodeExecutor {
+    fn cli_name(&self) -> &str {
+        "kimi"
+    }
+    fn install_hint(&self) -> &str {
+        "See https://moonshotai.github.io/kimi-cli for installation"
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(KimiCodeTurn {
+            session_id: std::cell::Cell::new(None),
+        })
+    }
+}
+
+struct KimiCodeTurn {
+    /// Set in build_args (the id is minted there per Node), read in
+    /// parse_event / get_session_id. Cell gives interior mutability under
+    /// the `&self` build_args signature.
+    session_id: std::cell::Cell<Option<String>>,
+}
+
+impl TurnHandlers for KimiCodeTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let id = if session_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            session_id.to_string()
+        };
+        self.session_id.set(Some(id.clone()));
+        let mut args: Vec<String> = vec![
+            KimiCodeExecutor.cli_name().to_string(),
+            "--print".into(),
+            "-p".into(),
+            message.to_string(),
+            "--output-format=stream-json".into(),
+            "--session".into(),
+            id,
+        ];
+        if let Some(model) = env.get("KIMI_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        if event.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+            return None;
+        }
+        let content = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        if content.is_empty() {
+            return None;
+        }
+        Some(ParseResult {
+            partial_text: Some(content.to_string()),
+            final_text: Some(Some(content.to_string())),
+            session_id: self.session_id.take(),
+            ..Default::default()
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// opencode
+// ---------------------------------------------------------------------------
+
+/// opencode CLI (`opencode run --format json`). NDJSON, stateless.
+pub struct OpencodeExecutor;
+
+impl Executor for OpencodeExecutor {
+    fn cli_name(&self) -> &str {
+        "opencode"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: npm install -g opencode-ai  (or: curl -fsSL https://opencode.ai/install | bash)"
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(OpencodeTurn)
+    }
+}
+
+struct OpencodeTurn;
+
+impl TurnHandlers for OpencodeTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            OpencodeExecutor.cli_name().to_string(),
+            "run".into(),
+            message.to_string(),
+            "--auto".into(),
+            "--format".into(),
+            "json".into(),
+        ];
+        if !session_id.is_empty() {
+            args.push("--session".into());
+            args.push(session_id.to_string());
+        }
+        if let Some(model) = env.get("OPENCODE_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        let etype = event.get("type")?.as_str()?;
+        let session_id = event.get("sessionID").and_then(|v| v.as_str()).map(String::from);
+        match etype {
+            "text" => {
+                let text = event.get("part").and_then(|p| p.get("text")).and_then(|v| v.as_str()).unwrap_or("");
+                if !text.is_empty() {
+                    let mut r = ParseResult::partial(text);
+                    r.session_id = session_id;
+                    Some(r)
+                } else if let Some(sid) = session_id {
+                    Some(ParseResult { session_id: Some(sid), ..Default::default() })
+                } else {
+                    None
+                }
+            }
+            "step_start" | "step_finish" | "tool_use" => {
+                session_id.map(|sid| ParseResult { session_id: Some(sid), ..Default::default() })
+            }
+            "error" => {
+                let msg = event
+                    .get("part")
+                    .and_then(|p| p.get("message"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| event.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()))
+                    .unwrap_or("opencode reported an error");
+                let mut r = ParseResult::error(msg);
+                r.session_id = session_id;
+                Some(r)
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// qwen-code
+// ---------------------------------------------------------------------------
+
+/// Alibaba Qwen Code CLI (`qwen -p --output-format stream-json`). NDJSON,
+/// stateless. Schema-compatible with gemini-cli.
+pub struct QwenCodeExecutor;
+
+impl Executor for QwenCodeExecutor {
+    fn cli_name(&self) -> &str {
+        "qwen"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: npm install -g @qwen-code/qwen-code"
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(QwenCodeTurn)
+    }
+}
+
+struct QwenCodeTurn;
+
+impl TurnHandlers for QwenCodeTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            QwenCodeExecutor.cli_name().to_string(),
+            "-p".into(),
+            message.to_string(),
+            "--output-format".into(),
+            "stream-json".into(),
+            "--yolo".into(),
+        ];
+        if env.get("QWEN_SANDBOX").map(|s| s.trim().to_lowercase()).as_deref() == Some("false") {
+            args.push("--sandbox".into());
+            args.push("false".into());
+        }
+        if let Some(model) = env.get("QWEN_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        if !session_id.is_empty() {
+            args.push("--resume".into());
+            args.push(session_id.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        let etype = event.get("type")?.as_str()?;
+        match etype {
+            "init" => {
+                let sid = event.get("session_id")?.as_str()?;
+                if sid.is_empty() {
+                    None
+                } else {
+                    Some(ParseResult::session(sid))
+                }
+            }
+            "message" => {
+                if event.get("role").and_then(|v| v.as_str()) != Some("assistant") {
+                    return None;
+                }
+                let text = event.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if text.is_empty() {
+                    return None;
+                }
+                if event.get("delta").and_then(|v| v.as_bool()) == Some(true) {
+                    Some(ParseResult::partial(text))
+                } else {
+                    Some(ParseResult::final_text(text))
+                }
+            }
+            "error" => {
+                if event.get("severity").and_then(|v| v.as_str()) == Some("error") {
+                    let msg = event.get("message").and_then(|v| v.as_str()).unwrap_or("qwen reported an error");
+                    Some(ParseResult::error(msg))
+                } else {
+                    None
+                }
+            }
+            "result" if event.get("status").and_then(|v| v.as_str()) == Some("error") => {
+                let msg = event
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("qwen turn failed");
+                Some(ParseResult::error(msg))
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plain-text executors
+// ---------------------------------------------------------------------------
+
+/// Google Antigravity `agy` CLI. Plain text + stateful: agy supports
+/// `--conversation <id>` for resume, so buildArgs mints/reuses the id and
+/// get_session_id surfaces it for RunResult.
+pub struct AgyExecutor;
+
+impl Executor for AgyExecutor {
+    fn cli_name(&self) -> &str {
+        "agy"
+    }
+    fn install_hint(&self) -> &str {
+        "See the agy project for installation instructions."
+    }
+    fn plain(&self) -> bool {
+        true
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(AgyTurn {
+            session_id: std::cell::Cell::new(None),
+        })
+    }
+}
+
+struct AgyTurn {
+    /// Minted/reused in build_args, surfaced via get_session_id so the runner
+    /// can populate RunResult.session_id for plain executors.
+    session_id: std::cell::Cell<Option<String>>,
+}
+
+impl TurnHandlers for AgyTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let id = if session_id.is_empty() {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            session_id.to_string()
+        };
+        self.session_id.set(Some(id.clone()));
+        let mut args: Vec<String> = vec![
+            AgyExecutor.cli_name().to_string(),
+            "--print".into(),
+            message.to_string(),
+            "--conversation".into(),
+            id,
+        ];
+        if env.get("AGY_DANGEROUSLY_SKIP_PERMISSIONS").map(|s| s.as_str()).unwrap_or("1") == "1" {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        if let Some(model) = env.get("AGY_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, _event: serde_json::Value) -> Option<ParseResult> {
+        None
+    }
+
+    fn get_session_id(&self) -> Option<String> {
+        self.session_id.take()
+    }
+}
+
+/// aider CLI. Plain text, stateless.
+pub struct AiderExecutor;
+
+impl Executor for AiderExecutor {
+    fn cli_name(&self) -> &str {
+        "aider"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: pip install aider-chat"
+    }
+    fn plain(&self) -> bool {
+        true
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(AiderTurn)
+    }
+}
+
+struct AiderTurn;
+
+impl TurnHandlers for AiderTurn {
+    fn build_args(&self, message: &str, _session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            AiderExecutor.cli_name().to_string(),
+            "--message".into(),
+            message.to_string(),
+            "--yes-always".into(),
+            "--no-show-release-notes".into(),
+            "--no-stream".into(),
+        ];
+        if let Some(model) = env.get("AIDER_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, _event: serde_json::Value) -> Option<ParseResult> {
+        None
+    }
+}
+
+/// DeepSeek CLI. Plain text, stateless.
+pub struct DeepseekExecutor;
+
+impl Executor for DeepseekExecutor {
+    fn cli_name(&self) -> &str {
+        "deepseek"
+    }
+    fn install_hint(&self) -> &str {
+        "Install from https://deepseek.com/downloads or: brew install deepseek"
+    }
+    fn plain(&self) -> bool {
+        true
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(DeepseekTurn)
+    }
+}
+
+struct DeepseekTurn;
+
+impl TurnHandlers for DeepseekTurn {
+    fn build_args(&self, message: &str, _session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            DeepseekExecutor.cli_name().to_string(),
+            "exec".into(),
+            "-p".into(),
+            message.to_string(),
+        ];
+        if let Some(model) = env.get("DEEPSEEK_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, _event: serde_json::Value) -> Option<ParseResult> {
+        None
+    }
+}
+
+/// earendil-works `pi` coding agent. Plain text, stateless.
+pub struct PiExecutor;
+
+impl Executor for PiExecutor {
+    fn cli_name(&self) -> &str {
+        "pi"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: npm install -g @earendil-works/pi-coding-agent"
+    }
+    fn plain(&self) -> bool {
+        true
+    }
+    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+        Box::new(PiTurn)
+    }
+}
+
+struct PiTurn;
+
+impl TurnHandlers for PiTurn {
+    fn build_args(&self, message: &str, _session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            PiExecutor.cli_name().to_string(),
+            "-p".into(),
+            message.to_string(),
+            "--approve".into(),
+        ];
+        if env.get("PI_NO_EXTENSIONS").map(|s| s.as_str()) != Some("0") {
+            args.push("--no-extensions".into());
+        }
+        if let Some(model) = env.get("PI_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, _event: serde_json::Value) -> Option<ParseResult> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// shared helpers
+// ---------------------------------------------------------------------------
+
+/// Extract concatenated text from a claude-code-style `assistant` event's
+/// `message.content` array (filtering for `type == "text"` blocks).
+fn extract_assistant_text(event: &serde_json::Value) -> Option<String> {
+    let content = event.get("message").and_then(|m| m.get("content"))?;
+    let arr = content.as_array()?;
+    let text: String = arr
+        .iter()
+        .filter(|b| b.get("type").and_then(|v| v.as_str()) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
+        .collect();
+    Some(text)
 }
 
 /// Helper for executors that need to substitute placeholders into pre-built
@@ -445,5 +1216,235 @@ mod tests {
             "result": "rate limited"
         }));
         assert_eq!(r.unwrap().error.as_deref(), Some("rate limited"));
+    }
+
+    // ----- registry completeness -----
+
+    #[test]
+    fn all_twelve_executors_registered() {
+        let names = executor_names();
+        for expected in [
+            "codex",
+            "claude-code",
+            "codebuddy",
+            "cursor",
+            "gemini-cli",
+            "kimi-code",
+            "opencode",
+            "qwen-code",
+            "agy",
+            "aider",
+            "deepseek",
+            "pi",
+        ] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "executor `{expected}` not registered; have: {names:?}"
+            );
+        }
+        assert_eq!(names.len(), 12, "expected exactly 12 executors, got {}", names.len());
+    }
+
+    #[test]
+    fn lookup_returns_all_twelve() {
+        for name in ["codex", "claude-code", "codebuddy", "cursor", "gemini-cli", "kimi-code",
+            "opencode", "qwen-code", "agy", "aider", "deepseek", "pi"]
+        {
+            assert!(lookup(name).is_some(), "lookup({name}) returned None");
+        }
+    }
+
+    // ----- codebuddy -----
+
+    #[test]
+    fn codebuddy_build_args_basic() {
+        let h = CodebuddyExecutor.make_turn();
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert_eq!(args[0], "codebuddy");
+        assert!(args.iter().any(|a| a == "stream-json"));
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn codebuddy_parse_assistant_partial() {
+        let mut h = CodebuddyExecutor.make_turn();
+        let r = h.parse_event(json!({
+            "type": "assistant",
+            "message": { "content": [{"type": "text", "text": "hello"}] }
+        }));
+        assert_eq!(r.unwrap().partial_text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn codebuddy_parse_result_final() {
+        let mut h = CodebuddyExecutor.make_turn();
+        let r = h.parse_event(json!({
+            "type": "result",
+            "result": "done",
+            "session_id": "s1"
+        }));
+        let r = r.unwrap();
+        assert_eq!(r.final_text.unwrap().unwrap(), "done");
+        assert_eq!(r.session_id.as_deref(), Some("s1"));
+    }
+
+    // ----- cursor (stateful: suppresses duplicate) -----
+
+    #[test]
+    fn cursor_suppresses_duplicate_full_text() {
+        let mut h = CursorExecutor.make_turn();
+        // First assistant event streams "Hi ".
+        let r1 = h.parse_event(json!({
+            "type": "assistant",
+            "message": { "content": [{"type": "text", "text": "Hi "}] }
+        }));
+        assert_eq!(r1.unwrap().partial_text.as_deref(), Some("Hi "));
+        // Final full-text event: "Hi there!" — not a duplicate, forwarded.
+        let r2 = h.parse_event(json!({
+            "type": "assistant",
+            "message": { "content": [{"type": "text", "text": "Hi there!"}] }
+        }));
+        assert_eq!(r2.unwrap().partial_text.as_deref(), Some("Hi there!"));
+        // If cursor re-emits text equal to the accumulated join, it's the
+        // duplicate full-text event cursor emits at turn end → suppressed.
+        // accumulated is ["Hi ", "Hi there!"] → join = "Hi Hi there!"
+        let r3 = h.parse_event(json!({
+            "type": "assistant",
+            "message": { "content": [{"type": "text", "text": "Hi Hi there!"}] }
+        }));
+        assert!(r3.is_none(), "duplicate full-text event should be suppressed");
+    }
+
+    // ----- gemini-cli -----
+
+    #[test]
+    fn gemini_parse_delta_vs_final() {
+        let mut h = GeminiCliExecutor.make_turn();
+        let delta = h.parse_event(json!({
+            "type": "message", "role": "assistant", "content": "chunk", "delta": true
+        }));
+        assert!(delta.unwrap().partial_text.is_some());
+
+        let final_evt = h.parse_event(json!({
+            "type": "message", "role": "assistant", "content": "full", "delta": false
+        }));
+        assert!(final_evt.unwrap().final_text.is_some());
+    }
+
+    // ----- kimi-code (stateful session id) -----
+
+    #[test]
+    fn kimi_mints_session_id_when_empty() {
+        let h = KimiCodeExecutor.make_turn();
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        // --session <id> present, id is a uuid (36 chars)
+        let session_idx = args.iter().position(|a| a == "--session").unwrap();
+        let id = &args[session_idx + 1];
+        assert_eq!(id.len(), 36);
+    }
+
+    #[test]
+    fn kimi_reuses_inbound_session_id() {
+        let h = KimiCodeExecutor.make_turn();
+        let env = HashMap::new();
+        let args = h.build_args("hi", "existing-id", &env);
+        let session_idx = args.iter().position(|a| a == "--session").unwrap();
+        assert_eq!(args[session_idx + 1], "existing-id");
+    }
+
+    // ----- opencode -----
+
+    #[test]
+    fn opencode_parse_text_partial() {
+        let mut h = OpencodeExecutor.make_turn();
+        let r = h.parse_event(json!({
+            "type": "text",
+            "sessionID": "oc-1",
+            "part": { "text": "hello" }
+        }));
+        let r = r.unwrap();
+        assert_eq!(r.partial_text.as_deref(), Some("hello"));
+        assert_eq!(r.session_id.as_deref(), Some("oc-1"));
+    }
+
+    // ----- qwen-code -----
+
+    #[test]
+    fn qwen_parse_init_session() {
+        let mut h = QwenCodeExecutor.make_turn();
+        let r = h.parse_event(json!({"type": "init", "session_id": "q-1"}));
+        assert_eq!(r.unwrap().session_id.as_deref(), Some("q-1"));
+    }
+
+    // ----- plain executors -----
+
+    #[test]
+    fn agy_plain_returns_session_id() {
+        let h = AgyExecutor.make_turn();
+        assert!(AgyExecutor.plain());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert!(args.iter().any(|a| a == "--conversation"));
+        // get_session_id surfaces the minted id after build_args.
+        let sid = h.get_session_id();
+        assert!(sid.is_some());
+        assert_eq!(sid.unwrap().len(), 36);
+    }
+
+    #[test]
+    fn agy_reuses_inbound_conversation_id() {
+        let h = AgyExecutor.make_turn();
+        let env = HashMap::new();
+        let args = h.build_args("hi", "conv-42", &env);
+        let conv_idx = args.iter().position(|a| a == "--conversation").unwrap();
+        assert_eq!(args[conv_idx + 1], "conv-42");
+        assert_eq!(h.get_session_id().as_deref(), Some("conv-42"));
+    }
+
+    #[test]
+    fn aider_build_args_basic() {
+        let h = AiderExecutor.make_turn();
+        assert!(AiderExecutor.plain());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert_eq!(args[0], "aider");
+        assert!(args.iter().any(|a| a == "--yes-always"));
+        assert!(args.iter().any(|a| a == "--no-stream"));
+        // aider has no session continuity
+        assert_eq!(h.get_session_id(), None);
+    }
+
+    #[test]
+    fn deepseek_build_args_basic() {
+        let h = DeepseekExecutor.make_turn();
+        assert!(DeepseekExecutor.plain());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert_eq!(args[0], "deepseek");
+        assert!(args.iter().any(|a| a == "exec"));
+        assert!(args.iter().any(|a| a == "-p"));
+    }
+
+    #[test]
+    fn pi_build_args_basic() {
+        let h = PiExecutor.make_turn();
+        assert!(PiExecutor.plain());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert_eq!(args[0], "pi");
+        assert!(args.iter().any(|a| a == "--approve"));
+        assert!(args.iter().any(|a| a == "--no-extensions"));
+    }
+
+    #[test]
+    fn pi_respects_no_extensions_zero() {
+        let h = PiExecutor.make_turn();
+        let mut env = HashMap::new();
+        env.insert("PI_NO_EXTENSIONS".to_string(), "0".to_string());
+        let args = h.build_args("hi", "", &env);
+        // PI_NO_EXTENSIONS=0 → do NOT add --no-extensions
+        assert!(!args.iter().any(|a| a == "--no-extensions"));
     }
 }

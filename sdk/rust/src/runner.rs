@@ -559,8 +559,17 @@ async fn run_via_executor(
 
     let stderr_task = tokio::spawn(drain_capped(stderr, opts.on_stderr.clone(), 1_000_000));
 
+    // For plain executors that mint/reuse a session id in build_args (e.g.
+    // agy), surface it on RunResult after the turn ends. Must extract before
+    // handlers is moved into process_executor_stdout (NDJSON path).
+    let plain_session_id = if exec.plain() {
+        handlers.get_session_id()
+    } else {
+        None
+    };
+
     let result = if exec.plain() {
-        process_plain(BufReader::new(stdout), profile).await
+        process_plain(BufReader::new(stdout)).await
     } else {
         process_executor_stdout(BufReader::new(stdout), handlers, &cfg, &opts).await
     };
@@ -590,6 +599,14 @@ async fn run_via_executor(
         exit_code,
         opts.on_error,
     );
+
+    // Plain executors: fill session_id from the id minted/reused in build_args
+    // (NDJSON path already set it from stdout events).
+    if result.session_id.is_empty() {
+        if let Some(sid) = plain_session_id {
+            result.session_id = sid;
+        }
+    }
 
     Ok(result)
 }
@@ -663,7 +680,6 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
 #[cfg(feature = "executors")]
 async fn process_plain<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
-    _profile: &crate::Profile,
 ) -> Result<RunResult, RunnerError> {
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).await?;
