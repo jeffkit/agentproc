@@ -4,13 +4,25 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.10.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.10.1`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 
+### Spec / SDK 0.10.1 — 2026-07-15
+
+**Bug fix: plain executors ignored `sessionId` even when the CLI supports conversation continuity (Issue #4)**
+
+- `sdk/node/src/executors.js`: `agy` executor switched from a stateless `buildArgs` to a `makeHandlers()` factory. `buildArgs` now uses the inbound `sessionId` or generates a new UUID when the session is new, and passes it to `agy` via `--conversation <id>`. A `getSessionId()` method on the returned handlers object surfaces the id after process exit.
+- `sdk/node/src/runner.js` (`runViaExecutor`): after a successful plain-mode run, if `handlers.getSessionId` exists, the runner calls it and populates `RunResult.sessionId`. `onSession` is also called so callers get the same notification they would from NDJSON executors.
+- `spec/protocol.md` (and mirror): new **Plain-CLI executors** paragraph under "session_id on events" clarifies that CLIs with a session/conversation flag (e.g. `agy`) have their id managed by the executor and returned in `RunResult.sessionId`, while CLIs without such a flag (`aider`, `deepseek`, `pi`) leave it to the host to persist. Doc revision `1.1` → `1.2`.
+
+**Versions.** SDK packages `0.10.0` → `0.10.1`. Wire protocol stays `0.4`. Doc revision `1.1` → `1.2`.
+
+---
+
 ### Spec / SDK 0.10.0 — 2026-07-15
 
-in-process executor, `usage` pass-through, extended `usage` schema, plain-CLI session continuity (wire `0.4`, doc `1.2`)
+in-process executor, `usage` pass-through, extended `usage` schema (wire `0.4`, doc `1.2`)
 
 No wire change. Wire `protocol_version` stays `"0.4"`. Doc revision `1.1` → `1.2`.
 
@@ -38,14 +50,7 @@ Adds an optional `executor:` field to the profile `agentproc:` block. When an SD
 - Spec: `spec/protocol.md` (and mirror) documents `executor:` field with the four resolution rules, plus a new **In-process executors** section that formalises the executor interface contract (`cliName` / `installHint` / `plain` / `buildArgs` / `parseEvent` / `makeHandlers`), the `ParseResult` shape (`partialText` / `finalText` / `sessionId` / `error` / `usage`), the `plain` executor path, and the runner's in-process obligations (env composition, per-turn `makeHandlers` invocation, same timeout/streaming/truncation semantics as spawn, observable equivalence with the spawn path).
 - Compatibility: all existing hub profiles keep working unchanged. Adding `executor:` to any hub profile upgrades it to the in-process path on hosts whose SDK version is ≥ 0.10.0.
 
-**Bug fix: plain executors ignored `sessionId` even when the CLI supports conversation continuity (Issue #4)**
-
-- `sdk/node/src/executors.js`: `agy` executor switched from a stateless `buildArgs` to a `makeHandlers()` factory. `buildArgs` now uses the inbound `sessionId` or generates a new UUID when the session is new, and passes it to `agy` via `--conversation <id>`. A `getSessionId()` method on the returned handlers object surfaces the id after process exit.
-- `sdk/node/src/runner.js` (`runViaExecutor`): after a successful plain-mode run, if `handlers.getSessionId` exists, the runner calls it and populates `RunResult.sessionId`. `onSession` is also called so callers get the same notification they would from NDJSON executors.
-- `sdk/node/src/executors.js` (docstring): `makeHandlers` signature updated to document the optional `getSessionId` return method for plain executors.
-- `spec/protocol.md` (and mirror): new **Plain-CLI executors** paragraph under "session_id on events" clarifies that CLIs with a session/conversation flag (e.g. `agy`) have their id managed by the executor and returned in `RunResult.sessionId`, while CLIs without such a flag (`aider`, `deepseek`, `pi`) leave it to the host to persist. Doc revision `1.1` → `1.2` (no wire change).
-
-**Versions.** SDK packages `0.9.0` → `0.10.0`. Wire protocol stays `0.4`. Doc revision `1.1` → `1.2`.
+**Versions.** SDK packages `0.9.0` → `0.10.0`. Wire protocol stays `0.4`. Doc revision `1.1` (carried forward; `1.2` landed in `0.10.1`).
 
 ---
 
