@@ -4,11 +4,13 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.9.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.10.0`. Includes runner/CLI/SDK behaviour changes.
 
-## Unreleased
+## Released
 
-### Spec / SDK 0.10.0 — in-process executor, `usage` pass-through, extended `usage` schema (wire `0.4`, doc `1.2`)
+### Spec / SDK 0.10.0 — 2026-07-15
+
+in-process executor, `usage` pass-through, extended `usage` schema, plain-CLI session continuity (wire `0.4`, doc `1.2`)
 
 No wire change. Wire `protocol_version` stays `"0.4"`. Doc revision `1.1` → `1.2`.
 
