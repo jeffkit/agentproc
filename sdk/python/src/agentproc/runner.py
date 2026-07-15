@@ -42,6 +42,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+# Imported lazily to avoid circular imports; only used by run_via_executor.
+from agentproc.executors import EXECUTORS, executor_names  # noqa: E402
+
 __all__ = [
     "PROTOCOL_VERSION",
     "DEFAULT_TIMEOUT_SECS",
@@ -58,6 +61,7 @@ __all__ = [
     "RunResult",
     "RunOptions",
     "run",
+    "run_via_executor",
     "normalize_profile",
     "classify_line",
     "parse_json_line",
@@ -69,6 +73,8 @@ __all__ = [
     "expand_path",
     "STDERR_DIAGNOSTICS",
     "diagnose_stderr_failure",
+    "EXECUTORS",
+    "executor_names",
 ]
 
 PROTOCOL_VERSION = "0.4"
@@ -160,9 +166,20 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
 
     src = raw.get("agentproc") if isinstance(raw.get("agentproc"), dict) else raw
 
+    # executor: optional SDK-registered name for in-process execution.
+    executor_name = src.get("executor")
+    if executor_name is not None and not isinstance(executor_name, str):
+        executor_name = None
+    else:
+        executor_name = executor_name.strip() if executor_name else None
+
     command = src.get("command")
-    if not isinstance(command, str) or not command.strip():
-        raise ValueError("profile.command must be a non-empty string")
+    # command is required unless executor is set
+    if not executor_name and (not isinstance(command, str) or not command.strip()):
+        raise ValueError(
+            "profile.command must be a non-empty string "
+            "(or set executor: to use an in-process executor)"
+        )
 
     args_value = src.get("args") or []
     if not isinstance(args_value, list):
@@ -173,7 +190,7 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
     # tokens, defaulting to []. The 0.2 "args absent ⇒ split command on
     # whitespace" shorthand is removed. Paths with whitespace are carried
     # whole by YAML quoting and passed to execve as one token.
-    argv = [command.strip()]
+    argv = [command.strip()] if command else []
 
     cwd_value = src.get("cwd")
     env_value = src.get("env") or {}
@@ -192,7 +209,8 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("profile.env_allowlist must be a list")
 
     return {
-        "command": command.strip(),
+        "command": command.strip() if command else None,
+        "executor": executor_name,
         "argv": argv,
         "args": [str(a) for a in args_value],
         "cwd": expand_path(str(cwd_value)) if cwd_value else None,
@@ -513,12 +531,196 @@ def is_valid_session_id(value: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# run_via_executor() — in-process executor path
+# ---------------------------------------------------------------------------
+
+def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult:
+    """Run using a registered in-process executor (no bridge subprocess).
+
+    Mirrors the Node SDK's ``runViaExecutor`` in runner.js.
+    """
+    cli_name = executor.get("cli_name", "unknown")
+    result = RunResult(exit_code=EXIT_ERROR)
+
+    env = {**os.environ, **(options.extra_env or {})}
+
+    make_handlers = executor.get("make_handlers")
+    if callable(make_handlers):
+        handlers = make_handlers()
+    else:
+        handlers = executor
+
+    build_args_fn = handlers.get("build_args") if isinstance(handlers, dict) else getattr(handlers, "build_args", None)
+    if not callable(build_args_fn):
+        result.error = f"executor '{cli_name}' has no build_args"
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    try:
+        argv = build_args_fn(
+            options.message or "",
+            options.session_id or "",
+            env,
+        )
+    except Exception as exc:
+        result.error = f"executor '{cli_name}' build_args raised: {exc}"
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    if not argv:
+        result.error = f"executor '{cli_name}' build_args returned empty argv"
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    import shutil
+    if not shutil.which(argv[0]):
+        hint = executor.get("install_hint", "")
+        result.error = f"executor '{cli_name}': command not found: {argv[0]}. {hint}".strip()
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    plain = executor.get("plain", False)
+    timeout_secs = options.timeout_secs if options.timeout_secs is not None else DEFAULT_TIMEOUT_SECS
+
+    try:
+        proc = subprocess.run(
+            argv,
+            input=(options.message or ""),
+            capture_output=True,
+            text=True,
+            timeout=timeout_secs,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        result.error = f"executor '{cli_name}' timed out after {timeout_secs}s"
+        result.exit_code = EXIT_TIMEOUT
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+    except FileNotFoundError:
+        hint = executor.get("install_hint", "")
+        result.error = f"executor '{cli_name}': command not found: {argv[0]}. {hint}".strip()
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+
+    if proc.returncode != 0:
+        result.error = (
+            f"executor '{cli_name}' exited {proc.returncode}: "
+            + (stderr.strip() or "(no stderr)")
+        )
+        result.exit_code = proc.returncode
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    if plain:
+        text = stdout.strip()
+        if not text:
+            result.error = f"{cli_name} returned empty output"
+            result.exit_code = EXIT_ERROR
+            if options.on_error:
+                options.on_error(result.error)
+            return result
+        result.reply = text
+        # Plain executors that manage a session id expose get_session_id() on
+        # their handlers so the runner can surface it in RunResult.session_id.
+        get_session_id_fn = (
+            handlers.get("get_session_id") if isinstance(handlers, dict)
+            else getattr(handlers, "get_session_id", None)
+        )
+        if callable(get_session_id_fn):
+            sid = get_session_id_fn()
+            if is_valid_session_id(sid) and not result.session_id:
+                result.session_id = sid
+                if options.on_session:
+                    options.on_session(sid)
+        result.exit_code = EXIT_SUCCESS
+        return result
+
+    # NDJSON path
+    parse_event_fn = (
+        handlers.get("parse_event") if isinstance(handlers, dict)
+        else getattr(handlers, "parse_event", None)
+    )
+    if not callable(parse_event_fn):
+        result.error = f"executor '{cli_name}' has no parse_event for NDJSON mode"
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    reply_parts: List[str] = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        parsed = parse_event_fn(event)
+        if parsed is None:
+            continue
+        if isinstance(parsed, dict):
+            if parsed.get("error"):
+                result.error = parsed["error"]
+                if options.on_error:
+                    options.on_error(result.error)
+                return result
+            sid = parsed.get("session_id")
+            if sid and is_valid_session_id(sid) and not result.session_id:
+                result.session_id = sid
+                if options.on_session:
+                    options.on_session(sid)
+            partial = parsed.get("partial_text")
+            if partial:
+                if options.on_partial:
+                    options.on_partial(partial)
+                reply_parts.append(partial)
+            final = parsed.get("final_text")
+            if final:
+                reply_parts.append(final)
+
+    result.reply = "".join(reply_parts)
+    if not result.reply:
+        result.error = f"{cli_name} returned no reply content"
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+    result.exit_code = EXIT_SUCCESS
+    return result
+
+
 # run() — the main entry point
 # ---------------------------------------------------------------------------
 
 def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     """Run an agent process per the AgentProc spec."""
     profile = normalize_profile(profile_raw)
+
+    # Executor path: skip the subprocess bridge entirely.
+    executor_name = profile.get("executor")
+    if executor_name:
+        executor = EXECUTORS.get(executor_name)
+        if executor is None:
+            result = RunResult(exit_code=EXIT_ERROR)
+            result.error = (
+                f"Unknown executor '{executor_name}'. "
+                f"Available: {', '.join(executor_names)}"
+            )
+            if options.on_error:
+                options.on_error(result.error)
+            return result
+        return run_via_executor(executor, options)
 
     streaming = (
         options.streaming if options.streaming is not None else profile["streaming"]

@@ -34,7 +34,7 @@ jobs:
         run: npm ci
         working-directory: sdk/node
       - name: Run Node SDK tests
-        run: node --test src/index.test.js src/runner.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js src/sdk.test.js src/diagnostics.test.js src/hub_bridge_conformance.test.js
+        run: node --test src/index.test.js src/runner.test.js src/executors.test.js src/hub.test.js src/conformance.test.js src/scenarios.test.js src/sdk.test.js src/diagnostics.test.js src/hub_bridge_conformance.test.js
         working-directory: sdk/node
 
   test-python:

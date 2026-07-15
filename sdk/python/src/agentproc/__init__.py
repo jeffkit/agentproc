@@ -48,6 +48,9 @@ __all__ = [
     "append_history",
     "session_file_path",
     "__version__",
+    "EXECUTORS",
+    "executor_names",
+    "run_via_executor",
 ]
 
 
@@ -79,7 +82,8 @@ __version__ = _read_version()
 # Single source of truth: the wire-protocol version lives in runner.py
 # (the canonical bridge-side engine). Re-exported here so
 # `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
-from .runner import PROTOCOL_VERSION, is_valid_session_id  # noqa: E402
+from .runner import PROTOCOL_VERSION, is_valid_session_id, run_via_executor  # noqa: E402
+from .executors import EXECUTORS, executor_names  # noqa: E402
 
 
 class ProtocolError(Exception):
