@@ -571,7 +571,10 @@ async fn run_via_executor(
     // SDKUserMessage) to stdin before the stdout loop starts.
     let mut child_stdin = if permission_mode {
         let stdin = child.stdin.take().expect("stdin piped");
-        if let Some(initial) = handlers.build_initial_stdin(&opts.message, &session_id, &opts.attachments) {
+        if let Some(initial) = handlers
+            .build_initial_stdin(&opts.message, &session_id, &opts.attachments)
+            .await
+        {
             let mut stdin = stdin;
             use tokio::io::AsyncWriteExt;
             let _ = stdin.write_all(initial.as_bytes()).await;

@@ -81,6 +81,7 @@ pub struct TurnCtx {
 
 /// Per-turn pair: `build_args` runs once before spawn, `parse_event` runs
 /// once per stdout line. Stateful executors hold state in `self`.
+#[async_trait::async_trait]
 pub trait TurnHandlers: Send {
     /// Build the target CLI's argv. `env` is the composed child environment
     /// (infra set + profile env + caller extras). Returning an empty vec is
@@ -115,8 +116,9 @@ pub trait TurnHandlers: Send {
     ///
     /// `attachments` lets the executor format multimodal content blocks
     /// (image/document base64) when the CLI expects them in the initial
-    /// stream-json user message.
-    fn build_initial_stdin(
+    /// stream-json user message. Async because multimodal requires downloading
+    /// the attachment bytes from `att.url`.
+    async fn build_initial_stdin(
         &mut self,
         _message: &str,
         _session_id: &str,
@@ -277,6 +279,7 @@ impl Executor for CodexExecutor {
 
 struct CodexTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for CodexTurn {
     fn build_args(
         &self,
@@ -371,6 +374,7 @@ impl ClaudeCodeTurn {
     }
 }
 
+#[async_trait::async_trait]
 impl TurnHandlers for ClaudeCodeTurn {
     fn build_args(
         &self,
@@ -485,7 +489,7 @@ impl TurnHandlers for ClaudeCodeTurn {
 
     // ----- permission channel (permission mode only) -----
 
-    fn build_initial_stdin(
+    async fn build_initial_stdin(
         &mut self,
         message: &str,
         session_id: &str,
@@ -494,18 +498,65 @@ impl TurnHandlers for ClaudeCodeTurn {
         if !self.permission {
             return None;
         }
+        // Text-only turn → plain string content. Multimodal → array of
+        // content blocks (text + image/document base64).
         let content: serde_json::Value = if attachments.is_empty() {
             serde_json::json!(message)
         } else {
-            let mut blocks: Vec<serde_json::Value> =
-                vec![serde_json::json!({ "type": "text", "text": message })];
-            for att in attachments {
-                blocks.push(serde_json::json!({
-                    "type": "text",
-                    "text": format!("[attachment: {} {}]", att.kind, att.url)
-                }));
+            #[cfg(feature = "multimodal")]
+            {
+                let mut blocks: Vec<serde_json::Value> =
+                    vec![serde_json::json!({ "type": "text", "text": message })];
+                for att in attachments {
+                    match att.kind.as_str() {
+                        "image" => match download_image_as_base64(&att.url).await {
+                            Ok((media_type, data)) => blocks.push(serde_json::json!({
+                                "type": "image",
+                                "source": { "type": "base64", "media_type": media_type, "data": data }
+                            })),
+                            Err(e) => {
+                                blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": format!("[image download failed: {e}]")
+                                }));
+                            }
+                        },
+                        "file" => match download_document_as_base64(&att.url).await {
+                            Ok((media_type, data)) => blocks.push(serde_json::json!({
+                                "type": "document",
+                                "source": { "type": "base64", "media_type": media_type, "data": data }
+                            })),
+                            Err(e) => {
+                                blocks.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": format!("[document download failed: {e}]")
+                                }));
+                            }
+                        },
+                        other => {
+                            blocks.push(serde_json::json!({
+                                "type": "text",
+                                "text": format!("[unsupported attachment kind `{other}`: only image and file accepted]")
+                            }));
+                        }
+                    }
+                }
+                serde_json::json!(blocks)
             }
-            serde_json::json!(blocks)
+            #[cfg(not(feature = "multimodal"))]
+            {
+                // multimodal feature disabled — forward urls as text so the
+                // turn still completes rather than dropping the message.
+                let mut blocks: Vec<serde_json::Value> =
+                    vec![serde_json::json!({ "type": "text", "text": message })];
+                for att in attachments {
+                    blocks.push(serde_json::json!({
+                        "type": "text",
+                        "text": format!("[attachment: {} {}]", att.kind, att.url)
+                    }));
+                }
+                serde_json::json!(blocks)
+            }
         };
         let user_message = serde_json::json!({
             "type": "user",
@@ -628,6 +679,7 @@ impl Executor for CodebuddyExecutor {
 
 struct CodebuddyTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for CodebuddyTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -714,6 +766,7 @@ struct CursorTurn {
     accumulated: Vec<String>,
 }
 
+#[async_trait::async_trait]
 impl TurnHandlers for CursorTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -806,6 +859,7 @@ impl Executor for GeminiCliExecutor {
 
 struct GeminiCliTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for GeminiCliTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -907,6 +961,7 @@ struct KimiCodeTurn {
     session_id: std::cell::Cell<Option<String>>,
 }
 
+#[async_trait::async_trait]
 impl TurnHandlers for KimiCodeTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let id = if session_id.is_empty() {
@@ -969,6 +1024,7 @@ impl Executor for OpencodeExecutor {
 
 struct OpencodeTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for OpencodeTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -1047,6 +1103,7 @@ impl Executor for QwenCodeExecutor {
 
 struct QwenCodeTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for QwenCodeTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -1150,6 +1207,7 @@ struct AgyTurn {
     session_id: std::cell::Cell<Option<String>>,
 }
 
+#[async_trait::async_trait]
 impl TurnHandlers for AgyTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let id = if session_id.is_empty() {
@@ -1204,6 +1262,7 @@ impl Executor for AiderExecutor {
 
 struct AiderTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for AiderTurn {
     fn build_args(&self, message: &str, _session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -1246,6 +1305,7 @@ impl Executor for DeepseekExecutor {
 
 struct DeepseekTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for DeepseekTurn {
     fn build_args(&self, message: &str, _session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -1286,6 +1346,7 @@ impl Executor for PiExecutor {
 
 struct PiTurn;
 
+#[async_trait::async_trait]
 impl TurnHandlers for PiTurn {
     fn build_args(&self, message: &str, _session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
         let mut args: Vec<String> = vec![
@@ -1312,6 +1373,111 @@ impl TurnHandlers for PiTurn {
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
+
+/// Anthropic Messages API limits for multimodal content blocks.
+#[cfg(feature = "multimodal")]
+const ANTHROPIC_MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+#[cfg(feature = "multimodal")]
+const ANTHROPIC_MAX_DOCUMENT_BYTES: usize = 32 * 1024 * 1024;
+
+/// Download an image and return `(media_type, base64_data)`. media_type is
+/// taken from the response Content-Type when it starts with `image/`,
+/// otherwise defaults to `image/jpeg`. Fails fast when the body exceeds the
+/// Anthropic 5 MB image limit during streaming so we don't keep downloading.
+#[cfg(feature = "multimodal")]
+async fn download_image_as_base64(url: &str) -> Result<(String, String), String> {
+    use base64::Engine;
+    use futures_util::StreamExt;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("build reqwest client: {e}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("download image from {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("image download failed: HTTP {} for {url}", response.status()));
+    }
+    let media_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+        .filter(|s| s.starts_with("image/"))
+        .unwrap_or_else(|| "image/jpeg".to_string());
+
+    let mut buf = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read image chunk: {e}"))?;
+        if buf.len() + chunk.len() > ANTHROPIC_MAX_IMAGE_BYTES {
+            return Err(format!(
+                "image too large: exceeds Anthropic limit ({ANTHROPIC_MAX_IMAGE_BYTES} bytes)"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    if buf.is_empty() {
+        return Err(format!("image download returned empty body for {url}"));
+    }
+    Ok((media_type, base64::engine::general_purpose::STANDARD.encode(&buf)))
+}
+
+/// Download a document and return `(media_type, base64_data)`. Only
+/// `application/pdf` and `text/plain` are accepted (Anthropic document block
+/// constraint); any other Content-Type fails fast. Limit: 32 MB.
+#[cfg(feature = "multimodal")]
+async fn download_document_as_base64(url: &str) -> Result<(String, String), String> {
+    use base64::Engine;
+    use futures_util::StreamExt;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("build reqwest client: {e}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("download document from {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("document download failed: HTTP {} for {url}", response.status()));
+    }
+    let raw_media_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(';').next().unwrap_or(s).trim().to_string())
+        .unwrap_or_default();
+    let media_type = match raw_media_type.as_str() {
+        "application/pdf" => "application/pdf".to_string(),
+        "text/plain" => "text/plain".to_string(),
+        other => {
+            return Err(format!(
+                "unsupported document media_type: {other:?} (only application/pdf and text/plain accepted); url: {url}"
+            ));
+        }
+    };
+
+    let mut buf = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read document chunk: {e}"))?;
+        if buf.len() + chunk.len() > ANTHROPIC_MAX_DOCUMENT_BYTES {
+            return Err(format!(
+                "document too large: exceeds Anthropic limit ({ANTHROPIC_MAX_DOCUMENT_BYTES} bytes)"
+            ));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    if buf.is_empty() {
+        return Err(format!("document download returned empty body for {url}"));
+    }
+    Ok((media_type, base64::engine::general_purpose::STANDARD.encode(&buf)))
+}
 
 /// Extract concatenated text from a claude-code-style `assistant` event's
 /// `message.content` array (filtering for `type == "text"` blocks).
@@ -1471,15 +1637,15 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--permission-prompt-tool"));
     }
 
-    #[test]
-    fn claude_code_build_initial_stdin_only_in_permission_mode() {
+    #[tokio::test]
+    async fn claude_code_build_initial_stdin_only_in_permission_mode() {
         // Unattended: no initial stdin.
         let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
-        assert_eq!(h.build_initial_stdin("hi", "", &[]), None);
+        assert_eq!(h.build_initial_stdin("hi", "", &[]).await, None);
 
         // Permission: SDKUserMessage JSON line.
         let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
-        let line = h.build_initial_stdin("hi", "sess-1", &[]).unwrap();
+        let line = h.build_initial_stdin("hi", "sess-1", &[]).await.unwrap();
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["type"], "user");
         assert_eq!(v["message"]["role"], "user");
@@ -1553,10 +1719,10 @@ mod tests {
         assert_eq!(v["response"]["response"]["message"], "not allowed");
     }
 
-    #[test]
-    fn claude_code_permission_methods_noop_in_unattended_mode() {
+    #[tokio::test]
+    async fn claude_code_permission_methods_noop_in_unattended_mode() {
         let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
-        assert_eq!(h.build_initial_stdin("hi", "", &[]), None);
+        assert_eq!(h.build_initial_stdin("hi", "", &[]).await, None);
         let event = json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool"}});
         // request detection is independent of mode (it inspects the event),
         // but write_permission_response returns None in unattended mode.

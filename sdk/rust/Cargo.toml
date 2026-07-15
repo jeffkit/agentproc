@@ -12,13 +12,17 @@ categories = ["web-programming", "network-programming"]
 readme = "README.md"
 
 [features]
-default = ["executors", "yaml"]
+default = ["executors", "yaml", "multimodal"]
 # Built-in executor registry (codex, claude-code, ...). Disable to ship a
 # minimal runner that only handles command/args spawn profiles.
 executors = []
 # Profile YAML parsing. Disable to depend only on &Profile structs built
 # programmatically (drops serde_yaml).
 yaml = ["serde_yaml"]
+# Multimodal attachment download (image/PDF base64) for executors that feed
+# content blocks to their CLI (Claude stream-json). Disable to drop
+# reqwest + futures-util + base64.
+multimodal = ["dep:reqwest", "dep:futures-util", "dep:base64"]
 
 [dependencies]
 tokio = { version = "1", features = ["process", "io-util", "rt", "sync", "macros", "time"] }
@@ -28,6 +32,10 @@ serde_yaml = { version = "0.9", optional = true }
 thiserror = "1"
 once_cell = "1"
 uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false, optional = true }
+futures-util = { version = "0.3", optional = true }
+base64 = { version = "0.22", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
