@@ -4,6 +4,7 @@ cli: agy
 cli_install: |
   # See the agy project for installation instructions.
 agentproc:
+  executor: agy
   command: python3
   args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd defaults to your current directory under `agentproc hub run`.

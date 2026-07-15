@@ -5,6 +5,7 @@ cli_install: |
   npm install -g opencode-ai
   # or: curl -fsSL https://opencode.ai/install | bash
 agentproc:
+  executor: opencode
   command: python3
   args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your

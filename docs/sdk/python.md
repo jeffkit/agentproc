@@ -132,6 +132,42 @@ create_profile(handler)
 
 History is stored as JSONL files under `~/.agentproc/sessions/<session_id>.jsonl`.
 
+## Using `run()` as a host / bridge
+
+If you're building a host application that drives AgentProc profiles programmatically, use `run()` from the runner module:
+
+```python
+from agentproc.runner import run, RunOptions
+
+result = run(
+    {"command": "python3", "args": ["./bridge.py"], "timeout_secs": 60},
+    RunOptions(
+        message="what files are here?",
+        session_id="",
+        on_partial=lambda chunk: print(chunk, end="", flush=True),
+        on_error=lambda msg: print(f"agent error: {msg}"),
+    ),
+)
+
+print(result.reply)      # assembled reply body
+print(result.session_id) # session id for the next turn
+print(result.exit_code)  # 0 = success, 1 = error, 124 = timeout
+print(result.usage)      # {'input_tokens': 12, 'output_tokens': 34, ...} or None
+```
+
+### `RunResult` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reply` | `str` | Assembled reply body (empty when streaming forwarded all chunks) |
+| `session_id` | `str` | First valid session id from any event; `''` if none |
+| `error` | `str` | Error message from a `{"type":"error"}` event; `''` if none |
+| `exit_code` | `int` | Agent process exit code (124 = timeout) |
+| `timed_out` | `bool` | Whether the run was killed by timeout |
+| `usage` | `dict \| None` | Token/cost stats from the terminal event; `None` when absent |
+
+Common `usage` keys (all optional): `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_tokens`, `duration_ms`, `cost_usd`.
+
 ## Local testing
 
 Test your agent through the same CLI the hub uses — the most faithful end-to-end check:

@@ -8,6 +8,7 @@ cli_install: |
   # Or download from https://cursor.com/downloads
   # Then log in: agent login
 agentproc:
+  executor: cursor
   command: python3
   args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your

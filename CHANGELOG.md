@@ -8,6 +8,38 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Unreleased
 
+### Spec / SDK 0.10.0 — in-process executor, `usage` pass-through, extended `usage` schema (wire `0.4`, doc `1.2`)
+
+No wire change. Wire `protocol_version` stays `"0.4"`. Doc revision `1.1` → `1.2`.
+
+**Bug fix: `usage` field was silently dropped (Issue #2)**
+
+- Node runner (`sdk/node/src/runner.js`): `classifyLine()` now extracts `obj.usage` for `result` and `error` events and attaches it to the classified event. `RunResult` gains a `usage?: object | null` field (opaque pass-through; `null` when the agent emits no usage). `handleLine()` captures `c.usage` when processing `result` / `error` events.
+- Python runner (`sdk/python/src/agentproc/runner.py`): `classify_line()` and `RunResult` receive the same treatment. `RunResult.usage` is `Optional[Dict[str, Any]]`, default `None`.
+- Hub `hub/_shared/stream_utils.js`: `emitResult(text, sessionId, usage?)` and `emitError(text, sessionId, usage?)` now accept an optional third `usage` argument and include it in the emitted JSON when provided.
+
+**Spec: extended `usage` schema (Issue #3)**
+
+`spec/protocol.md` (and its Chinese mirror `spec/protocol.zh.md`) now documents the full set of recommended `usage` keys:
+
+- Existing: `input_tokens`, `output_tokens`, `total_tokens`
+- New (all optional, all forward-compatible): `cache_read_input_tokens`, `cache_creation_input_tokens` (Anthropic cache), `reasoning_tokens` (o-series / Claude extended thinking, subset of `output_tokens`), `duration_ms` (agent-measured turn wall-clock), `cost_usd` (estimated cost)
+- Documents the `input_tokens` ↔ cache token convention: `input_tokens = non-cached + cache_read + cache_creation`.
+
+**New feature: in-process executor via `executor:` profile field (Issue #1)**
+
+Adds an optional `executor:` field to the profile `agentproc:` block. When an SDK-registered executor name is given, the runner invokes the named executor in-process, directly spawning the target CLI without forking a bridge subprocess.
+
+- New file `sdk/node/src/executors.js`: built-in executor registry with 12 entries — `claude-code`, `codebuddy`, `codex`, `cursor`, `gemini-cli`, `kimi-code`, `opencode`, `qwen-code`, `agy`, `aider`, `deepseek`, `pi`. Each entry contains `buildArgs` and `parseEvent` (bridge-style NDJSON CLIs) or `buildArgs` alone with `plain: true` (plain-text CLIs). Stateful parsers (cursor, kimi-code) use a `makeHandlers()` factory for per-turn isolation.
+- `sdk/node/src/runner.js`: `normalizeProfile()` parses `executor:` (makes `command` optional); `run()` resolves the executor via the four-case rule (in-process / warn+fallback / hard-fail / no-op); new `runViaExecutor()` function implements the in-process execution path with the same timeout / streaming / truncation semantics as the spawn path.
+- `sdk/node/src/index.js`: re-exports `executorNames` and `EXECUTORS` for host introspection.
+- Spec: `spec/protocol.md` (and mirror) documents `executor:` field with the four resolution rules.
+- Compatibility: all existing hub profiles keep working unchanged. Adding `executor:` to any hub profile upgrades it to the in-process path on hosts whose SDK version is ≥ 0.10.0.
+
+**Versions.** SDK packages `0.9.0` → `0.10.0`. Wire protocol stays `0.4`. Doc revision `1.1` → `1.2`.
+
+---
+
 ### Spec / SDK 0.9.0 — wire `0.4`: `result` event, `session_id` on events (doc `1.1`)
 
 Breaking stdout vocabulary change. Hard cutover from 0.3 (same posture as 0.2 → 0.3).

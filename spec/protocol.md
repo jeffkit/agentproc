@@ -55,9 +55,27 @@ No HTTP, no sockets, no shared memory. Just a process.
 A profile is a YAML file that tells the bridge how to launch an agent process.
 
 ```yaml
-# Required: the executable to run (always argv[0], never split)
+# Required: the executable to run (always argv[0], never split).
+# Optional when `executor:` is set and the SDK recognises the name.
 command: python3
 args: ["{{PROFILE_DIR}}/bridge.py"]   # argv[1..]; defaults to [] if omitted
+
+# Optional in-process executor (SDK-specific).
+# When present and the SDK recognises the name, the runner invokes the named
+# executor in-process instead of spawning `command`/`args`. This eliminates the
+# bridge-process fork overhead. `command`/`args` are used as a fallback when the
+# SDK does NOT recognise the name; if the SDK does not recognise it and
+# `command` is absent, the runner MUST hard-fail with a clear error listing
+# known executors.
+#
+# Resolution rules:
+#   executor present + SDK knows it     → run in-process; ignore command/args
+#   executor present + SDK unknown      → warn, spawn command (fallback)
+#   executor present + SDK unknown + no command  → hard fail
+#   executor absent                     → spawn command (existing behaviour)
+#
+# Built-in executor names (Node SDK): see `sdk.executorNames`.
+executor: claude-code         # optional; omit to use the command/args spawn path
 
 # Execution environment
 cwd: /path/to/workspace       # working directory (~ and placeholders supported)
@@ -261,7 +279,22 @@ Session continuity is carried as an optional field on stdout events, **not** as 
 
 ### Optional `usage` on terminal events
 
-`result` and `error` MAY include a `usage` object for token/cost stats. Bridges MAY ignore it. Recommended keys (all optional): `input_tokens`, `output_tokens`, `total_tokens` (numbers). Additional keys are forward-compatible and SHOULD be ignored if unrecognised. There is **no** separate `usage` event type.
+`result` and `error` MAY include a `usage` object for token/cost stats. Bridges MAY ignore it. There is **no** separate `usage` event type. Additional keys are forward-compatible and SHOULD be ignored if unrecognised.
+
+Recommended keys (all optional):
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `input_tokens` | number | Total input tokens billed (may include cached tokens, per provider convention). |
+| `output_tokens` | number | Total output tokens billed. |
+| `total_tokens` | number | Sum of input and output tokens. |
+| `cache_read_input_tokens` | number | Anthropic prompt-cache hits. These are a subset of `input_tokens` under standard Anthropic billing. |
+| `cache_creation_input_tokens` | number | Anthropic prompt-cache writes (first-write cost). |
+| `reasoning_tokens` | number | Reasoning/thinking tokens (OpenAI o-series, Claude extended thinking). These are a **subset** of `output_tokens`, not additive. |
+| `duration_ms` | number | Agent-measured wall-clock time for the turn (excludes spawn/IPC overhead). |
+| `cost_usd` | number | Estimated cost in USD. Bridges that ship a pricing table MAY populate this; bridges without a pricing source SHOULD omit it rather than guess. |
+
+Convention for `input_tokens` and cache fields: the standard interpretation is `input_tokens = non-cached input + cache_read_input_tokens + cache_creation_input_tokens` (i.e. cache tokens count toward the total). Bridges SHOULD follow this so that `input_tokens` always represents the billable input total.
 
 ### `{"type":"partial"}` — streaming chunk
 

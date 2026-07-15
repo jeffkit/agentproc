@@ -4,6 +4,7 @@ cli: qwen
 cli_install: |
   npm install -g @qwen-code/qwen-code
 agentproc:
+  executor: qwen-code
   command: python3
   args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd defaults to your current directory under `agentproc hub run`.

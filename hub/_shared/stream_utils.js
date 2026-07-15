@@ -46,15 +46,17 @@ function emitPartial(text, sessionId) {
   emitObj(obj);
 }
 
-function emitResult(text, sessionId) {
+function emitResult(text, sessionId, usage) {
   const obj = { type: 'result', text };
   if (sessionId) obj.session_id = sessionId;
+  if (usage !== null && typeof usage === 'object' && !Array.isArray(usage)) obj.usage = usage;
   emitObj(obj);
 }
 
-function emitError(text, sessionId) {
+function emitError(text, sessionId, usage) {
   const obj = { type: 'error', message: text };
   if (sessionId) obj.session_id = sessionId;
+  if (usage !== null && typeof usage === 'object' && !Array.isArray(usage)) obj.usage = usage;
   emitObj(obj);
 }
 

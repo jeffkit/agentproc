@@ -124,6 +124,61 @@ createProfile(async ({ message, sessionId }) => {
 
 History is stored as JSONL files under `~/.agentproc/sessions/<session_id>.jsonl`.
 
+## Using `run()` as a host / bridge
+
+If you're building a host application (e.g. an IM bridge, a CI bot) that needs to drive AgentProc profiles programmatically, use `run()` from the runner module:
+
+```js
+const { run } = require('agentproc/src/runner');
+
+const result = await run(
+  { command: 'python3', args: ['./bridge.py'], timeout_secs: 60 },
+  {
+    message: 'what files are here?',
+    sessionId: '',              // empty = new session
+    onPartial: (chunk) => process.stdout.write(chunk),
+    onError: (msg) => console.error('agent error:', msg),
+  }
+);
+
+console.log(result.reply);      // assembled reply body
+console.log(result.sessionId);  // session id for the next turn
+console.log(result.exitCode);   // 0 = success, 1 = error, 124 = timeout
+console.log(result.usage);      // { input_tokens, output_tokens, ... } or null
+```
+
+### Using in-process executors
+
+For profiles backed by a known CLI (claude, codex, gemini, …), set `executor:` to skip the bridge-subprocess fork:
+
+```js
+const result = await run(
+  { executor: 'claude-code', timeout_secs: 600, streaming: true,
+    env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } },
+  { message: 'explain this codebase', onPartial: (c) => process.stdout.write(c) }
+);
+// result.usage?.input_tokens — token count from claude
+```
+
+See all built-in names:
+```js
+const { executorNames } = require('agentproc');
+// ['claude-code', 'codebuddy', 'codex', 'cursor', 'gemini-cli', ...]
+```
+
+### `RunResult` shape
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reply` | `string` | Assembled reply body (empty when streaming forwarded all chunks) |
+| `sessionId` | `string` | First valid session id from any event; `''` if none |
+| `error` | `string` | Error message from a `{"type":"error"}` event; `''` if none |
+| `exitCode` | `number` | Agent process exit code (124 = timeout) |
+| `timedOut` | `boolean` | Whether the run was killed by timeout |
+| `usage` | `object\|null` | Token/cost stats from the terminal event; `null` when absent |
+
+Common `usage` keys (all optional): `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_tokens`, `duration_ms`, `cost_usd`.
+
 ## Local testing
 
 Test your agent through the same CLI the hub uses — the most faithful end-to-end check:

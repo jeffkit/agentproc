@@ -40,6 +40,9 @@ const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const readline = require('node:readline');
+
+const { EXECUTORS, executorNames } = require('./executors.js');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -107,8 +110,12 @@ function normalizeProfile(raw) {
   // or a hub form ({ agentproc: { command, ... } }).
   const src = raw.agentproc && typeof raw.agentproc === 'object' ? raw.agentproc : raw;
 
-  if (typeof src.command !== 'string' || src.command.trim() === '') {
-    throw new Error('profile.command must be a non-empty string');
+  // executor: optional SDK-registered name for in-process execution.
+  const executor = typeof src.executor === 'string' ? src.executor.trim() : null;
+
+  // command is required unless executor is set (executor path does not use command/args).
+  if (!executor && (typeof src.command !== 'string' || src.command.trim() === '')) {
+    throw new Error('profile.command must be a non-empty string (or set executor: to use an in-process executor)');
   }
 
   // Wire 0.3: `command` is always argv[0], a single token, NEVER split —
@@ -116,9 +123,9 @@ function normalizeProfile(raw) {
   // tokens, defaulting to []. The 0.2 "args absent ⇒ split command on
   // whitespace" shorthand is removed. Paths with whitespace are carried whole
   // by YAML quoting and passed to execve as one token.
-  const command = src.command.trim();
+  const command = src.command ? src.command.trim() : null;
   const argsValue = Array.isArray(src.args) ? src.args.map(String) : [];
-  const argv = [command];
+  const argv = command ? [command] : [];
 
   // env_allowlist (optional): when present, ${VAR} references in the env
   // block whose name is NOT in the list expand to empty + a stderr warning.
@@ -133,6 +140,7 @@ function normalizeProfile(raw) {
 
   return {
     command,
+    executor,
     argv,
     args: argsValue,
     cwd: src.cwd ? expandPath(String(src.cwd)) : undefined,
@@ -348,15 +356,16 @@ function sessionIdFrom(obj) {
 /**
  * Classify one stdout line into a typed event.
  * @param {string} line - Raw line, without trailing newline.
- * @returns {{ kind: string, value: any, role?: string, session_id?: string }}
+ * @returns {{ kind: string, value: any, role?: string, session_id?: string, usage?: object }}
  *   kind is 'partial' | 'result' | 'error' | 'permission_request' | 'malformed'.
  *   - partial: value is the text string; role is the optional role string.
- *   - result:  value is the text string (at most one per turn).
- *   - error:   value is the message string.
+ *   - result:  value is the text string (at most one per turn); usage is the optional usage object.
+ *   - error:   value is the message string; usage is the optional usage object.
  *   - permission_request: value is the parsed object.
  *   - malformed: the line was not a recognised event (incl. legacy session/text);
  *     the bridge logs + ignores.
  *   session_id is set when the event carries a non-empty `session_id` field (wire key).
+ *   usage is set when the event carries a plain-object `usage` field (result/error only).
  */
 function classifyLine(line) {
   const obj = parseJsonLine(line);
@@ -375,12 +384,18 @@ function classifyLine(line) {
       const o = { kind: 'result', value: typeof obj.text === 'string' ? obj.text : '' };
       const sid = sessionIdFrom(obj);
       if (sid !== undefined) o.session_id = sid;
+      if (obj.usage !== null && typeof obj.usage === 'object' && !Array.isArray(obj.usage)) {
+        o.usage = obj.usage;
+      }
       return o;
     }
     case 'error': {
       const o = { kind: 'error', value: typeof obj.message === 'string' ? obj.message : '' };
       const sid = sessionIdFrom(obj);
       if (sid !== undefined) o.session_id = sid;
+      if (obj.usage !== null && typeof obj.usage === 'object' && !Array.isArray(obj.usage)) {
+        o.usage = obj.usage;
+      }
       return o;
     }
     case 'permission_request': {
@@ -474,7 +489,236 @@ function isValidSessionId(value) {
  * @property {string} error - Error message from {"type":"error"}, or '' if none.
  * @property {number} exitCode - Process exit code (124 = timeout, etc.).
  * @property {boolean} timedOut - Whether the run was killed by timeout.
+ * @property {object|null} usage - Usage stats from the terminal `result` or `error` event;
+ *   opaque pass-through, not validated. `null` when the agent emitted no usage.
+ *   Common keys (all optional): `input_tokens`, `output_tokens`, `total_tokens`,
+ *   `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_tokens`,
+ *   `duration_ms`, `cost_usd`.
  */
+
+/**
+ * Run an agent in-process via a registered executor.
+ *
+ * This path skips the bridge subprocess: the executor's `buildArgs` builds the
+ * target CLI argv directly, and `parseEvent` translates the CLI's raw output
+ * into the same { partialText, finalText, sessionId, error, usage } shape the
+ * bridge would have produced on stdout.
+ *
+ * @param {object} profile - Normalised profile (from normalizeProfile).
+ * @param {RunOptions} options
+ * @param {object} executor - Entry from EXECUTORS registry.
+ * @returns {Promise<RunResult>}
+ */
+async function runViaExecutor(profile, options, executor) {
+  const sessionId = options.sessionId || '';
+  const streaming = options.streaming != null ? !!options.streaming : profile.streaming;
+  const timeoutSecs = options.timeoutSecs != null ? options.timeoutSecs : profile.timeout_secs;
+  const killGraceSecs = profile.kill_grace_secs;
+  let cwd = options.cwd || profile.cwd;
+  if (cwd && !path.isAbsolute(cwd) && options.profileDir) {
+    cwd = path.resolve(options.profileDir, cwd);
+  }
+
+  // Build env (infra set + profile env block + --env).
+  const substCtx = { message: options.message, sessionId, sessionName: options.sessionName || 'default', profileDir: options.profileDir || '' };
+  const allowlist = profile.env_allowlist;
+  const env = buildBaseEnv();
+  for (const [k, v] of Object.entries(profile.env)) {
+    env[k] = expandEnvRef(substitute(v, substCtx), process.env, allowlist, (name) => {
+      if (options.onStderr) options.onStderr(`[agentproc runner] env_allowlist blocked \${${name}} (not in allowlist); expanded to empty`);
+    });
+  }
+  if (options.extraEnv) {
+    for (const [k, v] of Object.entries(options.extraEnv)) env[k] = String(v);
+  }
+
+  // Resolve handlers: call makeHandlers() for stateful executors (kimi, cursor),
+  // otherwise use executor.buildArgs / executor.parseEvent directly.
+  const handlers = typeof executor.makeHandlers === 'function'
+    ? executor.makeHandlers()
+    : executor;
+
+  // Build CLI argv.
+  const args = handlers.buildArgs(options.message, sessionId, env);
+  if (!Array.isArray(args) || args.length === 0) {
+    throw new Error(`[agentproc runner] executor ${JSON.stringify(profile.executor)} buildArgs returned empty argv`);
+  }
+
+  /** @type {RunResult} */
+  const result = { reply: '', sessionId: '', error: '', exitCode: 0, timedOut: false, usage: null };
+
+  let child;
+  try {
+    child = spawn(args[0], args.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (err) {
+    result.error = `${executor.cliName} CLI not found. ${executor.installHint}`;
+    result.exitCode = EXIT_ERROR;
+    if (options.onError) options.onError(result.error);
+    return result;
+  }
+
+  child.on('error', (err) => {
+    if (!result.error) {
+      result.error = err.code === 'ENOENT'
+        ? `${executor.cliName} CLI not found. ${executor.installHint}`
+        : err.message;
+    }
+  });
+
+  let stderrBuf = '';
+  child.stderr.on('data', (d) => {
+    stderrBuf += d.toString();
+    if (options.onStderr) {
+      for (const line of d.toString().split('\n')) {
+        if (line) options.onStderr(line);
+      }
+    }
+  });
+
+  let killed = false;
+  let killTimer = null;
+  const timeoutMs = timeoutSecs * 1000;
+  const gracePeriodMs = killGraceSecs * 1000;
+
+  function killChild(signal) {
+    try { child.kill(signal); } catch { /* already dead */ }
+  }
+
+  const timeoutHandle = setTimeout(() => {
+    result.timedOut = true;
+    killed = true;
+    killChild('SIGTERM');
+    killTimer = setTimeout(() => killChild('SIGKILL'), gracePeriodMs);
+  }, timeoutMs);
+
+  // Plain-text mode: read all stdout, use as reply.
+  if (executor.plain) {
+    let stdout = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+
+    const exitCode = await new Promise(resolve => child.on('close', resolve));
+    clearTimeout(timeoutHandle);
+    if (killTimer) clearTimeout(killTimer);
+
+    if (result.timedOut) {
+      result.error = `${executor.cliName} timed out`;
+      result.exitCode = EXIT_TIMEOUT;
+      if (options.onError) options.onError(result.error);
+      return result;
+    }
+    if (exitCode !== 0 || result.error) {
+      let msg = result.error || `${executor.cliName} exited with ${exitCode}`;
+      const s = stderrBuf.trim();
+      if (s && !result.error) msg += `: ${s.slice(0, 500)}`;
+      result.error = msg;
+      result.exitCode = exitCode || EXIT_ERROR;
+      if (options.onError) options.onError(result.error);
+      return result;
+    }
+    const text = stdout.trim();
+    if (!text) {
+      result.error = `${executor.cliName} returned empty output`;
+      result.exitCode = EXIT_ERROR;
+      if (options.onError) options.onError(result.error);
+      return result;
+    }
+    result.reply = text;
+    result.exitCode = EXIT_SUCCESS;
+    return result;
+  }
+
+  // NDJSON bridge mode: parse CLI stdout line by line via parseEvent.
+  const parseEvent = handlers.parseEvent;
+  let lastFinalText = null;
+  let errorMessage = null;
+  let partialsForwarded = false;
+  const maxChars = profile.max_reply_chars;
+  const truncSuffix = profile.truncation_suffix;
+  let cumPartialChars = 0;
+  let partialsTruncated = false;
+
+  const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+
+  for await (const rawLine of rl) {
+    const line = rawLine.replace(/\r$/, '');
+    if (!line) continue;
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (!event || typeof event !== 'object') continue;
+
+    const parsed = parseEvent(event);
+    if (!parsed) continue;
+
+    // Capture sessionId (first-wins).
+    if (parsed.sessionId && !result.sessionId) {
+      result.sessionId = parsed.sessionId;
+      if (options.onSession) options.onSession(parsed.sessionId);
+    }
+
+    if (parsed.error) {
+      if (!errorMessage) errorMessage = parsed.error;
+    } else if (parsed.partialText) {
+      if (!errorMessage && streaming && options.onPartial && !partialsTruncated) {
+        const remaining = maxChars - cumPartialChars;
+        if (parsed.partialText.length >= remaining) {
+          if (remaining > 0) {
+            options.onPartial(parsed.partialText.slice(0, remaining));
+            partialsForwarded = true;
+          }
+          if (truncSuffix) { options.onPartial(truncSuffix); partialsForwarded = true; }
+          partialsTruncated = true;
+        } else {
+          options.onPartial(parsed.partialText);
+          partialsForwarded = true;
+          cumPartialChars += parsed.partialText.length;
+        }
+      }
+    }
+
+    if (parsed.finalText !== undefined && parsed.finalText !== null && !errorMessage) {
+      lastFinalText = parsed.finalText;
+    }
+    if (parsed.usage && result.usage === null) {
+      result.usage = parsed.usage;
+    }
+  }
+
+  const exitCode = await new Promise(resolve => child.on('close', resolve));
+  clearTimeout(timeoutHandle);
+  if (killTimer) clearTimeout(killTimer);
+
+  if (result.timedOut) {
+    result.error = `${executor.cliName} timed out`;
+    result.exitCode = EXIT_TIMEOUT;
+    if (options.onError) options.onError(result.error);
+    return result;
+  }
+
+  if (errorMessage) {
+    result.error = errorMessage;
+    result.exitCode = exitCode || EXIT_ERROR;
+    if (options.onError) options.onError(result.error);
+    return result;
+  }
+
+  if (exitCode !== 0 && !result.error) {
+    let msg = `${executor.cliName} exited with ${exitCode}`;
+    const s = stderrBuf.trim();
+    if (s) msg += `: ${s.slice(0, 500)}`;
+    result.error = msg;
+    result.exitCode = exitCode;
+    if (options.onError) options.onError(result.error);
+    return result;
+  }
+
+  // Assemble reply: if streaming forwarded partials, result.reply stays '' (body
+  // already delivered). Otherwise use finalText.
+  if (!partialsForwarded && lastFinalText !== null) {
+    result.reply = lastFinalText;
+  }
+  result.exitCode = EXIT_SUCCESS;
+  return result;
+}
 
 /**
  * Run an agent process per the AgentProc spec.
@@ -489,6 +733,31 @@ async function run(profileRaw, options) {
   }
 
   const profile = normalizeProfile(profileRaw);
+
+  // executor: field resolution — four cases per spec:
+  //  (1) no executor: use existing spawn path (unchanged)
+  //  (2) executor present + SDK knows it: call runViaExecutor, skip spawn
+  //  (3) executor present + SDK unknown + command present: warn, fall back to spawn
+  //  (4) executor present + SDK unknown + no command: hard fail
+  if (profile.executor) {
+    const exec = EXECUTORS[profile.executor];
+    if (exec) {
+      return runViaExecutor(profile, options, exec);
+    }
+    if (!profile.command) {
+      throw new Error(
+        `Unknown executor: ${JSON.stringify(profile.executor)}. ` +
+        `Known executors: ${executorNames.join(', ')}`
+      );
+    }
+    if (options.onStderr) {
+      options.onStderr(
+        `[agentproc runner] unknown executor ${JSON.stringify(profile.executor)}; ` +
+        `falling back to spawn (command: ${JSON.stringify(profile.command)})`
+      );
+    }
+  }
+
   const sessionId = options.sessionId || '';
   const sessionName = options.sessionName || 'default';
   // `!= null` (not `!== undefined`) so CLI can pass `null` to mean "defer to
@@ -588,6 +857,7 @@ async function run(profileRaw, options) {
     error: '',
     exitCode: 0,
     timedOut: false,
+    usage: null,
   };
 
   let killed = false;
@@ -710,7 +980,8 @@ async function run(profileRaw, options) {
     } else if (c.kind === 'result') {
       // Spec: at most one result; post-error result is discarded for body.
       if (errorSeen) {
-        // ignore body contribution
+        // ignore body contribution; still capture usage if not already set
+        if (c.usage && result.usage === null) result.usage = c.usage;
       } else if (resultSeen) {
         if (options.onStderr) {
           options.onStderr('[agentproc runner] ignoring subsequent {"type":"result"} (at most one per turn)');
@@ -718,12 +989,14 @@ async function run(profileRaw, options) {
       } else {
         resultSeen = true;
         resultText = c.value;
+        if (c.usage) result.usage = c.usage;
       }
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'error') {
       if (!errorSeen) {
         result.error = c.value;
         errorSeen = true;
+        if (c.usage) result.usage = c.usage;
         if (options.onError) options.onError(c.value);
         // Pending permission requests become moot; stop waiting for UI approval.
         pendingPermissionIds.clear();
@@ -983,4 +1256,7 @@ module.exports = {
   buildBaseEnv,
   STDERR_DIAGNOSTICS,
   diagnoseStderrFailure,
+  EXECUTORS,
+  executorNames,
+  runViaExecutor,
 };

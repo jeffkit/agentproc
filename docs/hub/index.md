@@ -137,8 +137,16 @@ cli: <command-name>             # the executable this wraps
 cli_install: |                  # how to install the CLI itself
   npm install -g ...
 agentproc:                      # the actual AgentProc P0 profile
+  # Option A — bridge subprocess (universal, works on all SDK versions)
   command: python3                          # argv[0] — single token, never split
   args: ["{{PROFILE_DIR}}/bridge.py"]       # argv[1..]; {{PROFILE_DIR}} resolves to the profile's own directory
+
+  # Option B — in-process executor (SDK ≥ 0.10.0, Node only today)
+  # When the SDK recognises the name it spawns the target CLI directly,
+  # skipping the bridge-subprocess fork. Falls back to command/args when
+  # the name is unknown so the profile stays forward-compatible.
+  executor: claude-code                     # SDK-registered name; optional
+
   # cwd intentionally omitted: `hub run` defaults it to the user's current
   # directory (so the wrapped CLI operates on their project). The bridge
   # script is located via {{PROFILE_DIR}} regardless of cwd.
@@ -154,6 +162,29 @@ notes: |                        # optional caveats, gotchas
 ```
 
 Hub profiles are **pure AgentProc P0** — they don't use bridge-specific `type:` shortcuts. Any conformant bridge can drive them.
+
+## In-process executors (SDK ≥ 0.10.0)
+
+Adding `executor: <name>` to a hub profile's `agentproc:` block lets the Node SDK spawn the target CLI directly — eliminating the bridge-subprocess fork overhead that normally sits between the runner and the CLI.
+
+```yaml
+# hub/claude-code/profile.yaml
+agentproc:
+  executor: claude-code   # ← in-process path when SDK ≥ 0.10.0
+  command: python3        # ← fallback for older SDKs or unrecognised names
+  args: ["{{PROFILE_DIR}}/bridge.py"]
+  timeout_secs: 600
+  streaming: true
+```
+
+**Built-in executor names (Node SDK 0.10.0):** `claude-code`, `codebuddy`, `codex`, `cursor`, `gemini-cli`, `kimi-code`, `opencode`, `qwen-code`, `agy`, `aider`, `deepseek`, `pi`.
+
+Introspect at runtime:
+```js
+const { executorNames } = require('agentproc');
+console.log(executorNames);
+// ['claude-code', 'codebuddy', 'codex', 'cursor', ...]
+```
 
 ## Contributing a new profile
 

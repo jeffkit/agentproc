@@ -124,6 +124,7 @@ class RunResult:
     error: str = ""
     exit_code: int = 0
     timed_out: bool = False
+    usage: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -434,21 +435,23 @@ def classify_line(line: str) -> Dict[str, Any]:
             out["role"] = obj.get("role")
         return _attach_session_id(out, obj)
     if t == "result":
-        return _attach_session_id(
-            {
-                "kind": "result",
-                "value": obj.get("text") if isinstance(obj.get("text"), str) else "",
-            },
-            obj,
-        )
+        out = {
+            "kind": "result",
+            "value": obj.get("text") if isinstance(obj.get("text"), str) else "",
+        }
+        usage = obj.get("usage")
+        if isinstance(usage, dict):
+            out["usage"] = usage
+        return _attach_session_id(out, obj)
     if t == "error":
-        return _attach_session_id(
-            {
-                "kind": "error",
-                "value": obj.get("message") if isinstance(obj.get("message"), str) else "",
-            },
-            obj,
-        )
+        out = {
+            "kind": "error",
+            "value": obj.get("message") if isinstance(obj.get("message"), str) else "",
+        }
+        usage = obj.get("usage")
+        if isinstance(usage, dict):
+            out["usage"] = usage
+        return _attach_session_id(out, obj)
     if t == "permission_request":
         return {"kind": "permission_request", "value": obj}
     return {"kind": "malformed", "value": line}
@@ -756,6 +759,9 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         elif kind == "result":
             # At most one result; post-error result discarded.
             if error_seen:
+                # Still capture usage if not already set.
+                if c.get("usage") and result.usage is None:
+                    result.usage = c["usage"]
                 if options.on_protocol_line:
                     options.on_protocol_line(line)
             elif result_seen:
@@ -770,12 +776,16 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 result_seen = True
                 _note_session_id(c.get("session_id"))
                 result_text = c["value"]
+                if c.get("usage"):
+                    result.usage = c["usage"]
                 if options.on_protocol_line:
                     options.on_protocol_line(line)
         elif kind == "error":
             _note_session_id(c.get("session_id"))
             result.error = c["value"]
             error_seen = True
+            if c.get("usage"):
+                result.usage = c["usage"]
             if options.on_error:
                 options.on_error(c["value"])
             if options.on_protocol_line:

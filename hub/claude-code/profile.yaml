@@ -4,6 +4,7 @@ cli: claude
 cli_install: |
   npm install -g @anthropic-ai/claude-code
 agentproc:
+  executor: claude-code
   command: python3
   args: ["{{PROFILE_DIR}}/bridge.py"]
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your

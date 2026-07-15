@@ -55,9 +55,25 @@ Agent Process         ← 你的脚本或二进制文件（实现下面的合约
 profile 是一个 YAML 文件，告诉 bridge 如何启动 agent process。
 
 ```yaml
-# 必填：要执行的程序（始终是 argv[0]，永不拆分）
+# 必填：要执行的程序（始终是 argv[0]，永不拆分）。
+# 设置 `executor:` 且 SDK 识别该名称时可省略。
 command: python3
 args: ["{{PROFILE_DIR}}/bridge.py"]   # argv[1..]；省略时默认为 []
+
+# 可选 in-process executor（SDK 特定）。
+# 存在且 SDK 识别该名称时，runner 在进程内调用指定 executor，
+# 而非 spawn `command`/`args`，从而省去 bridge 进程 fork 开销。
+# SDK 不识别该名称时，以 `command` 作为兜底；
+# SDK 不识别且 `command` 缺失时，runner 必须 hard-fail，并列出已知 executor 名称。
+#
+# 决策规则：
+#   executor 存在 + SDK 已知     → 进程内执行；忽略 command/args
+#   executor 存在 + SDK 未知     → 警告，spawn command（兜底）
+#   executor 存在 + SDK 未知 + 无 command  → hard fail
+#   executor 不存在              → spawn command（现有行为）
+#
+# 内置 executor 名称（Node SDK）：见 `sdk.executorNames`。
+executor: claude-code         # 可选；省略时走 command/args spawn 路径
 
 # 执行环境
 cwd: /path/to/workspace       # 工作目录（支持 ~ 和占位符）
@@ -261,7 +277,22 @@ agent process 写入 stdout。bridge 逐行实时读取。**每行都是一个 J
 
 ### 终止事件上的可选 `usage`
 
-`result` 与 `error` **MAY** 包含 `usage` 对象，用于 token/费用统计。bridge **MAY** 忽略它。推荐键（均可选）：`input_tokens`、`output_tokens`、`total_tokens`（数字）。额外键向前兼容，无法识别时 **SHOULD** 忽略。**没有**独立的 `usage` 事件类型。
+`result` 与 `error` **MAY** 包含 `usage` 对象，用于 token/费用统计。bridge **MAY** 忽略它。**没有**独立的 `usage` 事件类型。额外键向前兼容，无法识别时 **SHOULD** 忽略。
+
+推荐键（均可选）：
+
+| 键 | 类型 | 说明 |
+|----|------|------|
+| `input_tokens` | number | 计费输入 token 总数（按 provider 惯例，可能包含缓存 token）。 |
+| `output_tokens` | number | 计费输出 token 总数。 |
+| `total_tokens` | number | 输入与输出 token 之和。 |
+| `cache_read_input_tokens` | number | Anthropic 提示词缓存命中数。在标准 Anthropic 计费下，这些 token 是 `input_tokens` 的子集。 |
+| `cache_creation_input_tokens` | number | Anthropic 提示词缓存写入数（首次写入费用）。 |
+| `reasoning_tokens` | number | 推理/思考 token（OpenAI o 系列、Claude 扩展思考）。这些是 `output_tokens` 的**子集**，不叠加计算。 |
+| `duration_ms` | number | agent 侧度量的 turn 耗时（毫秒），不含 spawn/IPC 开销。 |
+| `cost_usd` | number | 估算费用（美元）。带有定价表的 bridge **MAY** 填充此字段；没有定价来源的 bridge **SHOULD** 省略，而非猜测。 |
+
+`input_tokens` 与缓存字段的惯例：标准解释为 `input_tokens = 非缓存输入 + cache_read_input_tokens + cache_creation_input_tokens`（即缓存 token 计入总量）。bridge **SHOULD** 遵循此惯例，使 `input_tokens` 始终代表可计费的输入总量。
 
 ### `{"type":"partial"}` —— 流式分块
 
