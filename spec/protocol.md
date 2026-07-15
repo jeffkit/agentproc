@@ -191,6 +191,65 @@ If a bridge implementation chooses to use a shell (e.g., for environment-variabl
 
 `permission` is **opt-in**. Profiles and CLIs that have no mid-turn approval channel keep working unchanged.
 
+### In-process executors
+
+The `executor:` field (see [Profile YAML](#profile-yaml)) selects an **in-process executor** — a named, SDK-registered implementation of the bridge side of the protocol. When the runner recognises the name, it invokes the executor directly **in the runner's own process**, spawning the target CLI without forking a bridge subprocess first. This eliminates the bridge-process fork overhead while reusing the same CLI-adapter logic that standalone bridge scripts carry.
+
+Executors are **SDK-specific**. The set of recognised names, and the API for registering new ones, is defined by each SDK (Python / Node / Rust / …) — there is no cross-SDK registry. A profile that sets `executor:` to a name the host SDK does not recognise falls back to the `command`/`args` spawn path per the four-case rule above. This means a single profile can run three ways depending on what the host has installed: Rust executor (in-process), Node executor (in-process), or Python bridge script (spawn) — all producing the same observable NDJSON.
+
+#### Executor interface
+
+Every executor exposes the following surface. SDKs MAY use different concrete syntax (a JS object, a Python class, a Rust trait) but MUST preserve these semantics:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cliName` | string | The CLI binary name, used in error messages (e.g. `"claude"`, `"codex"`). |
+| `installHint` | string | Human-readable install instruction appended to "CLI not found" errors. |
+| `plain` | boolean | `true` = the CLI emits plain text on stdout (not NDJSON); the runner treats the entire stdout as the reply body and does **not** call `parseEvent`. `false` (default) = the CLI emits NDJSON, one JSON object per line, decoded via `parseEvent`. |
+| `buildArgs` | `(message, sessionId, env) -> string[]` | Builds the target CLI's argv. `message` is the turn's user message; `sessionId` is the previous turn's session id (empty string = new session); `env` is the composed child environment (infra set + profile `env` after `${VAR}` expansion + `env_allowlist` filtering). The returned argv is passed to `execve` **without** a shell. Returning an empty array is a hard error. |
+| `parseEvent` | `(event) -> ParseResult \| null` | Translates one decoded JSON object from the CLI's stdout into a `ParseResult`. Return `null` for events the executor does not recognise (the runner logs and ignores the line). Omitted / unused when `plain: true`. |
+| `makeHandlers` | `() -> { buildArgs, parseEvent }` | Optional factory for **stateful** executors that need per-turn state shared between `buildArgs` and `parseEvent` (e.g. a session id minted in `buildArgs` and returned in `parseEvent`). When present, the runner calls `makeHandlers()` **once per turn** and uses the returned pair for that turn only. When absent, the runner uses `buildArgs` / `parseEvent` directly, and they MUST be stateless and re-entrant. |
+
+`buildArgs` and `parseEvent` (or the pair returned by `makeHandlers`) form a closed turn-local contract: the runner calls `buildArgs` once before spawn, then calls `parseEvent` for each stdout line until EOF. The executor MUST NOT assume any ordering between events beyond what the CLI itself guarantees.
+
+#### `ParseResult`
+
+The object `parseEvent` returns. All fields optional; a `null` return means "this event contributes nothing".
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `partialText` | string | A streaming chunk. The runner forwards it immediately as `{"type":"partial"}` (when `streaming: true`), and accumulates it for the final body. |
+| `finalText` | string \| null | The terminal reply body. `null` (the value, not omission) explicitly means "no text body this event". When the turn ends with no `finalText` and no accumulated `partialText`, the runner treats the turn as having an empty body. |
+| `sessionId` | string | A session id to persist for the next turn. First non-empty value wins; a different non-empty value later is a protocol violation (the runner keeps the first). |
+| `error` | string | A terminal error message. The runner forwards it as `{"type":"error"}` and stops forwarding further `partial` events from the same turn. |
+| `usage` | object | Token / cost stats attached to the run result. Forward-compatible; the runner SHOULD ignore keys it does not understand. |
+
+`parseEvent` MAY return multiple fields at once (e.g. `{ partialText, sessionId }` — stream a chunk and stamp the session id in the same event). It MUST NOT return `partialText` and `error` together; an error is terminal.
+
+#### `plain` executors
+
+When `plain: true`, the runner does not decode stdout as NDJSON and does not call `parseEvent`. Instead:
+
+- The entire stdout (UTF-8 decoded, trailing whitespace trimmed) becomes the reply body.
+- Session continuity is not supported (no `sessionId` can be extracted from plain text by the contract itself — a `plain` executor that needs session continuity MUST use a bespoke run loop outside this interface, as `recursive` and `echo-agent` do).
+- `max_reply_chars` / `truncation_suffix` still apply to the assembled body.
+- `streaming: true` has no effect for `plain` executors (there are no `partial` events to forward).
+
+#### Runner contract
+
+When the runner takes the in-process path (`executor:` present + recognised), it MUST:
+
+1. Compose the child environment exactly as the spawn path does (infra set + profile `env` after expansion + CLI `--env` extras) and pass it to `buildArgs` as the `env` argument.
+2. Resolve handlers via `makeHandlers()` if present, else use `buildArgs` / `parseEvent` directly.
+3. Call `buildArgs(message, sessionId, env)` once. An empty return is a hard error.
+4. Spawn the target CLI's argv directly (no bridge subprocess, no shell).
+5. Apply `timeout_secs` / `kill_grace_secs` / `max_reply_chars` / `truncation_suffix` / `streaming` / `permission` with the same semantics as the spawn path.
+6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}`, accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s.
+7. For `plain: true`: treat stdout as the body, apply truncation, emit a single `{"type":"result"}` at turn end.
+8. Emit a terminal `{"type":"result"}` (or `{"type":"error"}`) at turn end, carrying the first non-empty `sessionId` and any `usage` seen.
+
+The in-process path and the spawn path MUST produce observably equivalent NDJSON for the same CLI + turn. This is verified by the shared conformance suite.
+
 ---
 
 ## Input — stdin turn object

@@ -189,6 +189,65 @@ args: []
 
 `permission` 是**可选启用**。没有 turn 中批准通道的 profile 和 CLI 保持不变。
 
+### In-process executor
+
+`executor:` 字段（见 [Profile YAML](#profile-yaml)）选择一个 **in-process executor**——一个由 SDK 注册、实现了协议 bridge 侧的命名实现。当 runner 识别该名称时，**在 runner 自身进程内**直接调用 executor，直接 spawn 目标 CLI，而不再先 fork 一个 bridge 子进程。这样省去了 bridge 进程的 fork 开销，同时复用独立 bridge 脚本所承载的同一套 CLI 适配逻辑。
+
+executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor 的 API 由各 SDK（Python / Node / Rust / …）自行定义——不存在跨 SDK 的注册表。若 profile 设置的 `executor:` 名称不被宿主 SDK 识别，按上述四条规则回退到 `command`/`args` spawn 路径。这意味着同一份 profile 依宿主装机情况可三种方式运行：Rust executor（进程内）、Node executor（进程内）、或 Python bridge 脚本（spawn）——三者产出 observable 等价的 NDJSON。
+
+#### Executor 接口
+
+每个 executor 暴露以下表面。各 SDK 可使用不同的具体语法（JS 对象、Python 类、Rust trait），但**必须**保留这些语义：
+
+| 字段 | 类型 | 描述 |
+|-------|------|-------------|
+| `cliName` | string | CLI 二进制名，用于错误信息（例如 `"claude"`、`"codex"`）。 |
+| `installHint` | string | 人类可读的安装指引，追加到「CLI 未找到」错误后。 |
+| `plain` | boolean | `true` = CLI 在 stdout 输出纯文本（非 NDJSON）；runner 把整个 stdout 当作回复正文，**不**调用 `parseEvent`。`false`（默认）= CLI 输出 NDJSON，每行一个 JSON 对象，经 `parseEvent` 解码。 |
+| `buildArgs` | `(message, sessionId, env) -> string[]` | 构建目标 CLI 的 argv。`message` 是本轮用户消息；`sessionId` 是上一轮的会话 id（空串 = 新会话）；`env` 是组合后的子进程环境（infra 集 + profile `env` 经 `${VAR}` 展开和 `env_allowlist` 过滤后的结果）。返回的 argv **不**经 shell 直接传给 `execve`。返回空数组是硬错误。 |
+| `parseEvent` | `(event) -> ParseResult \| null` | 将 CLI stdout 的一行解码后的 JSON 对象翻译为 `ParseResult`。对不识别的事件返回 `null`（runner 记日志并忽略该行）。`plain: true` 时省略 / 不使用。 |
+| `makeHandlers` | `() -> { buildArgs, parseEvent }` | 可选工厂，用于**有状态** executor——需要在 `buildArgs` 和 `parseEvent` 之间共享 per-turn 状态（例如 `buildArgs` 生成的会话 id 在 `parseEvent` 中返回）。存在时，runner **每 turn 调用一次** `makeHandlers()`，仅在该 turn 使用返回的 pair。缺省时，runner 直接使用 `buildArgs` / `parseEvent`，且它们**必须**无状态、可重入。 |
+
+`buildArgs` 和 `parseEvent`（或 `makeHandlers` 返回的 pair）构成一个 turn 内闭合的契约：runner 在 spawn 前调用一次 `buildArgs`，随后对每行 stdout 调用 `parseEvent` 直到 EOF。executor **不得**假设 CLI 自身保证之外的事件顺序。
+
+#### `ParseResult`
+
+`parseEvent` 返回的对象。所有字段可选；返回 `null` 表示「此事件不贡献任何内容」。
+
+| 字段 | 类型 | 含义 |
+|-------|------|---------|
+| `partialText` | string | 一个流式分块。runner 立即作为 `{"type":"partial"}` 转发（当 `streaming: true`），并累加进最终正文。 |
+| `finalText` | string \| null | 终态回复正文。`null`（该值，而非省略）明确表示「此事件无文本正文」。当 turn 结束时既无 `finalText` 也无累加的 `partialText`，runner 视作空正文。 |
+| `sessionId` | string | 持久化到下一轮的会话 id。第一个非空值生效；之后出现不同的非空值是协议违规（runner 保留第一个）。 |
+| `error` | string | 终态错误信息。runner 作为 `{"type":"error"}` 转发，并停止转发本轮后续 `partial` 事件。 |
+| `usage` | object | token / 成本统计，附加到 run 结果。前向兼容；runner **应**忽略不认识的键。 |
+
+`parseEvent` 可以一次返回多个字段（例如 `{ partialText, sessionId }`——流式分块的同时在同一事件里盖章会话 id）。**不得**同时返回 `partialText` 和 `error`；error 是终态的。
+
+#### `plain` executor
+
+当 `plain: true` 时，runner 不把 stdout 当作 NDJSON 解码，也不调用 `parseEvent`。而是：
+
+- 整个 stdout（UTF-8 解码、去尾部空白）成为回复正文。
+- 不支持会话连续性（契约本身无法从纯文本提取 `sessionId`——需要会话连续性的 `plain` executor **必须**在该接口之外使用自建 run 循环，如 `recursive` 和 `echo-agent` 所做）。
+- `max_reply_chars` / `truncation_suffix` 仍适用于组装后的正文。
+- `streaming: true` 对 `plain` executor 无效（没有 `partial` 事件可转发）。
+
+#### Runner 契约
+
+当 runner 走 in-process 路径（`executor:` 存在且被识别）时，**必须**：
+
+1. 按 spawn 路径完全相同的方式组合子进程环境（infra 集 + profile `env` 展开后 + CLI `--env` 附加），并作为 `env` 参数传给 `buildArgs`。
+2. 若 `makeHandlers` 存在则通过它解析 handlers，否则直接使用 `buildArgs` / `parseEvent`。
+3. 调用一次 `buildArgs(message, sessionId, env)`。返回空是硬错误。
+4. 直接 spawn 目标 CLI 的 argv（无 bridge 子进程、无 shell）。
+5. 以与 spawn 路径相同的语义应用 `timeout_secs` / `kill_grace_secs` / `max_reply_chars` / `truncation_suffix` / `streaming` / `permission`。
+6. 对 `plain: false`：逐行解码 stdout，每行调用 `parseEvent`，把 `partialText` 作为 `{"type":"partial"}` 转发，累加 `finalText`，持久化第一个非空 `sessionId`，遇到 `error` 时发 `{"type":"error"}` 并抑制后续 `partial`。
+7. 对 `plain: true`：把 stdout 当作正文，应用截断，在 turn 结束时发单个 `{"type":"result"}`。
+8. 在 turn 结束时发终态 `{"type":"result"}`（或 `{"type":"error"}`），携带第一个非空 `sessionId` 和见过的任何 `usage`。
+
+对同一 CLI + turn，in-process 路径与 spawn 路径**必须**产出 observable 等价的 NDJSON。这由共享的 conformance 套件验证。
+
 ---
 
 ## 输入 — stdin turn 对象
