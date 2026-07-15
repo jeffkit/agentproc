@@ -18,6 +18,19 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 **Versions.** SDK packages `0.10.0` → `0.10.1`. Wire protocol stays `0.4`. Doc revision `1.1` → `1.2`.
 
+**New: Rust SDK (`sdk/rust`) — first release, parity baseline**
+
+Adds a third official SDK alongside Python and Node. Same wire protocol (`0.4`), same in-process executor mechanism, same `executor:` profile field and four-case resolution rule. A profile that sets `executor: codex` runs in-process on any host with `agentproc` (Rust) installed, falls back to Node in-process or Python bridge spawn otherwise — all three produce observable-equivalent NDJSON.
+
+- Crate `agentproc` 0.10.0 on the same version track as the Py/Node packages.
+- Modules: `protocol` (turn object + NDJSON event parsing, wire 0.4), `profile` (`agentproc:` nested + flat YAML, `executor:` field), `env` (infra set + `${VAR}` expansion + `env_allowlist` + `{{...}}` placeholders), `runner` (`run()` + spawn path + in-process `run_via_executor` path, shared timeout/kill_grace/max_reply_chars/truncation/streaming semantics), `executors` (`Executor` + `TurnHandlers` traits, `ParseResult`, registry with `codex` + `claude-code` built-ins, `register_executor` for host extensions), `history` (session JSONL persistence), `error` (`ProtocolError` + `RunnerError`).
+- Features: `default = ["executors", "yaml"]`. Disable `executors` for a minimal spawn-only runner; disable `yaml` to drop `serde_yaml` and build `Profile` programmatically.
+- Executor contract: stateful executors use `Executor::make_turn() -> Box<dyn TurnHandlers>` + `TurnHandlers::parse_event(&mut self)` for per-turn isolation (mirrors Node's `makeHandlers()`). The async `on_permission` callback uses `Pin<Box<dyn Future + Send>>` (no `futures` crate dep) and a future mpsc writer task for FIFO permission responses.
+- Conformance: `src/conformance.rs` runs the shared `spec/conformance/cases.json` suite (lenient deserializers match Node's `.text || ""` coercion for malformed-typed events). `tests/spawn_path.rs` exercises the spawn path end-to-end via an `examples/sdk_harness` fake agent.
+- Known gaps for follow-up: 10 of 12 built-in executors still to port from Node (codebuddy/cursor/gemini-cli/kimi-code/opencode/qwen-code + plain agy/aider/deepseek/pi); `on_permission` does not yet drive stdin writes (mpsc writer task TODO); SDK harness for `sdk.json`/`scenarios.json` conformance not yet wired.
+
+**Versions (Rust).** `agentproc` crate `0.10.0` (initial). Wire protocol `0.4`.
+
 ---
 
 ### Spec / SDK 0.10.0 — 2026-07-15
