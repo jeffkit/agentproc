@@ -523,7 +523,10 @@ async fn run_via_executor(
     cfg: ResolvedConfig,
     exec: Box<dyn crate::executors::Executor>,
 ) -> Result<RunResult, RunnerError> {
-    let handlers = exec.make_turn();
+    let ctx = crate::executors::TurnCtx {
+        permission: profile.permission,
+    };
+    let mut handlers = exec.make_turn(&ctx);
     let session_id = opts.session_id.clone().unwrap_or_default();
     let argv = handlers.build_args(&opts.message, &session_id, &cfg.env);
     if argv.is_empty() {
@@ -545,7 +548,14 @@ async fn run_via_executor(
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    cmd.stdin(Stdio::null());
+    // permission mode needs a writable stdin (initial user message + permission
+    // responses); unattended mode closes stdin after argv delivery.
+    let permission_mode = profile.permission && !exec.plain();
+    cmd.stdin(if permission_mode {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
@@ -556,6 +566,23 @@ async fn run_via_executor(
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
+
+    // In permission mode, write the initial user message (e.g. Claude
+    // SDKUserMessage) to stdin before the stdout loop starts.
+    let mut child_stdin = if permission_mode {
+        let stdin = child.stdin.take().expect("stdin piped");
+        if let Some(initial) = handlers.build_initial_stdin(&opts.message, &session_id, &opts.attachments) {
+            let mut stdin = stdin;
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(initial.as_bytes()).await;
+            let _ = stdin.write_all(b"\n").await;
+            Some(stdin)
+        } else {
+            Some(stdin)
+        }
+    } else {
+        None
+    };
 
     let stderr_task = tokio::spawn(drain_capped(stderr, opts.on_stderr.clone(), 1_000_000));
 
@@ -571,7 +598,14 @@ async fn run_via_executor(
     let result = if exec.plain() {
         process_plain(BufReader::new(stdout)).await
     } else {
-        process_executor_stdout(BufReader::new(stdout), handlers, &cfg, &opts).await
+        process_executor_stdout(
+            BufReader::new(stdout),
+            handlers,
+            &cfg,
+            &opts,
+            child_stdin.take(),
+        )
+        .await
     };
 
     let (status, stderr_output) = tokio::join!(
@@ -617,7 +651,9 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
     mut handlers: Box<dyn TurnHandlers>,
     cfg: &ResolvedConfig,
     opts: &RunOptions,
+    mut stdin: Option<tokio::process::ChildStdin>,
 ) -> Result<RunResult, RunnerError> {
+    use tokio::io::AsyncWriteExt;
     let mut result = RunResult::default();
     let mut saw_error = false;
     let mut line = String::new();
@@ -635,6 +671,29 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
         let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+
+        // Permission channel: CLIs with a native tool-auth protocol (Claude
+        // control_request) translate the event here, invoke on_permission, and
+        // write the translated response to stdin before reading the next line.
+        if let Some((req, original_event)) = handlers.permission_request_from_event(&value) {
+            if let Some(cb) = &opts.on_permission {
+                let decision = cb(req).await;
+                if let Some(out) = handlers.write_permission_response(&decision, &original_event) {
+                    if let Some(stdin) = stdin.as_mut() {
+                        let _ = stdin.write_all(out.as_bytes()).await;
+                        let _ = stdin.write_all(b"\n").await;
+                    }
+                }
+            } else {
+                // No on_permission wired: deny to avoid hanging the turn.
+                eprintln!(
+                    "[agentproc runner] permission_request from {} but no on_permission callback; denying",
+                    value.get("type").and_then(|v| v.as_str()).unwrap_or("?")
+                );
+            }
+            continue;
+        }
+
         let Some(parsed) = handlers.parse_event(value) else {
             continue;
         };

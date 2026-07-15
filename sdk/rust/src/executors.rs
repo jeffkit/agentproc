@@ -63,8 +63,20 @@ pub trait Executor: Send + Sync {
     fn plain(&self) -> bool {
         false
     }
-    /// Build a fresh per-turn handlers pair. Called once per turn.
-    fn make_turn(&self) -> Box<dyn TurnHandlers>;
+    /// Build a fresh per-turn handlers pair. `ctx` carries turn-level config
+    /// the executor needs to pick its argv shape — currently whether the
+    /// profile enables the permission channel (Claude uses a bidirectional
+    /// `--input-format stream-json` + `--permission-prompt-tool stdio` path
+    /// when this is true).
+    fn make_turn(&self, ctx: &TurnCtx) -> Box<dyn TurnHandlers>;
+}
+
+/// Turn-level context passed to [`Executor::make_turn`].
+#[derive(Debug, Clone, Default)]
+pub struct TurnCtx {
+    /// Mirrors `profile.permission`. Executors that have a native tool-auth
+    /// channel (Claude) switch to their permission-aware argv when true.
+    pub permission: bool,
 }
 
 /// Per-turn pair: `build_args` runs once before spawn, `parse_event` runs
@@ -89,6 +101,60 @@ pub trait TurnHandlers: Send {
     /// executors derive session id from stdout events and leave this as
     /// `None`. Called once after the turn ends.
     fn get_session_id(&self) -> Option<String> {
+        None
+    }
+
+    // ----- permission channel (optional, only when profile.permission = true) -----
+
+    /// When `profile.permission` is true and the runner takes the in-process
+    /// path, this is written to the CLI's stdin once, before the stdout loop
+    /// starts. CLIs that drive tool-authorisation via a bidirectional stream
+    /// (e.g. Claude `--input-format stream-json`) need this to deliver the
+    /// user's message. Returns `None` for CLIs that take the message via argv
+    /// (the common case) — the runner then writes nothing.
+    ///
+    /// `attachments` lets the executor format multimodal content blocks
+    /// (image/document base64) when the CLI expects them in the initial
+    /// stream-json user message.
+    fn build_initial_stdin(
+        &mut self,
+        _message: &str,
+        _session_id: &str,
+        _attachments: &[crate::Attachment],
+    ) -> Option<String> {
+        None
+    }
+
+    /// Inspect a stdout line and decide whether it is a tool-authorisation
+    /// request in this CLI's native protocol (e.g. Claude `control_request`
+    /// with subtype `can_use_tool`). When it is, return the translated
+    /// AgentProc [`PermissionRequest`] plus the original raw event value
+    /// (stashed by the runner and passed back to [`write_permission_response`]
+    /// so the executor can fill CLI-specific fields like Claude's
+    /// `updatedInput` from the original tool input).
+    ///
+    /// Returning `None` means "not a permission request — feed to
+    /// `parse_event` as usual". Default: no CLI-native permission protocol,
+    /// the executor emits standard AgentProc `{"type":"permission_request"}`
+    /// events directly (handled by `parse_event`).
+    fn permission_request_from_event(
+        &mut self,
+        _event: &serde_json::Value,
+    ) -> Option<(crate::PermissionRequest, serde_json::Value)> {
+        None
+    }
+
+    /// Translate the runner's [`PermissionDecision`] back into the NDJSON line
+    /// to write to the CLI's stdin. `original_event` is the raw event that
+    /// triggered this permission request (the same value returned by
+    /// [`permission_request_from_event`]). Return `None` to let the runner
+    /// emit the standard AgentProc `{"type":"permission_response"}` frame —
+    /// used by CLIs that already speak AgentProc on stdin.
+    fn write_permission_response(
+        &self,
+        _decision: &crate::PermissionDecision,
+        _original_event: &serde_json::Value,
+    ) -> Option<String> {
         None
     }
 }
@@ -204,7 +270,7 @@ impl Executor for CodexExecutor {
     fn install_hint(&self) -> &str {
         "Install: npm install -g @openai/codex"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(CodexTurn)
     }
 }
@@ -287,12 +353,23 @@ impl Executor for ClaudeCodeExecutor {
     fn install_hint(&self) -> &str {
         "Install: npm install -g @anthropic-ai/claude-code"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
-        Box::new(ClaudeCodeTurn)
+    fn make_turn(&self, ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
+        Box::new(ClaudeCodeTurn { permission: ctx.permission })
     }
 }
 
-struct ClaudeCodeTurn;
+struct ClaudeCodeTurn {
+    permission: bool,
+}
+
+impl ClaudeCodeTurn {
+    fn disallow_arg(env: &HashMap<String, String>) -> String {
+        env.get("CLAUDE_DISALLOW_TOOLS")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "AskUserQuestion".to_string())
+    }
+}
 
 impl TurnHandlers for ClaudeCodeTurn {
     fn build_args(
@@ -301,32 +378,61 @@ impl TurnHandlers for ClaudeCodeTurn {
         session_id: &str,
         env: &HashMap<String, String>,
     ) -> Vec<String> {
-        let mut args: Vec<String> = vec![
-            ClaudeCodeExecutor.cli_name().to_string(),
-            "-p".into(),
-            message.to_string(),
-            "--output-format".into(),
-            "stream-json".into(),
-            "--dangerously-skip-permissions".into(),
-        ];
-        let disallow = env
-            .get("CLAUDE_DISALLOW_TOOLS")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "AskUserQuestion".to_string());
-        if !disallow.is_empty() {
-            args.push("--disallowed-tools".into());
-            args.push(disallow);
+        if self.permission {
+            // Bidirectional stream-json + permission tool. The user message is
+            // delivered via stdin (build_initial_stdin), not argv.
+            let mut args: Vec<String> = vec![
+                ClaudeCodeExecutor.cli_name().to_string(),
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--input-format".into(),
+                "stream-json".into(),
+                "--verbose".into(),
+                "--permission-prompt-tool".into(),
+                "stdio".into(),
+                "--permission-mode".into(),
+                "default".into(),
+            ];
+            let disallow = Self::disallow_arg(env);
+            if !disallow.is_empty() {
+                args.push("--disallowed-tools".into());
+                args.push(disallow);
+            }
+            if let Some(model) = env.get("CLAUDE_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                args.push("--model".into());
+                args.push(model.to_string());
+            }
+            if !session_id.is_empty() {
+                args.push("--resume".into());
+                args.push(session_id.to_string());
+            }
+            args
+        } else {
+            // Unattended: message via argv, skip permissions.
+            let mut args: Vec<String> = vec![
+                ClaudeCodeExecutor.cli_name().to_string(),
+                "-p".into(),
+                message.to_string(),
+                "--output-format".into(),
+                "stream-json".into(),
+                "--dangerously-skip-permissions".into(),
+            ];
+            let disallow = Self::disallow_arg(env);
+            if !disallow.is_empty() {
+                args.push("--disallowed-tools".into());
+                args.push(disallow);
+            }
+            if let Some(model) = env.get("CLAUDE_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                args.push("--model".into());
+                args.push(model.to_string());
+            }
+            if !session_id.is_empty() {
+                args.push("--resume".into());
+                args.push(session_id.to_string());
+            }
+            args
         }
-        if let Some(model) = env.get("CLAUDE_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            args.push("--model".into());
-            args.push(model.to_string());
-        }
-        if !session_id.is_empty() {
-            args.push("--resume".into());
-            args.push(session_id.to_string());
-        }
-        args
     }
 
     fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
@@ -376,6 +482,128 @@ impl TurnHandlers for ClaudeCodeTurn {
             _ => None,
         }
     }
+
+    // ----- permission channel (permission mode only) -----
+
+    fn build_initial_stdin(
+        &mut self,
+        message: &str,
+        session_id: &str,
+        attachments: &[crate::Attachment],
+    ) -> Option<String> {
+        if !self.permission {
+            return None;
+        }
+        let content: serde_json::Value = if attachments.is_empty() {
+            serde_json::json!(message)
+        } else {
+            let mut blocks: Vec<serde_json::Value> =
+                vec![serde_json::json!({ "type": "text", "text": message })];
+            for att in attachments {
+                blocks.push(serde_json::json!({
+                    "type": "text",
+                    "text": format!("[attachment: {} {}]", att.kind, att.url)
+                }));
+            }
+            serde_json::json!(blocks)
+        };
+        let user_message = serde_json::json!({
+            "type": "user",
+            "message": { "role": "user", "content": content },
+            "parent_tool_use_id": serde_json::Value::Null,
+            "session_id": session_id,
+        });
+        serde_json::to_string(&user_message).ok()
+    }
+
+    fn permission_request_from_event(
+        &mut self,
+        event: &serde_json::Value,
+    ) -> Option<(crate::PermissionRequest, serde_json::Value)> {
+        let etype = event.get("type")?.as_str()?;
+        if etype != "control_request" {
+            return None;
+        }
+        let request = event.get("request")?;
+        if request.get("subtype").and_then(|s| s.as_str()) != Some("can_use_tool") {
+            return None;
+        }
+        let request_id = event.get("request_id")?.as_str()?.trim();
+        if request_id.is_empty() {
+            return None;
+        }
+        let tool_name = request
+            .get("tool_name")
+            .and_then(|t| t.as_str())
+            .or_else(|| request.get("display_name").and_then(|t| t.as_str()))
+            .unwrap_or("tool");
+        let input = request.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let mut req = crate::PermissionRequest {
+            request_id: request_id.to_string(),
+            tool_name: tool_name.to_string(),
+            input,
+            description: None,
+            tool_use_id: None,
+            session_id: None,
+        };
+        if let Some(desc) = request.get("description").and_then(|d| d.as_str()) {
+            if !desc.is_empty() {
+                req.description = Some(desc.to_string());
+            }
+        }
+        if let Some(tuid) = request.get("tool_use_id").and_then(|d| d.as_str()) {
+            if !tuid.is_empty() {
+                req.tool_use_id = Some(tuid.to_string());
+            }
+        }
+        Some((req, event.clone()))
+    }
+
+    fn write_permission_response(
+        &self,
+        decision: &crate::PermissionDecision,
+        original_event: &serde_json::Value,
+    ) -> Option<String> {
+        if !self.permission {
+            return None;
+        }
+        let request = original_event.get("request")?;
+        let request_id = original_event
+            .get("request_id")
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+        let original_input = request.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+        let response = match decision {
+            crate::PermissionDecision::Allow { updated_input } => {
+                let updated = updated_input.clone().unwrap_or(original_input);
+                serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {
+                            "behavior": "allow",
+                            "updatedInput": updated,
+                        },
+                    },
+                })
+            }
+            crate::PermissionDecision::Deny { message } => {
+                serde_json::json!({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": request_id,
+                        "response": {
+                            "behavior": "deny",
+                            "message": message,
+                        },
+                    },
+                })
+            }
+        };
+        serde_json::to_string(&response).ok()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -393,7 +621,7 @@ impl Executor for CodebuddyExecutor {
     fn install_hint(&self) -> &str {
         "See your internal CodeBuddy installation docs."
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(CodebuddyTurn)
     }
 }
@@ -477,7 +705,7 @@ impl Executor for CursorExecutor {
     fn install_hint(&self) -> &str {
         "Install: brew install cursor-agent  (then run `agent login`)"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(CursorTurn { accumulated: Vec::new() })
     }
 }
@@ -571,7 +799,7 @@ impl Executor for GeminiCliExecutor {
     fn install_hint(&self) -> &str {
         "Install: npm install -g @google/gemini-cli"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(GeminiCliTurn)
     }
 }
@@ -665,7 +893,7 @@ impl Executor for KimiCodeExecutor {
     fn install_hint(&self) -> &str {
         "See https://moonshotai.github.io/kimi-cli for installation"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(KimiCodeTurn {
             session_id: std::cell::Cell::new(None),
         })
@@ -734,7 +962,7 @@ impl Executor for OpencodeExecutor {
     fn install_hint(&self) -> &str {
         "Install: npm install -g opencode-ai  (or: curl -fsSL https://opencode.ai/install | bash)"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(OpencodeTurn)
     }
 }
@@ -812,7 +1040,7 @@ impl Executor for QwenCodeExecutor {
     fn install_hint(&self) -> &str {
         "Install: npm install -g @qwen-code/qwen-code"
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(QwenCodeTurn)
     }
 }
@@ -909,7 +1137,7 @@ impl Executor for AgyExecutor {
     fn plain(&self) -> bool {
         true
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(AgyTurn {
             session_id: std::cell::Cell::new(None),
         })
@@ -969,7 +1197,7 @@ impl Executor for AiderExecutor {
     fn plain(&self) -> bool {
         true
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(AiderTurn)
     }
 }
@@ -1011,7 +1239,7 @@ impl Executor for DeepseekExecutor {
     fn plain(&self) -> bool {
         true
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(DeepseekTurn)
     }
 }
@@ -1051,7 +1279,7 @@ impl Executor for PiExecutor {
     fn plain(&self) -> bool {
         true
     }
-    fn make_turn(&self) -> Box<dyn TurnHandlers> {
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(PiTurn)
     }
 }
@@ -1126,7 +1354,7 @@ mod tests {
     #[test]
     fn codex_build_args_first_turn() {
         let ex = CodexExecutor;
-        let h = ex.make_turn();
+        let h = ex.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
         assert_eq!(args[0], "codex");
@@ -1139,7 +1367,7 @@ mod tests {
     #[test]
     fn codex_build_args_resume() {
         let ex = CodexExecutor;
-        let h = ex.make_turn();
+        let h = ex.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "thread-1", &env);
         assert!(args.iter().any(|a| a == "resume"));
@@ -1148,7 +1376,7 @@ mod tests {
 
     #[test]
     fn codex_parse_thread_started() {
-        let mut h = CodexExecutor.make_turn();
+        let mut h = CodexExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "thread.started",
             "thread_id": "t1"
@@ -1158,7 +1386,7 @@ mod tests {
 
     #[test]
     fn codex_parse_agent_message_partial() {
-        let mut h = CodexExecutor.make_turn();
+        let mut h = CodexExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "item.completed",
             "item": { "type": "agent_message", "text": "hello" }
@@ -1168,14 +1396,14 @@ mod tests {
 
     #[test]
     fn codex_parse_unknown_event_none() {
-        let mut h = CodexExecutor.make_turn();
+        let mut h = CodexExecutor.make_turn(&TurnCtx::default());
         assert!(h.parse_event(json!({"type": "noise"})).is_none());
     }
 
     #[test]
     fn claude_code_build_args_with_model() {
         let ex = ClaudeCodeExecutor;
-        let h = ex.make_turn();
+        let h = ex.make_turn(&TurnCtx::default());
         let mut env = HashMap::new();
         env.insert("CLAUDE_MODEL".to_string(), "claude-sonnet-4-6".to_string());
         let args = h.build_args("hi", "", &env);
@@ -1185,7 +1413,7 @@ mod tests {
 
     #[test]
     fn claude_code_parse_init_session() {
-        let mut h = ClaudeCodeExecutor.make_turn();
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "system",
             "subtype": "init",
@@ -1196,7 +1424,7 @@ mod tests {
 
     #[test]
     fn claude_code_parse_result_final_text() {
-        let mut h = ClaudeCodeExecutor.make_turn();
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "result",
             "result": "final answer",
@@ -1209,13 +1437,131 @@ mod tests {
 
     #[test]
     fn claude_code_parse_result_error() {
-        let mut h = ClaudeCodeExecutor.make_turn();
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "result",
             "is_error": true,
             "result": "rate limited"
         }));
         assert_eq!(r.unwrap().error.as_deref(), Some("rate limited"));
+    }
+
+    // ----- claude-code permission mode -----
+
+    #[test]
+    fn claude_code_permission_mode_uses_bidirectional_argv() {
+        let ctx = TurnCtx { permission: true };
+        let h = ClaudeCodeExecutor.make_turn(&ctx);
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        // No -p <message> (message goes via stdin), no --dangerously-skip.
+        assert!(!args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(args.iter().any(|a| a == "--permission-prompt-tool"));
+        assert!(args.iter().any(|a| a == "stdio"));
+        assert!(args.iter().any(|a| a == "--input-format"));
+        assert!(args.iter().any(|a| a == "stream-json"));
+    }
+
+    #[test]
+    fn claude_code_unattended_mode_omits_permission_flags() {
+        let h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
+        assert!(!args.iter().any(|a| a == "--permission-prompt-tool"));
+    }
+
+    #[test]
+    fn claude_code_build_initial_stdin_only_in_permission_mode() {
+        // Unattended: no initial stdin.
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
+        assert_eq!(h.build_initial_stdin("hi", "", &[]), None);
+
+        // Permission: SDKUserMessage JSON line.
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
+        let line = h.build_initial_stdin("hi", "sess-1", &[]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "user");
+        assert_eq!(v["message"]["role"], "user");
+        assert_eq!(v["message"]["content"], "hi");
+        assert_eq!(v["session_id"], "sess-1");
+    }
+
+    #[test]
+    fn claude_code_control_request_translates_to_permission_request() {
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
+        let event = json!({
+            "type": "control_request",
+            "request_id": "req-42",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "rm -rf /"},
+                "description": "delete everything"
+            }
+        });
+        let (req, original) = h.permission_request_from_event(&event).unwrap();
+        assert_eq!(req.request_id, "req-42");
+        assert_eq!(req.tool_name, "Bash");
+        assert_eq!(req.input["command"], "rm -rf /");
+        assert_eq!(req.description.as_deref(), Some("delete everything"));
+        // original event is stashed for the response writer.
+        assert_eq!(original["request_id"], "req-42");
+    }
+
+    #[test]
+    fn claude_code_non_can_use_tool_control_request_ignored() {
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
+        let event = json!({
+            "type": "control_request",
+            "request_id": "req-1",
+            "request": {"subtype": "other"}
+        });
+        assert!(h.permission_request_from_event(&event).is_none());
+    }
+
+    #[test]
+    fn claude_code_write_allow_response_carries_updated_input() {
+        let h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
+        let original = json!({
+            "type": "control_request",
+            "request_id": "req-7",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}
+        });
+        let decision = crate::PermissionDecision::Allow { updated_input: None };
+        let line = h.write_permission_response(&decision, &original).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["type"], "control_response");
+        assert_eq!(v["response"]["request_id"], "req-7");
+        assert_eq!(v["response"]["response"]["behavior"], "allow");
+        // updated_input defaults to original input when none provided.
+        assert_eq!(v["response"]["response"]["updatedInput"]["command"], "ls");
+    }
+
+    #[test]
+    fn claude_code_write_deny_response_carries_message() {
+        let h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
+        let original = json!({
+            "type": "control_request",
+            "request_id": "req-9",
+            "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {}}
+        });
+        let decision = crate::PermissionDecision::deny("not allowed");
+        let line = h.write_permission_response(&decision, &original).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["response"]["response"]["behavior"], "deny");
+        assert_eq!(v["response"]["response"]["message"], "not allowed");
+    }
+
+    #[test]
+    fn claude_code_permission_methods_noop_in_unattended_mode() {
+        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
+        assert_eq!(h.build_initial_stdin("hi", "", &[]), None);
+        let event = json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool"}});
+        // request detection is independent of mode (it inspects the event),
+        // but write_permission_response returns None in unattended mode.
+        let decision = crate::PermissionDecision::allow();
+        assert_eq!(h.write_permission_response(&decision, &event), None);
     }
 
     // ----- registry completeness -----
@@ -1258,7 +1604,7 @@ mod tests {
 
     #[test]
     fn codebuddy_build_args_basic() {
-        let h = CodebuddyExecutor.make_turn();
+        let h = CodebuddyExecutor.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
         assert_eq!(args[0], "codebuddy");
@@ -1268,7 +1614,7 @@ mod tests {
 
     #[test]
     fn codebuddy_parse_assistant_partial() {
-        let mut h = CodebuddyExecutor.make_turn();
+        let mut h = CodebuddyExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "assistant",
             "message": { "content": [{"type": "text", "text": "hello"}] }
@@ -1278,7 +1624,7 @@ mod tests {
 
     #[test]
     fn codebuddy_parse_result_final() {
-        let mut h = CodebuddyExecutor.make_turn();
+        let mut h = CodebuddyExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "result",
             "result": "done",
@@ -1293,7 +1639,7 @@ mod tests {
 
     #[test]
     fn cursor_suppresses_duplicate_full_text() {
-        let mut h = CursorExecutor.make_turn();
+        let mut h = CursorExecutor.make_turn(&TurnCtx::default());
         // First assistant event streams "Hi ".
         let r1 = h.parse_event(json!({
             "type": "assistant",
@@ -1320,7 +1666,7 @@ mod tests {
 
     #[test]
     fn gemini_parse_delta_vs_final() {
-        let mut h = GeminiCliExecutor.make_turn();
+        let mut h = GeminiCliExecutor.make_turn(&TurnCtx::default());
         let delta = h.parse_event(json!({
             "type": "message", "role": "assistant", "content": "chunk", "delta": true
         }));
@@ -1336,7 +1682,7 @@ mod tests {
 
     #[test]
     fn kimi_mints_session_id_when_empty() {
-        let h = KimiCodeExecutor.make_turn();
+        let h = KimiCodeExecutor.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
         // --session <id> present, id is a uuid (36 chars)
@@ -1347,7 +1693,7 @@ mod tests {
 
     #[test]
     fn kimi_reuses_inbound_session_id() {
-        let h = KimiCodeExecutor.make_turn();
+        let h = KimiCodeExecutor.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "existing-id", &env);
         let session_idx = args.iter().position(|a| a == "--session").unwrap();
@@ -1358,7 +1704,7 @@ mod tests {
 
     #[test]
     fn opencode_parse_text_partial() {
-        let mut h = OpencodeExecutor.make_turn();
+        let mut h = OpencodeExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
             "type": "text",
             "sessionID": "oc-1",
@@ -1373,7 +1719,7 @@ mod tests {
 
     #[test]
     fn qwen_parse_init_session() {
-        let mut h = QwenCodeExecutor.make_turn();
+        let mut h = QwenCodeExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({"type": "init", "session_id": "q-1"}));
         assert_eq!(r.unwrap().session_id.as_deref(), Some("q-1"));
     }
@@ -1382,7 +1728,7 @@ mod tests {
 
     #[test]
     fn agy_plain_returns_session_id() {
-        let h = AgyExecutor.make_turn();
+        let h = AgyExecutor.make_turn(&TurnCtx::default());
         assert!(AgyExecutor.plain());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
@@ -1395,7 +1741,7 @@ mod tests {
 
     #[test]
     fn agy_reuses_inbound_conversation_id() {
-        let h = AgyExecutor.make_turn();
+        let h = AgyExecutor.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "conv-42", &env);
         let conv_idx = args.iter().position(|a| a == "--conversation").unwrap();
@@ -1405,7 +1751,7 @@ mod tests {
 
     #[test]
     fn aider_build_args_basic() {
-        let h = AiderExecutor.make_turn();
+        let h = AiderExecutor.make_turn(&TurnCtx::default());
         assert!(AiderExecutor.plain());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
@@ -1418,7 +1764,7 @@ mod tests {
 
     #[test]
     fn deepseek_build_args_basic() {
-        let h = DeepseekExecutor.make_turn();
+        let h = DeepseekExecutor.make_turn(&TurnCtx::default());
         assert!(DeepseekExecutor.plain());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
@@ -1429,7 +1775,7 @@ mod tests {
 
     #[test]
     fn pi_build_args_basic() {
-        let h = PiExecutor.make_turn();
+        let h = PiExecutor.make_turn(&TurnCtx::default());
         assert!(PiExecutor.plain());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
@@ -1440,7 +1786,7 @@ mod tests {
 
     #[test]
     fn pi_respects_no_extensions_zero() {
-        let h = PiExecutor.make_turn();
+        let h = PiExecutor.make_turn(&TurnCtx::default());
         let mut env = HashMap::new();
         env.insert("PI_NO_EXTENSIONS".to_string(), "0".to_string());
         let args = h.build_args("hi", "", &env);
