@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.4` · **Document revision:** `1.1` · **Status:** Draft
+**Wire protocol:** `0.4` · **Document revision:** `1.2` · **Status:** Stable
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 

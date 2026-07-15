@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.4` · **文档修订：** `1.1` · **状态：** 草案
+**线协议：** `0.4` · **文档修订：** `1.2` · **状态：** 稳定
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 

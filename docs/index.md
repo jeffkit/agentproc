@@ -58,7 +58,7 @@ Verify it works:
 
 ```bash
 agentproc --version
-# agentproc 0.9.0 (protocol 0.4)
+# agentproc 0.10.1 (protocol 0.4)
 ```
 
 ## ② Browse the hub

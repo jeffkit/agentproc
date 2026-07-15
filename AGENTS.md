@@ -32,10 +32,21 @@ agentproc/
 │   └── node/                # claude_bridge.js
 ├── hub/                     # drop-in profiles for real AI CLIs
 │   ├── README.md            # hub conventions and schema
+│   ├── PERMISSIONS.md       # per-CLI permission support matrix
+│   ├── _shared/             # shared stream_utils.py / stream_utils.js
 │   ├── claude-code/         # each profile: profile.yaml + bridge.py + bridge.js + README.md
 │   ├── codex/
 │   ├── codebuddy/
+│   ├── gemini-cli/
+│   ├── cursor/
+│   ├── qwen-code/
+│   ├── opencode/
+│   ├── kimi-code/
+│   ├── recursive/
 │   ├── agy/
+│   ├── aider/
+│   ├── pi/
+│   ├── deepseek/
 │   └── echo-agent/
 ├── docs/                    # VitePress site (agentproc.dev)
 │   ├── public/              # static files served at root (llms.txt, robots.txt)

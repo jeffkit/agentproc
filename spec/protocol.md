@@ -2,7 +2,7 @@
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
 **Document revision:** `1.2`
-**Status:** Draft
+**Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
 

@@ -136,7 +136,7 @@ These are pure-P0 re-implementations of what bridge-specific `type:` handlers do
 
 ## Status
 
-Wire protocol `0.4`, document revision `1.1` (draft). Stable enough to implement against, but expect refinements. See https://agentproc.dev/ for the human-readable site.
+Wire protocol `0.4`, document revision `1.2`. See https://agentproc.dev/ for the human-readable site.
 
 ## License
 

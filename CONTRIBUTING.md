@@ -9,7 +9,7 @@ Thanks for your interest in improving AgentProc.
 - `spec/` — the protocol specification. EN at `protocol.md`, ZH at `protocol.zh.md`. These are the source of truth; everything else follows.
 - `sdk/python/`, `sdk/node/` — reference SDKs that implement the spec.
 - `examples/` — minimal agent scripts in bash / Python / Node.
-- `hub/` — drop-in AgentProc profiles for popular AI CLIs (claude-code, codex, codebuddy, agy, echo-agent). Each profile is a directory with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md`.
+- `hub/` — drop-in AgentProc profiles for popular AI CLIs (14 profiles: claude-code, codex, codebuddy, gemini-cli, cursor, qwen-code, opencode, kimi-code, recursive, agy, aider, pi, deepseek, echo-agent). Each profile is a directory with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md`.
 - `docs/` — VitePress documentation site, English root and `zh/` mirror.
 - `docs/public/` — static files served at the site root (`llms.txt`, `llms-full.txt`, `robots.txt`).
 - `AGENTS.md` — guidance for AI coding agents working in this repo.
@@ -20,7 +20,7 @@ See [`hub/README.md`](./hub/README.md) for the schema and contribution flow. Bri
 
 ## Spec changes
 
-The spec is versioned. Changes that add new env vars, new protocol lines, or change the meaning of existing ones require a version bump (e.g. `0.1` → `0.2`) and a CHANGELOG entry.
+The spec is versioned. Changes that add new env vars, new protocol lines, or change the meaning of existing ones require a version bump and a CHANGELOG entry. Note that the wire protocol version (currently `0.4`) and the SDK package version (currently `0.10.1`) are tracked independently — see CHANGELOG.md for the three-track versioning model.
 
 Editorial changes (clarifications, rewording, new examples) do not require a version bump but should still get a CHANGELOG line.
 
@@ -59,12 +59,18 @@ The English and Chinese sites should mirror each other. Sidebar config is in `do
 
 ## Versioning
 
-The protocol version, Python package version, and Node package version are all kept in lockstep at `0.x.y`. To cut a release:
+Three version tracks are maintained independently (see `CHANGELOG.md` for details):
 
-1. Update `spec/protocol.md` and `spec/protocol.zh.md` `Version:` field.
-2. Update `sdk/python/pyproject.toml` `version`.
-3. Update `sdk/node/package.json` `version`.
-4. Update `CHANGELOG.md`.
+- **Wire protocol** — currently `"0.4"` (the string in the `protocol_version` field). Changes only when the bytes on stdin/stdout change.
+- **Spec document revision** — currently `1.2`. Tracks editorial changes to `spec/protocol.md`.
+- **SDK package version** — currently `0.10.1`. Both Python and Node packages share the same version.
+
+To cut a release:
+
+1. Bump `sdk/python/pyproject.toml` `version` and `sdk/node/package.json` `version` to the new SDK version.
+2. If the wire protocol changed, update the `PROTOCOL_VERSION` constant in `sdk/node/src/runner.js` and `sdk/python/src/agentproc/runner.py`.
+3. If `spec/protocol.md` changed substantively, bump its `**Document revision:**` field.
+4. Update `CHANGELOG.md` with a new section.
 5. Open a PR. Once merged, tag `vX.Y.Z` — the publish workflow will pick it up.
 
 ## Commit messages
