@@ -78,7 +78,7 @@ Expected output (on stdout, one NDJSON event per line):
 
 ```bash
 cd hub/codex
-echo '{"type":"turn","message":"reply with exactly: codex ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | OPENAI_API_KEY="$OPENAI_API_KEY" python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: codex ok","session_id":"","protocol_version":"0.4"}' | OPENAI_API_KEY="$OPENAI_API_KEY" python3 bridge.py
 ```
 
 </details>
@@ -124,7 +124,7 @@ Then the bridge:
 
 ## Caveats
 
-- `codex exec --json` writes its progress lines to stderr by default (visible if you run the bridge with a non-streaming profile, `streaming: false`). The bridge does not forward stderr to the user unless `include_stderr_in_reply: true` is set in the profile.
+- `codex exec --json` writes its progress lines to stderr by default (visible in bridge logs if you run with `--verbose`). Whether to surface stderr to end-users is a bridge deployment decision; the runner always captures it and makes it available via the `onStderr` callback.
 - The bridge waits for `turn.completed` / `turn.failed` rather than relying on stdout EOF, because codex's stream ends with a final usage summary that's not part of the reply.
 - Default path: `codex`'s sandbox mode is **not** disabled — if you want the agent to be able to write files or run commands, configure that in `~/.codex/config.toml` (e.g. `sandbox_mode = "workspace-write"`).
 - Permission mode needs Codex ≥ ~0.133 (GA hooks with `PermissionRequest`). The bridge also needs `python3` on PATH for the hook script.

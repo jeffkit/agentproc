@@ -50,7 +50,7 @@ env_allowlist: [PI_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/pi
-echo '{"type":"turn","message":"reply with exactly: pi ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: pi ok","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output:

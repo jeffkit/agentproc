@@ -185,8 +185,8 @@ agentproc -p hub/claude-code/profile.yaml --prompt "summarize" --quiet | jq .
 CLI 是 SDK `run()` 函数（[`sdk/node/src/runner.js`](https://github.com/jeffkit/agentproc/blob/main/sdk/node/src/runner.js)）之上的薄薄一层。那个模块是 AgentProc bridge 侧合约的标准参考实现：
 
 - **profile 解析**：同时支持顶层形式（`command:` 在根）和 hub 形式（`command:` 嵌套在 `agentproc:` 下）。
-- **占位符替换**：`args`、`cwd`、`env` 中的 `{{MESSAGE}}`、`{{SESSION_ID}}`、`{{SESSION_NAME}}`——不走 shell。
-- **Turn 输入（stdin）**：向 agent 的 stdin 写入一行 `{"type":"turn",...}` NDJSON（`message`、`session_id`、`session_name`、`from_user`、`attachments`、`permission`、`protocol_version`），随后 EOF——除非 `permission: true`，此时 stdin 保持打开以收 `{"type":"permission_response"}` 帧。单轮请求**不**走环境变量。
+- **占位符替换**：`args`、`cwd`、`env` 中的 `{{SESSION_ID}}`、`{{SESSION_NAME}}`、`{{PROFILE_DIR}}`——不走 shell。`{{MESSAGE}}` 不是占位符；消息通过 stdin 传递。
+- **Turn 输入（stdin）**：向 agent 的 stdin 写入一行 `{"type":"turn",...}` NDJSON（`message`、`session_id`、`session_name`、`attachments`、`permission`、`protocol_version`），随后 EOF——除非 `permission: true`，此时 stdin 保持打开以收 `{"type":"permission_response"}` 帧。单轮请求**不**走环境变量。
 - **env 注入**：profile 的 `env` 块（`${VAR}` 展开受 `env_allowlist` 约束），外加固定的 infra 集合（`PATH`/`HOME`/`TERM`/…）。`--env KEY=VALUE` 追加运行期额外变量。
 - **stdout 分类**：每一行是按 `type` 派发的 JSON 对象——`{"type":"partial"}`（`streaming: true` 时转发）、`{"type":"result"}`（终端回复正文；可选 `session_id` / `usage`）、`{"type":"error"}`（使本轮失败）。`session_id` 是事件上的字段（持久化第一个非空值；早期可省略；一旦已知 SHOULD 带上）。非 JSON / 未知 `type` 的行记日志并忽略。
 - **超时处理**：SIGTERM → `kill_grace_secs`（默认 5 秒）→ SIGKILL。退出码 124。

@@ -196,10 +196,10 @@ If you're routing through a proxy or third-party endpoint (e.g. a Chinese mirror
 ### Cause & fix
 
 1. **Streaming mode, but the agent's reply was emitted via `{"type":"partial"}` lines only.** With `--quiet`, partials are suppressed and you see nothing. Re-run without `--quiet`, or capture the session id from stderr to verify the agent did respond.
-2. **The wrapped CLI wrote everything to its own stderr, not stdout.** Some CLIs do this for warnings. Run with `--verbose` (the default) and check stderr. If you want stderr in the reply, set `include_stderr_in_reply: true` in the profile.
+2. **The wrapped CLI wrote everything to its own stderr, not stdout.** Some CLIs do this for warnings. Run with `--verbose` (the default) and check stderr. If you want stderr visible, check stderr in your bridge logs; whether to surface it to users is a bridge deployment decision.
 3. **The agent exited 0 without writing anything.** This is a bug in the agent script, not in AgentProc. Run the agent directly with a turn on stdin to see what it does:
    ```bash
-   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./bridge.py
+   echo '{"type":"turn","message":"hi","session_id":"","protocol_version":"0.4"}' | python3 ./bridge.py
    ```
 
 ---

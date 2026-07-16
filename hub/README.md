@@ -77,7 +77,7 @@ Example with the Python SDK's bare runner (wire 0.4 — the turn object arrives 
 
 ```bash
 cd hub/claude-code
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 You should see AgentProc protocol output on stdout (one NDJSON event per line):

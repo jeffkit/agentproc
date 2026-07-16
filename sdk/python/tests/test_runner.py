@@ -14,6 +14,7 @@ import pytest
 
 from agentproc.runner import (
     PROTOCOL_VERSION,
+    EXIT_TIMEOUT,
     RunOptions,
     classify_line,
     is_valid_session_id,
@@ -173,9 +174,6 @@ class TestIsValidSessionId:
 
 
 class TestSubstitute:
-    def test_message(self):
-        assert substitute("You said: {{MESSAGE}}", {"message": "hi"}) == "You said: hi"
-
     def test_session_id(self):
         assert substitute("s={{SESSION_ID}}", {"session_id": "abc"}) == "s=abc"
 
@@ -188,12 +186,12 @@ class TestSubstitute:
     def test_empty_session_id(self):
         assert substitute("s={{SESSION_ID}}", {"session_id": ""}) == "s="
 
-    def test_multiple_placeholders(self):
+    def test_message_not_substituted(self):
         out = substitute(
-            "{{MESSAGE}} [{{SESSION_ID}}] ({{SESSION_NAME}})",
-            {"message": "hi", "session_id": "s1", "session_name": "work"},
+            "{{MESSAGE}} [{{SESSION_ID}}]",
+            {"message": "hi", "session_id": "s1"},
         )
-        assert out == "hi [s1] (work)"
+        assert out == "{{MESSAGE}} [s1]"
 
 
 class TestExpandEnvRef:
@@ -295,22 +293,6 @@ class TestNormalizeProfile:
         p2 = normalize_profile({"command": "x", "env_inherit": "all"})
         assert "env_inherit" not in p2
 
-    def test_truncation_suffix_defaults_to_ellipsis(self):
-        p = normalize_profile({"command": "x"})
-        assert p["truncation_suffix"] == "\n\n…(truncated)"
-
-    def test_truncation_suffix_custom_value_is_honoured(self):
-        # A custom cap no longer silently strips the truncation notice —
-        # users get the default suffix unless they explicitly override.
-        p = normalize_profile({"command": "x", "max_reply_chars": 100})
-        assert p["truncation_suffix"] == "\n\n…(truncated)"
-        p2 = normalize_profile({"command": "x", "truncation_suffix": " [more]"})
-        assert p2["truncation_suffix"] == " [more]"
-
-    def test_truncation_suffix_empty_string_disables_notice(self):
-        p = normalize_profile({"command": "x", "truncation_suffix": ""})
-        assert p["truncation_suffix"] == ""
-
     def test_permission_defaults_false(self):
         assert normalize_profile({"command": "x"})["permission"] is False
         assert normalize_profile({"command": "x", "permission": True})["permission"] is True
@@ -336,21 +318,20 @@ class TestNormalizeProfile:
 
     def test_command_with_spaces_runs_end_to_end(self, tmp_path):
         """A profile whose executable path contains spaces must actually spawn,
-        not be split into bogus argv. `command` is a single argv token; the
-        message is passed via `args` placeholder and read by the agent."""
+        not be split into bogus argv. `command` is a single argv token."""
         nested = tmp_path / "has space"
         nested.mkdir()
         script = nested / "agent.sh"
         script.write_text(
             '#!/usr/bin/env bash\n'
-            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ok: $1\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ok\\"}"\n'
         )
         script.chmod(script.stat().st_mode | 0o111)
         r = run(
-            {"command": str(script), "args": ["{{MESSAGE}}"]},
+            {"command": str(script)},
             RunOptions(message="payload"),
         )
-        assert r.reply == "ok: payload"
+        assert r.reply == "ok"
         assert r.exit_code == 0
 
 
@@ -402,6 +383,38 @@ class TestRunEndToEnd:
         assert r.session_id == ""
         assert r.error == ""
         assert r.exit_code == 0
+
+    # ----- inbound session_id (resume) scenarios -----
+
+    def test_inbound_session_id_echoed_back_is_captured(self, agent_script):
+        """Bridge sends resume id; agent echoes it back → runner captures the outbound stamp."""
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "result", "text": "resumed", "session_id": "resume-abc"}) + "\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi", session_id="resume-abc"))
+        assert r.session_id == "resume-abc"
+        assert r.reply == "resumed"
+
+    def test_inbound_session_id_but_agent_emits_different_id(self, agent_script):
+        """Agent may create a new session; runner captures what the agent returns."""
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "result", "text": "new-session", "session_id": "new-id-xyz"}) + "\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi", session_id="old-id-abc"))
+        assert r.session_id == "new-id-xyz"
+
+    def test_inbound_session_id_but_agent_emits_none(self, agent_script):
+        """Stateless agents don't stamp session_id; runner must not pre-fill from inbound."""
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "result", "text": "stateless"}) + "\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi", session_id="prev-123"))
+        assert r.session_id == ""
+
+    # ----- end inbound scenarios -----
 
     def test_session_id_first_non_empty_wins(self, agent_script):
         agent = agent_script(
@@ -525,16 +538,15 @@ class TestRunEndToEnd:
             "  'msg='+t.get('message',''),\n"
             "  'sid='+t.get('session_id',''),\n"
             "  'sname='+t.get('session_name',''),\n"
-            "  'from='+t.get('from_user',''),\n"
             "  'pv='+t.get('protocol_version',''),\n"
             "])}\n"
             "sys.stdout.write(json.dumps(out)+'\\n')\n"
         )
         r = run(
             {"command": sys.executable, "args": [str(agent)]},
-            RunOptions(message="hello", session_id="prev-123", session_name="work", from_user="u123"),
+            RunOptions(message="hello", session_id="prev-123", session_name="work"),
         )
-        assert r.reply == f"msg=hello|sid=prev-123|sname=work|from=u123|pv={PROTOCOL_VERSION}"
+        assert r.reply == f"msg=hello|sid=prev-123|sname=work|pv={PROTOCOL_VERSION}"
 
     def test_attachments_travel_on_stdin(self, py_agent):
         agent = py_agent(
@@ -556,7 +568,7 @@ class TestRunEndToEnd:
         )
         assert r.reply == "atts=image:https://example.com/a.png,file:https://example.com/b.pdf"
 
-    def test_message_placeholder_in_args(self, agent_script):
+    def test_message_placeholder_in_args_is_not_substituted(self, agent_script):
         agent = agent_script(
             '#!/usr/bin/env bash\n'
             'echo "{\\"type\\":\\"result\\",\\"text\\":\\"args: $1\\"}"\n'
@@ -565,7 +577,7 @@ class TestRunEndToEnd:
             {"command": str(agent), "args": ["{{MESSAGE}}"]},
             RunOptions(message="hello"),
         )
-        assert r.reply == "args: hello"
+        assert r.reply == "args: {{MESSAGE}}"
 
     def test_profile_env_with_var_ref(self, agent_script, monkeypatch):
         monkeypatch.setenv("MY_TEST_VAR", "/some/path")
@@ -754,3 +766,32 @@ class TestRunEndToEnd:
         )
         # First result wins; second is ignored — DENIED is emitted first.
         assert "DENIED" in r.reply
+
+    def test_permission_timeout(self, agent_script):
+        """Turn times out while a permission request is pending — exits with code 124."""
+        import threading, time
+
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            "read -r turn\n"
+            + _evt({"type": "permission_request", "request_id": "r1", "tool_name": "Bash", "input": {}}) + "\n"
+            + "IFS= read -r _resp\n"          # blocks until stdin closes (on kill)
+            + _evt({"type": "result", "text": "after"}) + "\n"
+        )
+
+        # on_permission that never returns — simulates user never responding.
+        done_event = threading.Event()
+
+        def on_permission(_req):
+            done_event.wait(timeout=30)   # effectively blocks until test finishes
+
+        start = time.monotonic()
+        r = run(
+            {"command": str(agent), "permission": True, "timeout_secs": 2},
+            RunOptions(message="hi", on_permission=on_permission),
+        )
+        done_event.set()   # release the waiting on_permission thread if still alive
+        elapsed = time.monotonic() - start
+
+        assert r.exit_code == EXIT_TIMEOUT, f"expected timeout (EXIT_TIMEOUT={EXIT_TIMEOUT}), got {r.exit_code}"
+        assert elapsed < 10, f"runner hung for {elapsed:.1f}s — should complete within ~10s"

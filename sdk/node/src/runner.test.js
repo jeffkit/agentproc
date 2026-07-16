@@ -184,10 +184,6 @@ describe('isValidSessionId', () => {
 });
 
 describe('substitute', () => {
-  test('replaces MESSAGE', () => {
-    assert.strictEqual(substitute('You said: {{MESSAGE}}', { message: 'hi' }), 'You said: hi');
-  });
-
   test('replaces SESSION_ID', () => {
     assert.strictEqual(substitute('s={{SESSION_ID}}', { sessionId: 'abc' }), 's=abc');
   });
@@ -204,12 +200,10 @@ describe('substitute', () => {
     assert.strictEqual(substitute('s={{SESSION_ID}}', { sessionId: '' }), 's=');
   });
 
-  test('multiple placeholders', () => {
+  test('{{MESSAGE}} is not substituted (message travels via stdin)', () => {
     assert.strictEqual(
-      substitute('{{MESSAGE}} [{{SESSION_ID}}] ({{SESSION_NAME}})', {
-        message: 'hi', sessionId: 's1', sessionName: 'work',
-      }),
-      'hi [s1] (work)',
+      substitute('{{MESSAGE}} [{{SESSION_ID}}]', { sessionId: 's1' }),
+      '{{MESSAGE}} [s1]',
     );
   });
 });
@@ -337,26 +331,6 @@ describe('normalizeProfile', () => {
     assert.strictEqual(p2.env_inherit, undefined);
   });
 
-  test('truncation_suffix defaults to ellipsis notice', () => {
-    const p = normalizeProfile({ command: 'x' });
-    assert.strictEqual(p.truncation_suffix, '\n\n…(truncated)');
-  });
-
-  test('truncation_suffix: custom cap no longer strips the notice', () => {
-    // Regression: a custom max_reply_chars used to silently disable the
-    // notice (only === DEFAULT_MAX_REPLY_CHARS got one). Now the notice is
-    // tied to truncation_suffix, independent of cap.
-    const p = normalizeProfile({ command: 'x', max_reply_chars: 100 });
-    assert.strictEqual(p.truncation_suffix, '\n\n…(truncated)');
-    const p2 = normalizeProfile({ command: 'x', truncation_suffix: ' [more]' });
-    assert.strictEqual(p2.truncation_suffix, ' [more]');
-  });
-
-  test('truncation_suffix: empty string disables the notice', () => {
-    const p = normalizeProfile({ command: 'x', truncation_suffix: '' });
-    assert.strictEqual(p.truncation_suffix, '');
-  });
-
   test('permission defaults false; true only when boolean true', () => {
     assert.strictEqual(normalizeProfile({ command: 'x' }).permission, false);
     assert.strictEqual(normalizeProfile({ command: 'x', permission: true }).permission, true);
@@ -419,6 +393,42 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.error, '');
     assert.strictEqual(r.exitCode, 0);
   });
+
+  // ----- inbound session_id (resume) scenarios -----
+
+  test('inbound sessionId echoed back by agent → captured in result', async () => {
+    // Bridge sends resume session_id; agent echoes it back on stdout.
+    // Runner MUST capture the outbound stamp (not just pass the inbound through).
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"result","text":"resumed","session_id":"resume-abc"}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi', sessionId: 'resume-abc' });
+    assert.strictEqual(r.sessionId, 'resume-abc');
+    assert.strictEqual(r.reply, 'resumed');
+  });
+
+  test('inbound sessionId but agent emits different id → new id captured', async () => {
+    // Agent may create a new session even when a resume id was sent.
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"result","text":"new-session","session_id":"new-id-xyz"}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi', sessionId: 'old-id-abc' });
+    assert.strictEqual(r.sessionId, 'new-id-xyz');
+  });
+
+  test('inbound sessionId but agent emits no session_id → result.sessionId is empty', async () => {
+    // Stateless agents never stamp session_id; runner must not pre-fill from inbound.
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"result","text":"stateless"}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi', sessionId: 'prev-123' });
+    assert.strictEqual(r.sessionId, '');
+  });
+
+  // ----- end inbound scenarios -----
 
   test('session_id first-wins (conflicting later ignored)', async () => {
     const agent = writeScript(
@@ -549,19 +559,19 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.reply, 'm=<unset>');
   });
 
-  test('the turn object is written to stdin (message, session, from_user, protocol_version)', async () => {
+  test('the turn object is written to stdin (message, session, protocol_version)', async () => {
     const agent = writeNodeAgent(
       "const fs=require('fs');\n" +
       "const line=fs.readFileSync(0,'utf8').split('\\n')[0];\n" +
       "const t=JSON.parse(line);\n" +
-      "const out={type:'result',text:['msg='+t.message,'sid='+t.session_id,'sname='+t.session_name,'from='+t.from_user,'pv='+t.protocol_version].join('|')};\n" +
+      "const out={type:'result',text:['msg='+t.message,'sid='+t.session_id,'sname='+t.session_name,'pv='+t.protocol_version].join('|')};\n" +
       "process.stdout.write(JSON.stringify(out)+'\\n');\n"
     );
     const r = await run(
       nodeProfile(agent),
-      { message: 'hello', sessionId: 'prev-123', sessionName: 'work', fromUser: 'u123' },
+      { message: 'hello', sessionId: 'prev-123', sessionName: 'work' },
     );
-    assert.strictEqual(r.reply, 'msg=hello|sid=prev-123|sname=work|from=u123|pv=' + PROTOCOL_VERSION);
+    assert.strictEqual(r.reply, 'msg=hello|sid=prev-123|sname=work|pv=' + PROTOCOL_VERSION);
   });
 
   test('attachments travel in the turn object on stdin', async () => {
@@ -585,13 +595,13 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.reply, 'atts=image:https://example.com/a.png,file:https://example.com/b.pdf');
   });
 
-  test('{{MESSAGE}} placeholder in args', async () => {
+  test('{{MESSAGE}} in args is not substituted (literal passthrough)', async () => {
     const agent = writeScript('#!/usr/bin/env bash\necho "{\\"type\\":\\"result\\",\\"text\\":\\"args:$1\\"}"\n');
     const r = await run(
       { command: agent, args: ['{{MESSAGE}}'] },
       { message: 'hello' },
     );
-    assert.strictEqual(r.reply, 'args:hello');
+    assert.strictEqual(r.reply, 'args:{{MESSAGE}}');
   });
 
   test('profile.env injects env vars with ${VAR} expansion', async () => {
@@ -795,6 +805,29 @@ describe('run() — end-to-end', () => {
     assert.ok(r.reply.includes('msg=1'), `reply: ${r.reply}`);
   });
 
+  test('turn times out while permission request is pending — exits with code 124', async () => {
+    // Agent emits a permission_request then blocks reading stdin; bridge never
+    // answers (onPermission never resolves), so the per-turn timeout must fire.
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'read -r turn\n' +
+      'echo \'{"type":"permission_request","request_id":"r1","tool_name":"Bash","input":{}}\'\n' +
+      'IFS= read -r _resp\n' +  // blocks until stdin closes (on timeout + kill)
+      'echo \'{"type":"result","text":"after"}\'\n'
+    );
+    const start = Date.now();
+    const r = await run(
+      { command: agent, permission: true, timeout_secs: 2 },
+      {
+        message: 'hi',
+        onPermission: () => new Promise(() => {}),  // intentionally never resolves
+      },
+    );
+    const elapsed = Date.now() - start;
+    assert.strictEqual(r.exitCode, 124, `expected timeout (124), got ${r.exitCode}`);
+    assert.ok(elapsed < 10000, `runner hung for ${elapsed}ms — should complete within ~10s`);
+  });
+
   test('concurrent permission responses are written in request-arrival order', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +
@@ -850,4 +883,30 @@ test('formatPermissionResponse / isValidPermissionRequest', () => {
 
 test('PROTOCOL_VERSION is "0.4"', () => {
   assert.strictEqual(PROTOCOL_VERSION, '0.4');
+});
+
+// ---------------------------------------------------------------------------
+// executor: field routing — four cases
+// ---------------------------------------------------------------------------
+
+describe('executor: field routing', () => {
+  test('unknown executor + no command → hard fail (throws)', async () => {
+    await assert.rejects(
+      () => run({ executor: 'nonexistent-executor' }, { message: 'hi' }),
+      /nonexistent-executor/,
+    );
+  });
+
+  test('unknown executor + command present → warn via onStderr + fall back to spawn', async () => {
+    const stderrLines = [];
+    // Use `echo` as a trivial always-exits-0 command.
+    const r = await run(
+      { executor: 'nonexistent-executor', command: 'echo' },
+      { message: 'hi', onStderr: (l) => stderrLines.push(l) },
+    );
+    const warn = stderrLines.join('\n');
+    assert.ok(warn.includes('nonexistent-executor'), `expected warn, got: ${warn}`);
+    assert.ok(warn.includes('falling back to spawn'), `expected fallback msg, got: ${warn}`);
+    assert.ok(!r.error || !r.error.includes('Unknown executor'), `should not hard-fail: ${r.error}`);
+  });
 });

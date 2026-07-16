@@ -6,7 +6,7 @@
  *
  * Protocol contract (wire 0.4, NDJSON both directions):
  *   Input  — stdin: one {"type":"turn",...} line (message, session_id,
- *                     session_name, from_user, attachments, permission,
+ *                     session_name, attachments, permission,
  *                     protocol_version). Secrets/config stay in env.
  *   Output — stdout (one JSON object per line, discriminated by `type`):
  *              {"type":"partial","text":...,"session_id"?}  — streaming chunk
@@ -165,7 +165,6 @@ function contextFromTurn() {
     message: typeof t.message === 'string' ? t.message : '',
     sessionId: typeof t.session_id === 'string' ? t.session_id : '',
     sessionName: typeof t.session_name === 'string' ? t.session_name : 'default',
-    fromUser: typeof t.from_user === 'string' ? t.from_user : '',
     protocolVersion: typeof t.protocol_version === 'string' ? t.protocol_version : PROTOCOL_VERSION,
     attachments: Array.isArray(t.attachments) ? t.attachments : [],
     permission: permissionEnabled,
@@ -178,7 +177,12 @@ function contextFromTurn() {
       process.stdout.write(JSON.stringify(evt) + '\n');
     },
 
-    /** Send an error message to the user. Honored regardless of streaming mode. */
+    /**
+     * Send an error message to the user. Honored regardless of streaming mode.
+     * Non-terminal: the handler may continue and return a body after this call.
+     * If a result follows an error on stdout, the bridge discards the result.
+     * For a truly fatal path, throw `await sdk.protocolError(msg)` instead.
+     */
     sendError(text) {
       if (!text) return;
       process.stdout.write(JSON.stringify({ type: 'error', message: text }) + '\n');

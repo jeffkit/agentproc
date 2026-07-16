@@ -108,7 +108,6 @@ def _make_turn(*, message="hi", session_id="", attachments=None) -> str:
         "message": message,
         "session_id": session_id,
         "session_name": "default",
-        "from_user": "",
         "protocol_version": "0.4",
     }
     if attachments is not None:

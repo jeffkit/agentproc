@@ -20,12 +20,8 @@ env:
   MY_API_KEY: "${MY_API_KEY}"
 env_allowlist: [MY_API_KEY]           # optional: restrict ${VAR} expansion
 
-timeout_secs: 600             # stdout read timeout, default 1800
+timeout_secs: 600             # per-turn wall-clock timeout (secs), default 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
-max_reply_chars: 8000
-truncation_suffix: "\n\n…(truncated)"
-include_stderr_in_reply: false
-send_error_reply: true        # tell the user when the agent errors
 
 streaming: true               # forward {"type":"partial"} events in real time
 
@@ -37,7 +33,7 @@ Placeholders are substituted **without** invoking a shell. The argv is built fro
 - **`command`** — argv[0]. A single token, **never split**, even if it contains whitespace.
 - **`args`** — a YAML list of argv[1..] tokens. **Defaults to `[]` when omitted.**
 
-The resulting argv (`[command, *args]`) is passed to `execve` directly, which prevents shell-injection via `{{MESSAGE}}` and lets `command` carry a path with spaces:
+The resulting argv (`[command, *args]`) is passed to `execve` directly, which lets `command` carry a path with spaces:
 
 ```yaml
 command: "/path with spaces/my agent"
@@ -54,7 +50,7 @@ Before the agent reads its first byte of stdin, the bridge writes **exactly one*
 
 ```json
 {"type":"turn","message":"hello","session_id":"","session_name":"default",
- "from_user":"u1","attachments":[],"permission":false,"protocol_version":"0.4"}
+ "attachments":[],"permission":false,"protocol_version":"0.4"}
 ```
 
 ### Required fields
@@ -64,7 +60,6 @@ Before the agent reads its first byte of stdin, the bridge writes **exactly one*
 | `type` | Literal `"turn"`. |
 | `message` | User message text. May be `""` (see "Empty turns" in the full spec). |
 | `session_id` | Session ID from the previous turn (`""` = new session). |
-| `from_user` | Sender identifier (platform-specific). |
 | `protocol_version` | Protocol version string, e.g. `"0.4"`. **Opaque and non-comparable** — agents MUST NOT order or range-check it. |
 
 ### Optional fields (present = relevant)
@@ -171,7 +166,7 @@ See the full spec for stdin keep-open rules, timeouts, and field definitions.
 
 Precedence when multiple failure signals arrive: **timeout (124) > `error` event (1) > process exit code**.
 
-When `send_error_reply: true` is set and the process exits non-zero without emitting an `error` event, the bridge sends a generic error message to the user.
+When the process exits non-zero without emitting an `error` event, bridges SHOULD send a generic error message to the user.
 
 ---
 

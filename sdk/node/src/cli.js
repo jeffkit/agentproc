@@ -16,7 +16,6 @@
  *   --prompt <text>           User message (required, unless --stdin)
  *   --session <id>            Previous session id for multi-turn
  *   --session-name <name>     Human-readable session name
- *   --from <user>             Sender identifier
  *   --image-url <url>         Image attachment URL (carried in the turn's attachments)
  *   --file-url <url>          File attachment URL (carried in the turn's attachments)
  *   --cwd <path>              Override profile.cwd
@@ -90,7 +89,6 @@ function parseArgs(argv) {
       case '--prompt': opts.prompt = next(); break;
       case '--session': opts.session = next(); break;
       case '--session-name': opts.sessionName = next(); break;
-      case '--from': opts.from = next(); break;
       case '--image-url': opts.imageUrl = next(); break;
       case '--file-url': opts.fileUrl = next(); break;
       case '--cwd': opts.cwd = next(); break;
@@ -152,7 +150,7 @@ async function runHubSubcommand(args) {
     // positional, not a path), so we normalize it before handing off.
     const takesValue =
       a === '--prompt' || a === '-p' ||
-      a === '--session' || a === '--session-name' || a === '--from' ||
+      a === '--session' || a === '--session-name' ||
       a === '--image-url' || a === '--file-url' ||
       a === '--cwd' || a === '--env' || a === '--timeout';
     if (takesValue) {
@@ -272,7 +270,6 @@ Hub run options (same as the regular --profile runner):
   --cwd <path>                 Override profile.cwd (default: current dir)
   --env KEY=VALUE              Extra env var (repeatable)
   --session <id>               Previous session id for multi-turn
-  --from <user>                Sender identifier
   --image-url <url>            Image attachment URL (carried in the turn's attachments)
   --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
@@ -352,7 +349,6 @@ async function runAgent(profilePath, opts) {
       message: prompt,
       sessionId: opts.session || '',
       sessionName: opts.sessionName || 'default',
-      fromUser: opts.from || '',
       streaming,
       cwd: opts.cwd,
       profileDir,
@@ -405,7 +401,6 @@ async function runAgent(profilePath, opts) {
     message: prompt,
     sessionId: opts.session || '',
     sessionName: opts.sessionName || 'default',
-    fromUser: opts.from || '',
     streaming,
     cwd: opts.cwd,
     profileDir,
@@ -462,7 +457,6 @@ Required:
 Session:
   --session <id>            Previous session id (multi-turn)
   --session-name <name>     Human-readable session name (default: "default")
-  --from <user>             Sender identifier
 
 Attachments:
   --image-url <url>         Image attachment URL (carried in the turn's attachments)

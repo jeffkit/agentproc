@@ -67,7 +67,7 @@ NDJSON events (`{"type":"partial"}`, `{"type":"result"}`, `{"type":"error"}`; op
 You can also drive the script directly by piping the turn object yourself. This is what the CLI does internally:
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | bash ./echo_agent.sh
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | bash ./echo_agent.sh
 ```
 
 Useful when debugging the script in isolation, but for end-to-end behavior prefer the `agentproc --profile ...` form above.

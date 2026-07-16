@@ -53,7 +53,7 @@ env_allowlist: [DEEPSEEK_MODEL, DEEPSEEK_API_KEY]
 
 ```bash
 cd hub/deepseek
-echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output:
@@ -69,7 +69,7 @@ deepseek ok
 
 ```bash
 cd hub/deepseek
-echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | node bridge.js
+echo '{"type":"turn","message":"reply with exactly: deepseek ok","session_id":"","protocol_version":"0.4"}' | node bridge.js
 ```
 
 </details>

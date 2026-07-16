@@ -54,7 +54,7 @@ env_allowlist: [AIDER_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/aider
-echo '{"type":"turn","message":"reply with exactly: aider ok (do not edit any files)","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: aider ok (do not edit any files)","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected: stdout contains `aider ok` (plus aider's usual banner/summary output).

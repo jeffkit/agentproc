@@ -34,7 +34,7 @@ agentproc hub run echo-agent -p "hello"
 
 ```bash
 cd hub/echo-agent
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 # → {"type":"result","text":"You said: hello"}
 ```
 

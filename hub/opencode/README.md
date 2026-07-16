@@ -51,7 +51,7 @@ env_allowlist: [OPENCODE_MODEL, ANTHROPIC_API_KEY, OPENAI_API_KEY]
 
 ```bash
 cd hub/opencode
-echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 Expected output (streaming):
@@ -66,7 +66,7 @@ Expected output (streaming):
 
 ```bash
 cd hub/opencode
-echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 </details>

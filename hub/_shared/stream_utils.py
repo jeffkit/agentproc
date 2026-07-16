@@ -193,14 +193,21 @@ def run_bridge(
         # turn but does not invalidate the session.
         emit_error(error_message, session_id=found_session_id)
         return 1
-    if proc.returncode != 0 and not found_session_id:
+
+    reply_text = last_final_text if last_final_text is not None else last_partial_text
+
+    # Surface a non-zero exit as an error only when the CLI produced no reply
+    # content (reply_text is None or ""). If the CLI crashed after emitting a
+    # result event, treat the run as successful — many CLIs exit non-zero for
+    # internal reasons while still returning valid output. Include session_id
+    # (if any) so the session survives the failed turn.
+    if proc.returncode != 0 and not reply_text:
         msg = f"{cli_name} exited with {proc.returncode}"
         if stderr_output.strip():
             msg += f": {stderr_output.strip()[:500]}"
-        emit_error(msg)
+        emit_error(msg, session_id=found_session_id)
         return 1
 
-    reply_text = last_final_text if last_final_text is not None else last_partial_text
     emit_result(reply_text or "", session_id=found_session_id)
     return 0
 

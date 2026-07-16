@@ -75,7 +75,6 @@ Naming convention (kept as a convenience for users who switch between the two, n
 | `ctx.send_partial` | `ctx.sendPartial` |
 | `ctx.send_error` | `ctx.sendError` |
 | `ctx.session_id` | `ctx.sessionId` |
-| `ctx.from_user` | `ctx.fromUser` |
 | `ctx.image_url` | `ctx.imageUrl` |
 | `ctx.file_url` | `ctx.fileUrl` |
 | `ctx.protocol_version` | `ctx.protocolVersion` |

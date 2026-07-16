@@ -155,15 +155,22 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
     emitError(errorMessage, foundSessionId);
     process.exit(1);
   }
-  if (code !== 0 && !foundSessionId) {
+
+  const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
+
+  // Surface a non-zero exit as an error only when the CLI produced no reply
+  // content. If the CLI crashed after emitting a result event, treat the run
+  // as successful — many CLIs exit non-zero for internal reasons while still
+  // returning valid output. Include foundSessionId (if any) so the session
+  // survives the failed turn.
+  if (code !== 0 && !replyText) {
     let msg = `${cliName} exited with ${code}`;
     const s = stderrBuf.trim();
     if (s) msg += `: ${s.slice(0, 500)}`;
-    emitError(msg);
+    emitError(msg, foundSessionId);
     process.exit(1);
   }
 
-  const replyText = (lastFinalText !== null) ? lastFinalText : lastPartialText;
   emitResult(replyText || '', foundSessionId);
   process.exit(0);
 }

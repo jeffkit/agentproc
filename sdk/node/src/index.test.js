@@ -163,7 +163,7 @@ function runAgent(turn, handlerSrc) {
 }
 
 function turn(extra = {}) {
-  return { type: 'turn', message: 'hi', session_id: '', session_name: 'default', from_user: '', protocol_version: '0.4', ...extra };
+  return { type: 'turn', message: 'hi', session_id: '', session_name: 'default', protocol_version: '0.4', ...extra };
 }
 
 describe('createProfile end-to-end', () => {
@@ -289,16 +289,15 @@ describe('createProfile end-to-end', () => {
     assert.ok(!r.stdout.includes('"type":"error"'), 'should NOT emit an error event for generic errors');
   });
 
-  test('context carries turn fields (message, session, from_user, attachments)', async () => {
+  test('context carries turn fields (message, session, attachments)', async () => {
     const r = await runAgent(
-      turn({ session_id: 'prev-sess', session_name: 'work', from_user: 'u123', attachments: [{ kind: 'image', url: 'https://x/img.png' }] }),
+      turn({ session_id: 'prev-sess', session_name: 'work', attachments: [{ kind: 'image', url: 'https://x/img.png' }] }),
       `(async (sdk) => {
         sdk.createProfile(async (ctx) => {
           return JSON.stringify({
             msg: ctx.message,
             sid: ctx.sessionId,
             sname: ctx.sessionName,
-            from: ctx.fromUser,
             pv: ctx.protocolVersion,
             atts: (ctx.attachments || []).map(a => a.kind + ':' + a.url),
           });
@@ -314,7 +313,6 @@ describe('createProfile end-to-end', () => {
     assert.strictEqual(ctx.msg, 'hi');
     assert.strictEqual(ctx.sid, 'prev-sess');
     assert.strictEqual(ctx.sname, 'work');
-    assert.strictEqual(ctx.from, 'u123');
     assert.strictEqual(ctx.pv, '0.4');
     assert.deepStrictEqual(ctx.atts, ['image:https://x/img.png']);
   });

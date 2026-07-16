@@ -4,7 +4,7 @@
   "scenarios": [
     {
       "name": "basic partial + result with session_id",
-      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [
         "{\"type\":\"partial\",\"text\":\"thinking... \",\"session_id\":\"sess-abc\"}",
         "{\"type\":\"partial\",\"text\":\"done.\",\"session_id\":\"sess-abc\"}",
@@ -22,7 +22,7 @@
     },
     {
       "name": "error mid-stream preserves session id",
-      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [
         "{\"type\":\"partial\",\"text\":\"half done\",\"session_id\":\"sess-err\"}",
         "{\"type\":\"error\",\"message\":\"rate limited\"}"
@@ -39,7 +39,7 @@
     },
     {
       "name": "session discovered at end (typical CLI-wrapping case)",
-      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [
         "{\"type\":\"partial\",\"text\":\"first\"}",
         "{\"type\":\"partial\",\"text\":\" second\"}",
@@ -58,7 +58,7 @@
     },
     {
       "name": "empty message + attachment is accepted (image-only turn)",
-      "turn": {"type": "turn", "message": "", "session_id": "", "from_user": "u1", "attachments": [{"kind": "image", "url": "https://x/a.png"}], "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "", "session_id": "", "attachments": [{"kind": "image", "url": "https://x/a.png"}], "protocol_version": "0.4"},
       "cli_stdout": [
         "{\"type\":\"result\",\"text\":\"got the image\",\"session_id\":\"sess-img\"}"
       ],
@@ -72,7 +72,7 @@
     },
     {
       "name": "empty message and no attachment → bridge emits error and exits 1",
-      "turn": {"type": "turn", "message": "", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [],
       "cli_exit": 0,
       "expect": {
@@ -85,7 +85,7 @@
     },
     {
       "name": "CLI exits non-zero without session and without error event → bridge surfaces exit + stderr",
-      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [],
       "cli_exit": 2,
       "cli_stderr": "boom",
@@ -97,7 +97,7 @@
     },
     {
       "name": "CLI exits non-zero but session was captured → session still persisted",
-      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [
         "{\"type\":\"result\",\"text\":\"partial reply\",\"session_id\":\"sess-survives-exit\"}"
       ],
@@ -112,8 +112,22 @@
       "_note": "When the CLI exits non-zero but the bridge captured a session id and some reply text, the bridge still emits result and exits 0. Non-zero exit without a session is what surfaces as an error."
     },
     {
+      "name": "CLI exits non-zero with session but no reply content → bridge surfaces error, session preserved",
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
+      "cli_stdout": [
+        "{\"type\":\"result\",\"session_id\":\"sess-init-only\"}"
+      ],
+      "cli_exit": 1,
+      "cli_stderr": "api key expired",
+      "expect": {
+        "exit_code": 1,
+        "stdout_lines_contains": ["{\"type\":\"error\",\"message\":", "exited with 1", "sess-init-only"]
+      },
+      "_note": "CLI emitted a session_id-only result (no text) then exited non-zero. This is the 'session captured but no content' case — the bridge must surface an error with the session preserved (so the next turn can resume), NOT emit a silent empty result."
+    },
+    {
       "name": "final text falls back to last partial when no text on result",
-      "turn": {"type": "turn", "message": "hi", "session_id": "", "from_user": "u1", "protocol_version": "0.4"},
+      "turn": {"type": "turn", "message": "hi", "session_id": "", "protocol_version": "0.4"},
       "cli_stdout": [
         "{\"type\":\"partial\",\"text\":\"streamed only\"}",
         "{\"type\":\"result\",\"session_id\":\"sess-fallback\"}"

@@ -51,7 +51,6 @@ describe('scenario conformance (scenarios.json)', () => {
     test(scenario.name, async () => {
       const agent = writeScript(bashScriptFor(scenario.lines));
       const exp = scenario.expect;
-      // scenario.profile_overrides lets tests set max_reply_chars etc.
       const profile = Object.assign({ command: agent }, scenario.profile_overrides || {});
       const partials = [];
       const r = await run(

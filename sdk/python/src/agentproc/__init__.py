@@ -6,7 +6,7 @@ instead of manually reading the turn from stdin and formatting stdout.
 
 Protocol contract (spec/protocol.md, wire protocol 0.4, NDJSON both directions):
   Input  — stdin: one {"type":"turn",...} line (message, session_id,
-                   session_name, from_user, attachments, permission,
+                   session_name, attachments, permission,
                    protocol_version). Secrets/config stay in env.
   Output — stdout (one JSON object per line, discriminated by `type`):
              {"type":"partial","text":...}    — streaming chunk
@@ -118,9 +118,6 @@ class AgentContext:
     session_name: str
     """Human-readable session name (turn.session_name)."""
 
-    from_user: str
-    """Sender identifier (turn.from_user)."""
-
     protocol_version: str
     """Protocol version the bridge implements (turn.protocol_version)."""
 
@@ -155,9 +152,11 @@ class AgentContext:
         """Send an error message to the user.
 
         Writes a ``{"type":"error","message":...}`` line to stdout and flushes
-        at call time. Honored regardless of ``streaming`` mode. After calling
-        this, the handler should typically raise ProtocolError or return — any
-        reply body produced alongside will be discarded by the bridge.
+        at call time. Honored regardless of ``streaming`` mode. This call is
+        non-terminal: the handler may continue and return a body after it.
+        If a ``result`` follows an ``error`` on stdout, the bridge discards the
+        ``result`` and surfaces only the error to the user. For a truly fatal
+        path, raise ``ProtocolError`` instead.
 
         Returns a no-op awaitable so ``await ctx.send_error(...)`` keeps working
         in async handlers; a sync handler may call it bare.
@@ -349,7 +348,6 @@ def _context_from_turn() -> AgentContext:
         message=t.get("message") if isinstance(t.get("message"), str) else "",
         session_id=t.get("session_id") if isinstance(t.get("session_id"), str) else "",
         session_name=t.get("session_name") if isinstance(t.get("session_name"), str) else "default",
-        from_user=t.get("from_user") if isinstance(t.get("from_user"), str) else "",
         protocol_version=t.get("protocol_version") if isinstance(t.get("protocol_version"), str) else PROTOCOL_VERSION,
         attachments=t.get("attachments") if isinstance(t.get("attachments"), list) else [],
         permission=t.get("permission") is True,

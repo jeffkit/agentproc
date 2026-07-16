@@ -40,7 +40,7 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
 
 Every byte on the agent's stdin and stdout is NDJSON (one JSON object per
 line). Input is a single `{"type":"turn",...}` line (message, session_id,
-session_name, from_user, attachments, permission, protocol_version). Output is
+session_name, attachments, permission, protocol_version). Output is
 a stream of typed events: `{"type":"partial","text":...[, "role":...]}`,
 `{"type":"result","text":...[, "usage":...]}`,
 `{"type":"error","message":...}`, and (when permission is on)
@@ -172,7 +172,7 @@ defaults to `true`; set `false` to exercise the one-shot path (where
     {
       "name": "<short description>",
       "kind": "<handler kind the harness runs>",
-      "turn": {"type":"turn","message":"...","session_id":"","session_name":"default","from_user":"","protocol_version":"0.4"},
+      "turn": {"type":"turn","message":"...","session_id":"","session_name":"default","protocol_version":"0.4"},
       "expect": {
         "exit": 0,
         "stdout_lines": ["<exact NDJSON event line>", "..."]

@@ -31,7 +31,7 @@ Messaging Platform
    Bridge                ← reads profile YAML, manages process lifecycle
       │   stdin: one NDJSON turn object (then optional permission responses)
       │   env:   secrets / config (profile env block)
-      │   argv:  launch params via {{MESSAGE}} etc.
+      │   argv:  launch params via {{SESSION_ID}} etc.
       ▼
  Agent Process           ← your script or binary (implements the contract below)
       │   stdout: NDJSON events (one JSON object per line)
@@ -43,7 +43,7 @@ The protocol has three input paths and one output path:
 
 - **Input — stdin:** a single NDJSON [turn object](#input--stdin-turn-object) describing this turn, written before the process starts (or just after). When [optional tool permission](#optional-tool-permission) is enabled, stdin stays open and the bridge writes further NDJSON `permission_response` objects mid-turn.
 - **Input — environment variables:** secrets and configuration (the profile `env` block, plus a minimal infra set). The per-turn request does **not** travel in env vars in 0.4 — it travels in the stdin turn object.
-- **Input — argv placeholders:** `{{MESSAGE}}`, `{{SESSION_ID}}`, `{{SESSION_NAME}}`, `{{PROFILE_DIR}}` substituted into `command`/`args` before launch, for agents that pass the message to an underlying CLI as a CLI argument.
+- **Input — argv placeholders:** `{{SESSION_ID}}`, `{{SESSION_NAME}}`, `{{PROFILE_DIR}}` substituted into `command`/`args` before launch. The message is delivered via stdin only — not in argv.
 - **Output — stdout:** NDJSON events, one JSON object per line, distinguished by a `type` field.
 
 No HTTP, no sockets, no shared memory. Just a process.
@@ -84,12 +84,8 @@ env:                          # extra environment variables (secrets / config)
 env_allowlist: [MY_API_KEY]   # optional: restrict which ${VAR} the env block may read
 
 # Output control
-timeout_secs: 600             # stdout read timeout, default 1800
+timeout_secs: 600             # per-turn wall-clock timeout (secs), default 1800
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
-max_reply_chars: 8000         # truncate at this length (body + streaming partials), default 8000
-truncation_suffix: "\n\n…(truncated)"   # notice appended when reply is capped; default shown. Empty string disables the notice (the cap still applies).
-include_stderr_in_reply: false
-send_error_reply: true        # tell the user when the agent errors
 
 # Streaming (bridge-side hint)
 streaming: true               # forward {"type":"partial"} events in real time
@@ -104,10 +100,11 @@ Placeholders in `command`, `args`, `cwd`, and `env` values are replaced before t
 
 | Placeholder | Value |
 |-------------|-------|
-| `{{MESSAGE}}` | User message text |
 | `{{SESSION_ID}}` | Session ID from the previous turn (empty = new session) |
 | `{{SESSION_NAME}}` | Human-readable session name |
 | `{{PROFILE_DIR}}` | Absolute path to the directory containing the profile YAML. Lets a profile reference a bundled script (e.g. `command: python3`, `args: ["{{PROFILE_DIR}}/bridge.py"]`) independently of the agent's `cwd`. Bridges set this when invoking a profile by path; if unset (e.g. programmatic use without a file), it expands to empty. |
+
+> **Note:** `{{MESSAGE}}` is not a supported placeholder. The user message is always delivered to the agent via the stdin turn object, never in argv. Putting user input in argv leaks it to `ps(1)` and may hit system arg-length limits.
 
 ### `${VAR}` expansion in `env` values
 
@@ -131,7 +128,7 @@ env_allowlist: [ANTHROPIC_API_KEY]
 
 - **Optional.** When `env_allowlist` is absent, all `${VAR}` references expand against the bridge's full environment.
 - **When present:** a `${VAR}` whose name is **not** in the list expands to the empty string, and the bridge logs a warning to stderr (e.g. `env_allowlist blocked ${AWS_SECRET_ACCESS_KEY}; expanded to empty`). The process still starts — a typo in either the value or the list surfaces as an empty variable and a warning, not a hard failure.
-- **Scope.** `env_allowlist` governs `${VAR}` expansion inside the profile `env` block only. It does not affect the infra set (below), `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, or `env` values that contain no `${VAR}` at all.
+- **Scope.** `env_allowlist` governs `${VAR}` expansion inside the profile `env` block only. It does not affect the infra set (below), `{{SESSION_ID}}` / `{{PROFILE_DIR}}` placeholders, or `env` values that contain no `${VAR}` at all.
 - **No globbing.** Names must match exactly. `["ANTHROPIC_*"]` does not match `ANTHROPIC_API_KEY` — list each name in full.
 - **Recommendation.** Hub profiles SHOULD set `env_allowlist` so that `${VAR}` expansion is an explicit declaration of which credentials the profile reads. Combined with the always-minimal infra set, "what they declare" is what the agent sees.
 
@@ -163,7 +160,7 @@ The bridge assembles the agent's argv from two fields:
 - **`command`** — the executable (argv[0]). A single token, **never split**, even if it contains whitespace. If it contains whitespace, the bridge passes the entire string to `execve` as one argv token.
 - **`args`** — a YAML list of additional argv tokens (argv[1..]). Each list element is one argv token, verbatim. **Defaults to `[]` when omitted.**
 
-The resulting argv (`[command, *args]`) is passed to the platform's `execve` (or equivalent) **without invoking a shell**. This avoids shell-injection attacks via the `{{MESSAGE}}` placeholder and lets `command` carry a path that contains spaces.
+The resulting argv (`[command, *args]`) is passed to the platform's `execve` (or equivalent) **without invoking a shell**. This lets `command` carry a path that contains spaces.
 
 ```yaml
 # Multi-token command — the normal form:
@@ -232,7 +229,7 @@ When `plain: true`, the runner does not decode stdout as NDJSON and does not cal
 
 - The entire stdout (UTF-8 decoded, trailing whitespace trimmed) becomes the reply body.
 - Session continuity is not supported (no `sessionId` can be extracted from plain text by the contract itself — a `plain` executor that needs session continuity MUST use a bespoke run loop outside this interface, as `recursive` and `echo-agent` do).
-- `max_reply_chars` / `truncation_suffix` still apply to the assembled body.
+- Timeouts (`timeout_secs` / `kill_grace_secs`) still apply.
 - `streaming: true` has no effect for `plain` executors (there are no `partial` events to forward).
 
 #### Runner contract
@@ -243,7 +240,7 @@ When the runner takes the in-process path (`executor:` present + recognised), it
 2. Resolve handlers via `makeHandlers()` if present, else use `buildArgs` / `parseEvent` directly.
 3. Call `buildArgs(message, sessionId, env)` once. An empty return is a hard error.
 4. Spawn the target CLI's argv directly (no bridge subprocess, no shell).
-5. Apply `timeout_secs` / `kill_grace_secs` / `max_reply_chars` / `truncation_suffix` / `streaming` / `permission` with the same semantics as the spawn path.
+5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path.
 6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}`, accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s.
 7. For `plain: true`: treat stdout as the body, apply truncation, emit a single `{"type":"result"}` at turn end.
 8. Emit a terminal `{"type":"result"}` (or `{"type":"error"}`) at turn end, carrying the first non-empty `sessionId` and any `usage` seen.
@@ -258,7 +255,7 @@ Before the agent process reads its first byte of stdin, the bridge writes **exac
 
 ```json
 {"type":"turn","message":"hello","session_id":"","session_name":"default",
- "from_user":"u1","attachments":[],"permission":false,"protocol_version":"0.4"}
+ "attachments":[],"permission":false,"protocol_version":"0.4"}
 ```
 
 ### Required fields
@@ -268,7 +265,6 @@ Before the agent process reads its first byte of stdin, the bridge writes **exac
 | `type` | string | Literal `"turn"`. |
 | `message` | string | User message text. May be `""` — see "Empty turns" below. |
 | `session_id` | string | Session ID from the previous turn (`""` = new session). |
-| `from_user` | string | Sender identifier (platform-specific: user ID, handle, etc.). |
 | `protocol_version` | string | Protocol version string, e.g. `"0.4"`. **Opaque and non-comparable** — see [Versioning](#versioning). |
 
 ### Optional fields (present = relevant)
@@ -339,7 +335,7 @@ Session continuity is carried as an optional field on stdout events, **not** as 
 - When the CLI accepts a session or conversation flag (e.g. `agy`'s `--conversation <id>`), the executor passes the inbound `session_id` to that flag. If `session_id` is empty (new session), the executor generates a stable id (e.g. a UUID) and passes it. After the process exits successfully, the SDK returns that id in `RunResult.sessionId` so the host can pass it back on the next turn.
 - When the CLI does not expose a resumption flag (`aider`, `deepseek`, `pi`), `RunResult.sessionId` is `""`. The host is responsible for persisting the id it sent and passing it back on subsequent turns; the SDK cannot learn it from the process output.
 
-`session_id` on the wire is an arbitrary JSON string — it MAY contain colons, slashes, whitespace, or any other JSON-escapeable character. SDK history helpers that store each session as `<id>.jsonl` impose a **storage-level** constraint: an id that is not safe as a filename component cannot round-trip through file storage. Bridges/SDKs that persist ids SHOULD either sanitise or reject such ids with a stderr warning; the wire itself places no restriction.
+`session_id` on the wire MUST be a non-empty JSON string that contains no path separators (`/`, `\`) and no control characters (including NUL and newline). The reference SDK runners enforce this constraint at the wire classification step: a non-conforming `session_id` is silently dropped and a warning is logged to stderr (the previously captured id, if any, is preserved). The reason the constraint lives at the runner level — not only at storage — is that the SDK history helpers persist sessions as `<id>.jsonl` files; a `session_id` containing `/` would silently create a subdirectory instead of a flat file. Colons, spaces, hyphens, and most other printable characters are accepted (e.g. `"org:proj:thread-42"` is valid; `"org/proj/thread"` is not).
 
 ### Optional `usage` on terminal events
 
@@ -420,7 +416,7 @@ Once an `error` event has been emitted, the bridge MAY stop reading the agent's 
 
 If an `error` event is emitted, the bridge MUST treat the turn as failed even if the process exits 0. The agent SHOULD exit with a non-zero code after emitting `error`, but a bridge MUST NOT rely on that — the `error` event alone is sufficient to mark the turn failed.
 
-**SDK convention.** SDKs that wrap this protocol (e.g. the official Python and Node `create_profile`/`createProfile` helpers) treat `send_error()` as **terminal**: the agent SHOULD NOT emit further `partial` or `result` after calling it. The SDK MAY enforce this by exiting the process immediately after `send_error()`. This is a stricter rule than the raw protocol requires (the protocol allows an agent to emit `error` and continue writing — the bridge just discards the rest), but it is the recommended SDK ergonomic because mixing an error with subsequent content is confusing to users.
+**SDK convention.** In the reference SDKs (`create_profile`/`createProfile`), `send_error()` / `sendError()` is **non-terminal**: after emitting the `{"type":"error"}` event, the handler MAY continue and return a body. Both the `error` event and any subsequent `result` event will appear on stdout; the bridge discards the `result` per the rule above, so only the error reaches the user. For a truly fatal path use `ProtocolError` / `protocolError()` instead, which terminates the process with a non-zero exit.
 
 #### Interaction with already-delivered partials
 
@@ -433,17 +429,6 @@ Agents that prefer a clean failure MAY choose to buffer their output and emit no
 ### Malformed lines
 
 A stdout line that is not valid JSON, is valid JSON but not an object, or lacks a recognised `type` is a protocol violation. The bridge SHOULD log a warning to stderr and **ignore the line**. It is **not** forwarded to the user as reply body — in 0.4, reply body is carried only by `result` (and live `partial` when streaming). (This is stricter than 0.2, which treated any non-prefixed line as body. The cost is that a hand-written `echo "hello"` shell agent is no longer a valid agent; see [Design Rationale](#design-rationale).)
-
-### `max_reply_chars` — length cap (applies to both modes)
-
-`max_reply_chars` (default 8000) caps the total character length of the user-visible output:
-
-- **Non-streaming (`streaming: false`):** the `result.text` body is truncated to `max_reply_chars` characters before delivery.
-- **Streaming (default):** the cumulative length of all forwarded `partial` chunks is tracked. Once it reaches `max_reply_chars`, the bridge appends a truncation notice (the profile's `truncation_suffix`) and stops forwarding further partials from the current turn.
-
-**Implementation-defined: the boundary chunk.** When a `partial` chunk straddles the cap (the chunk itself is larger than the remaining budget), the bridge MAY either (a) forward a tail-truncated slice that fits the remaining budget, then the truncation notice, or (b) drop the chunk entirely and forward only the truncation notice. Both are conformant. The truncation notice is what tells the user the reply was capped; whether the user sees the slice that fits is a per-bridge UX choice.
-
-The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profile has the same effect whether the agent streams (`partial`) or returns a single body (`result`). Agents that buffer all output and emit it as `result` — or agents that forward everything as `partial` — both hit the same wall.
 
 ### Complete examples
 
@@ -485,7 +470,7 @@ The cap is applied uniformly so that setting `max_reply_chars: 2000` in a profil
 **Multi-attachment turn (bridge writes to stdin):**
 
 ```
-{"type":"turn","message":"compare these two","session_id":"","from_user":"u1",
+{"type":"turn","message":"compare these two","session_id":"",
  "attachments":[{"kind":"image","url":"https://.../a.png"},{"kind":"image","url":"https://.../b.png"}],
  "permission":false,"protocol_version":"0.4"}
 ```
@@ -624,7 +609,7 @@ The agent MUST NOT block on stdin after reading the turn line when `permission` 
 | `130` | Interrupted by SIGINT (Ctrl-C) |
 | `143` | Terminated by SIGTERM |
 
-Other non-zero codes are treated as generic errors. When `send_error_reply: true` is set and the process exits non-zero (without having emitted an `error` event), the bridge sends a generic error message to the user.
+Other non-zero codes are treated as generic errors. Bridges SHOULD send a generic error message to the user when the process exits non-zero without having emitted an `error` event.
 
 ### Precedence when multiple failure signals arrive
 
@@ -636,7 +621,12 @@ A turn may produce more than one failure signal — for example, the agent emits
 
 Rationale: a timeout is a bridge-level failure mode that the agent cannot recover from, so it takes precedence. `error` is the agent's own signal that something went wrong, which takes precedence over the raw exit code (because the agent may exit 0 after emitting `error` for self-diagnostic reasons).
 
-stderr is captured as a debug log and not shown to the user, unless `include_stderr_in_reply: true`.
+### Bridge deployment hints
+
+The following behaviors are bridge-side deployment decisions. They are **not** profile YAML fields read by the reference SDK runners; callers receive raw `RunResult.error` / `RunResult.exitCode` and `onStderr` data and decide how to surface them.
+
+- **Error reply to user** (SHOULD): when a turn fails (non-zero exit or `error` event), the bridge SHOULD forward an error message to the user so they know the turn failed rather than receiving silence.
+- **Stderr visibility** (default hidden): stderr is captured as an internal debug log. Bridges MAY surface it to the user for developer profiles or debugging contexts; it SHOULD be hidden in production deployments.
 
 ---
 
@@ -648,7 +638,7 @@ When `timeout_secs` is reached without the process exiting:
 2. Bridge waits `kill_grace_secs` (default 5) for the process to exit.
 3. If still running, bridge sends `SIGKILL`.
 
-Any `partial` events already received are forwarded to the user. The bridge then sends a timeout error reply (subject to `send_error_reply`).
+Any `partial` events already received are forwarded to the user. The bridge SHOULD send a timeout error reply to the user.
 
 The agent SHOULD handle `SIGTERM` by flushing any buffered partial output and exiting promptly.
 
@@ -690,10 +680,10 @@ Built-in shortcuts (e.g. `type: claude-code`) are platform extensions, not P0. I
 0.3 separates the three input paths by purpose:
 
 - **stdin** — the dynamic per-turn request (the turn object). Carries arbitrary structure: `attachments` arrays, nested fields, anything JSON can express.
-- **argv** — launch params via `{{MESSAGE}}` / `{{SESSION_ID}}` / `{{PROFILE_DIR}}`, for agents that pass the message to an underlying CLI as a CLI argument.
+- **argv** — launch params via `{{SESSION_ID}}` / `{{PROFILE_DIR}}`. The message is intentionally excluded from argv: argv is visible in `ps(1)`, has OS-level length limits, and puts user input in a location that is not stdin — making it harder to reason about trust boundaries.
 - **env** — secrets and configuration (the profile `env` block), kept in env deliberately so they are not logged as part of the turn payload.
 
-Debuggability is barely changed: `AGENT_MESSAGE="hello" ./agent.sh` becomes `echo '{"type":"turn","message":"hello","session_id":"","from_user":"u1","protocol_version":"0.4"}' | ./agent` — still a one-liner, just no longer an env-var assignment.
+Debuggability is barely changed: `AGENT_MESSAGE="hello" ./agent.sh` becomes `echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | ./agent` — still a one-liner, just no longer an env-var assignment.
 
 **Why drop `env_inherit`?**
 

@@ -71,7 +71,7 @@ Expected output (on stderr / stdout):
 
 ```bash
 cd hub/codebuddy
-echo '{"type":"turn","message":"reply with exactly: codebuddy ok","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"reply with exactly: codebuddy ok","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 </details>

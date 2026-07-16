@@ -49,7 +49,7 @@ timeout_secs: 10
 
 ```bash
 # Test locally
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | bash ./echo_agent.sh
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | bash ./echo_agent.sh
 # → {"type":"result","text":"You said: hello"}
 ```
 

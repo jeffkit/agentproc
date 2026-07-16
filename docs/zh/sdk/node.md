@@ -15,7 +15,6 @@ createProfile(async (ctx) => {
   // ctx.message           — 用户消息文本
   // ctx.sessionId         — 上一轮返回的 session ID（空 = 新会话）
   // ctx.sessionName       — 会话可读名称
-  // ctx.fromUser          — 发送者标识符
   // ctx.protocolVersion   — bridge 实现的协议版本（如 "0.4"）
   // ctx.attachments       — 附件数组，元素为 {kind, url, ...} 对象（空 = 无）
   // ctx.permission        — bridge 是否开启了权限通道
@@ -148,7 +147,7 @@ timeout_secs: 60
 像 bridge 那样把 turn 对象写进 stdin：
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | node ./agent.js
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | node ./agent.js
 ```
 
 单独调试脚本时很有用。

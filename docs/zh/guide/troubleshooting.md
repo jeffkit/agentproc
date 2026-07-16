@@ -196,10 +196,10 @@ agentproc hub run claude-code -p "hi" --env ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY
 ### 原因 & 修法
 
 1. **流式模式下，agent 的回复全部通过 `{"type":"partial"}` 行输出。** 用了 `--quiet` 时 partial 被压制，你什么都看不到。重新跑时去掉 `--quiet`，或从 stderr 的 `agentproc:session:` 行确认 agent 确实回复了。
-2. **被包装的 CLI 把所有内容写到了它自己的 stderr，没写到 stdout。** 某些 CLI 对警告这么做。用 `--verbose`（默认）跑，检查 stderr。如果你想把 stderr 也带进回复，在 profile 里设 `include_stderr_in_reply: true`。
+2. **被包装的 CLI 把所有内容写到了它自己的 stderr，没写到 stdout。** 某些 CLI 对警告这么做。用 `--verbose`（默认）跑，检查 stderr。如需向用户展示 stderr，应在 bridge 日志里查看；是否呈现给用户是 bridge 部署层的决策。
 3. **agent 退出码 0 但什么都没写。** 这是 agent 脚本本身的 bug，不是 AgentProc 的问题。直接把一个 turn 写进 stdin 看它实际行为：
    ```bash
-   echo '{"type":"turn","message":"hi","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./bridge.py
+   echo '{"type":"turn","message":"hi","session_id":"","protocol_version":"0.4"}' | python3 ./bridge.py
    ```
 
 ---

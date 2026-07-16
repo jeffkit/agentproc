@@ -364,12 +364,38 @@ class TestRunViaExecutorNDJSON(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRunWithExecutorProfile(unittest.TestCase):
-    def test_unknown_executor_returns_error(self):
+    def test_unknown_executor_no_command_returns_error(self):
+        """Case 4: unknown executor + no command → hard fail."""
         from agentproc.runner import run
         opts = _make_opts()
         result = run({"executor": "nonexistent-executor"}, opts)
         self.assertEqual(result.exit_code, EXIT_ERROR)
         self.assertIn("nonexistent-executor", result.error)
+
+    def test_unknown_executor_with_command_falls_back_to_spawn(self):
+        """Case 3: unknown executor + command present → warn + fallback spawn."""
+        import sys
+        from agentproc.runner import run
+        stderr_lines = []
+        errors = []
+        # Use `echo` as a trivial command that always exits 0.
+        # The profile has an unknown executor but also a command, so it should
+        # warn and fall back to spawning the command directly.
+        echo_cmd = "echo" if sys.platform != "win32" else "cmd"
+        result = run(
+            {"executor": "nonexistent-executor", "command": echo_cmd},
+            _make_opts(
+                message="hi",
+                on_stderr=stderr_lines.append,
+                on_error=errors.append,
+            ),
+        )
+        # Must have emitted a warning about the unknown executor
+        warn_text = " ".join(stderr_lines)
+        self.assertIn("nonexistent-executor", warn_text)
+        self.assertIn("falling back to spawn", warn_text)
+        # Must NOT have returned an "unknown executor" error result
+        self.assertNotIn("Unknown executor", result.error or "")
 
     def test_profile_with_executor_field_routes_correctly(self):
         """A profile with executor: agy should use the agy executor (even if CLI absent)."""

@@ -87,7 +87,7 @@ Note: gemini emits the session id **up-front** in its `init` event, so `session_
 
 ```bash
 cd hub/gemini-cli
-echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.4"}' | GEMINI_API_KEY="$GEMINI_API_KEY" python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","protocol_version":"0.4"}' | GEMINI_API_KEY="$GEMINI_API_KEY" python3 bridge.py
 ```
 
 </details>

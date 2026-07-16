@@ -13,7 +13,7 @@ Wire 0.4 is NDJSON in both directions:
 
 Responsibilities:
   - Parse and validate a profile dict
-  - Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders
+  - Substitute {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders in argv and env
   - Build the child env (infra set + profile env block + CLI --env extras)
   - Spawn the agent command (no shell); command is always argv[0], never split
   - Write the turn object to the agent's stdin (and keep stdin open when
@@ -49,8 +49,6 @@ __all__ = [
     "PROTOCOL_VERSION",
     "DEFAULT_TIMEOUT_SECS",
     "DEFAULT_KILL_GRACE_SECS",
-    "DEFAULT_MAX_REPLY_CHARS",
-    "DEFAULT_TRUNCATION_SUFFIX",
     "EXIT_SUCCESS",
     "EXIT_ERROR",
     "EXIT_TIMEOUT",
@@ -81,8 +79,6 @@ PROTOCOL_VERSION = "0.4"
 
 DEFAULT_TIMEOUT_SECS = 1800
 DEFAULT_KILL_GRACE_SECS = 5
-DEFAULT_MAX_REPLY_CHARS = 8000
-DEFAULT_TRUNCATION_SUFFIX = "\n\n…(truncated)"
 
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
@@ -140,7 +136,6 @@ class RunOptions:
     message: str
     session_id: str = ""
     session_name: str = "default"
-    from_user: str = ""
     streaming: Optional[bool] = None
     extra_env: Dict[str, str] = field(default_factory=dict)
     attachments: List[Dict[str, Any]] = field(default_factory=list)
@@ -226,17 +221,6 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
             int(src["kill_grace_secs"]) if _is_int_like(src.get("kill_grace_secs"))
             else DEFAULT_KILL_GRACE_SECS
         ),
-        "max_reply_chars": (
-            int(src["max_reply_chars"]) if _is_int_like(src.get("max_reply_chars"))
-            else DEFAULT_MAX_REPLY_CHARS
-        ),
-        # Spec profile YAML: optional truncation notice appended when the reply
-        # is capped. Defaults to "\n\n…(truncated)". An empty string disables
-        # the notice entirely (the cap still applies, just no visible marker).
-        "truncation_suffix": (
-            src["truncation_suffix"] if isinstance(src.get("truncation_suffix"), str)
-            else DEFAULT_TRUNCATION_SUFFIX
-        ),
         # Bridge-side hint: when False, the runner ignores {"type":"partial"}
         # events and assembles the reply from {"type":"text"} events only.
         "streaming": src.get("streaming", True) is not False,
@@ -262,9 +246,12 @@ def expand_path(p: str) -> str:
 
 
 def substitute(value: str, ctx: Dict[str, str]) -> str:
+    """Substitute {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders.
+
+    {{MESSAGE}} is intentionally not substituted — message travels via stdin only.
+    """
     return (
         str(value)
-        .replace("{{MESSAGE}}", ctx.get("message", ""))
         .replace("{{SESSION_ID}}", ctx.get("session_id", ""))
         .replace("{{SESSION_NAME}}", ctx.get("session_name", ""))
         .replace("{{PROFILE_DIR}}", ctx.get("profile_dir", ""))
@@ -521,8 +508,13 @@ _SESSION_ID_RE = re.compile(r"[\/\\\x00-\x1f]")
 
 
 def is_valid_session_id(value: Any) -> bool:
-    """True if ``value`` is a storage-safe session id (non-empty, no path
-    separators or control chars, not ``.`` or ``..``)."""
+    """True if ``value`` is a wire-valid session id (non-empty, no path
+    separators or control chars, not ``.`` or ``..``).
+
+    This constraint is enforced at the wire classification step — not just at
+    file-persistence time — because the SDK history helpers store sessions as
+    ``<id>.jsonl`` flat files; a ``/`` in the id would create a subdirectory.
+    """
     if not isinstance(value, str) or not value:
         return False
     if value in (".", ".."):
@@ -708,19 +700,31 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     profile = normalize_profile(profile_raw)
 
     # Executor path: skip the subprocess bridge entirely.
+    # Four cases (mirrors Node runner.js):
+    #  (1) no executor: fall through to spawn path
+    #  (2) executor present + SDK knows it: call run_via_executor, skip spawn
+    #  (3) executor present + SDK unknown + command present: warn, fall back to spawn
+    #  (4) executor present + SDK unknown + no command: hard fail
     executor_name = profile.get("executor")
     if executor_name:
         executor = EXECUTORS.get(executor_name)
         if executor is None:
-            result = RunResult(exit_code=EXIT_ERROR)
-            result.error = (
-                f"Unknown executor '{executor_name}'. "
-                f"Available: {', '.join(executor_names)}"
-            )
-            if options.on_error:
-                options.on_error(result.error)
-            return result
-        return run_via_executor(executor, options)
+            if not profile.get("command"):
+                result = RunResult(exit_code=EXIT_ERROR)
+                result.error = (
+                    f"Unknown executor '{executor_name}'. "
+                    f"Available: {', '.join(executor_names)}"
+                )
+                if options.on_error:
+                    options.on_error(result.error)
+                return result
+            if options.on_stderr:
+                options.on_stderr(
+                    f"[agentproc runner] unknown executor {executor_name!r}; "
+                    f"falling back to spawn (command: {profile['command']!r})"
+                )
+        else:
+            return run_via_executor(executor, options)
 
     streaming = (
         options.streaming if options.streaming is not None else profile["streaming"]
@@ -770,7 +774,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         "message": options.message,
         "session_id": options.session_id,
         "session_name": options.session_name,
-        "from_user": options.from_user,
         "protocol_version": PROTOCOL_VERSION,
     }
     # attachments: include the key when the caller provided a list
@@ -794,11 +797,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     pending_permission_ids: set = set()
     stdin_lock = threading.Lock()
     stdin_closed = False
-    # Streaming partial truncation tracking — see matching comment in runner.js.
-    _cumulative_partial_chars = 0
-    _partials_truncated = False
-    _max_chars = profile["max_reply_chars"]
-    _trunc_suffix = profile["truncation_suffix"]
     # Bounded head capture (1 MB) used for post-mortem pattern diagnosis.
     # The diagnostic patterns target interpreter-startup errors (file/module
     # not found) which appear in the first bytes, so a head cap preserves
@@ -928,7 +926,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     assert proc.stdout is not None
 
     def _handle_line(raw_line: str) -> None:
-        nonlocal _cumulative_partial_chars, _partials_truncated, error_seen
+        nonlocal error_seen
         nonlocal result_text, result_seen, partials_forwarded
         line = raw_line.rstrip("\r")
         c = classify_line(line)
@@ -937,25 +935,9 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             _note_session_id(c.get("session_id"))
             # Spec: post-error partials are discarded (not forwarded).
             # on_protocol_line still fires so debug traces stay complete.
-            if (
-                not error_seen
-                and streaming
-                and options.on_partial
-                and not _partials_truncated
-            ):
-                remaining = _max_chars - _cumulative_partial_chars
-                if len(c["value"]) >= remaining:
-                    if remaining > 0:
-                        options.on_partial(c["value"][:remaining])
-                        partials_forwarded = True
-                    if _trunc_suffix:
-                        options.on_partial(_trunc_suffix)
-                        partials_forwarded = True
-                    _partials_truncated = True
-                else:
-                    options.on_partial(c["value"])
-                    partials_forwarded = True
-                    _cumulative_partial_chars += len(c["value"])
+            if not error_seen and streaming and options.on_partial:
+                options.on_partial(c["value"])
+                partials_forwarded = True
             if options.on_protocol_line:
                 options.on_protocol_line(line)
         elif kind == "result":
@@ -1165,8 +1147,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         result.reply = result_text
     else:
         result.reply = ""
-    if len(result.reply) > profile["max_reply_chars"]:
-        result.reply = result.reply[: profile["max_reply_chars"]] + profile["truncation_suffix"]
 
     # If the agent exited non-zero with no error event, peek at its stderr for
     # common "command/file not found" patterns and surface a friendly hint.

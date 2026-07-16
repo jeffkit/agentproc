@@ -113,7 +113,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prompt")
     p.add_argument("--session", default="")
     p.add_argument("--session-name", default="default")
-    p.add_argument("--from", dest="from_user", default="")
     p.add_argument("--image-url", dest="image_url", default="")
     p.add_argument("--file-url", dest="file_url", default="")
     p.add_argument("--cwd")
@@ -161,7 +160,6 @@ Required:
 Session:
   --session <id>            Previous session id (multi-turn)
   --session-name <name>     Human-readable session name (default: "default")
-  --from <user>             Sender identifier
 
 Attachments:
   --image-url <url>         Image attachment URL (carried in the turn's attachments)
@@ -345,7 +343,6 @@ Hub run options (same as the regular --profile runner):
   --cwd <path>                 Override profile.cwd (default: current dir)
   --env KEY=VALUE              Extra env var (repeatable)
   --session <id>               Previous session id for multi-turn
-  --from <user>                Sender identifier
   --image-url <url>            Image attachment URL (carried in the turn's attachments)
   --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
@@ -409,7 +406,6 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
                 message=prompt,
                 session_id=opts.session,
                 session_name=opts.session_name,
-                from_user=opts.from_user,
                 streaming=streaming,
                 cwd=opts.cwd,
                 profile_dir=profile_dir,
@@ -440,7 +436,6 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
             message=prompt,
             session_id=opts.session,
             session_name=opts.session_name,
-            from_user=opts.from_user,
             streaming=streaming,
             cwd=opts.cwd,
             profile_dir=profile_dir,

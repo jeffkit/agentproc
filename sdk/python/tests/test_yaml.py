@@ -28,11 +28,6 @@ def test_empty_env_value_is_null_not_empty_string():
     assert p["env"]["MY_KEY"] is None
 
 
-def test_block_scalar_literal():
-    p = parse_yaml("truncation_suffix: |\n  line1\n  line2\n")
-    assert p["truncation_suffix"] == "line1\nline2\n"
-
-
 def test_flow_sequence():
     p = parse_yaml("env_allowlist: [A, B, C]\n")
     assert p["env_allowlist"] == ["A", "B", "C"]

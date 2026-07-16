@@ -15,7 +15,6 @@ async def handler(ctx):
     # ctx.message           — user message text
     # ctx.session_id        — previous session id (empty = new session)
     # ctx.session_name      — human-readable session name
-    # ctx.from_user         — sender identifier
     # ctx.protocol_version  — protocol version string (e.g. "0.4")
     # ctx.attachments       — list of {kind, url, ...} dicts (empty = none)
     # ctx.permission        — True if the bridge enabled the permission channel
@@ -192,7 +191,7 @@ timeout_secs: 60
 Write the turn object to stdin the way the bridge does:
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' | python3 ./agent.py
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | python3 ./agent.py
 ```
 
 Useful when debugging the script in isolation.

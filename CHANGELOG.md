@@ -4,9 +4,74 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.10.1`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.13.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
+
+### Spec / SDK 0.13.0 — 2026-07-15
+
+**Bug fix: Python executor fallback matched Node behavior**
+
+- `sdk/python/src/agentproc/runner.py`: Added missing Case 3 — when `executor:` is present and the SDK does not recognise the name but `command` is present, Python now warns via `on_stderr` and falls back to the spawn path instead of hard-failing. This matches the four-case contract documented in Node's runner comment and ensures hub profiles are portable across both SDKs.
+- Tests added in `sdk/python/tests/test_executors.py` and `sdk/node/src/runner.test.js` covering all four executor-resolution cases.
+
+**Fix: `send_error()` spec prose contradicted conformance (non-terminal)**
+
+- `spec/protocol.md` line 421 previously said "SDK convention = terminal". The conformance fixture (`spec/conformance/sdk.json`) and both reference implementations are non-terminal: the handler may continue and return a body after calling `send_error()`. The bridge discards the subsequent `result`, so only the error reaches the user.
+- Spec prose, Python docstring (`__init__.py`), and Node JSDoc (`index.js`) updated to reflect non-terminal behavior. `ProtocolError`/`protocolError()` is documented as the truly fatal path.
+
+**Fix: session_id wire constraint clarified (was misleadingly "storage-level only")**
+
+- `spec/protocol.md` previously said "the wire itself places no restriction" on session_id charset. The runner and conformance always rejected path separators (`/`, `\`) at the wire classification step — contradicting the spec.
+- Spec updated to state the wire constraint explicitly: session_id MUST NOT contain path separators or control characters. Reason documented: SDK history helpers store sessions as `<id>.jsonl` flat files; a `/` would create a subdirectory instead.
+- `isValidSessionId` / `is_valid_session_id` docstrings updated from "storage-safe" to "wire-valid" to prevent future confusion.
+
+**Cleanup: `include_stderr_in_reply` and `send_error_reply` moved out of core profile spec**
+
+- Neither field is read by the reference SDK runners or hub bridge engines (`stream_utils`). They were listed in the canonical profile YAML example but never acted on.
+- Removed from the profile YAML example in `spec/protocol.md` and `docs/spec/index.md`.
+- Replaced with a new **Bridge deployment hints** subsection under Exit Codes that documents the same behaviors as SHOULD-level deployment conventions (not profile fields).
+- `docs/guide/troubleshooting.md`, `docs/zh/guide/troubleshooting.md`, and `hub/codex/README.md` updated accordingly.
+- `timeout_secs` comment updated from "stdout read timeout" to "per-turn wall-clock timeout" throughout.
+
+**Tests: permission timeout and session_id inbound-stamp conformance**
+
+- Node and Python runner tests: added "turn times out while permission request is pending → exit code 124" to pin that `timeout_secs` applies to the whole turn, including mid-turn permission waits.
+- Node and Python runner tests: added three inbound `sessionId` resume scenarios (agent echoes back same id / different id / no id) to confirm the runner captures outbound stamps correctly and never pre-fills `result.sessionId` from the inbound value.
+
+**Versions.** SDK packages `0.12.0` → `0.13.0`. Wire protocol stays `0.4`. Doc revision bumps accordingly.
+
+---
+
+### Spec / SDK 0.12.0 — 2026-07-15
+
+**Breaking: `{{MESSAGE}}` removed from argv placeholders**
+
+- `{{MESSAGE}}` is no longer a supported placeholder in `command`, `args`, `cwd`, or `env`. The user message is delivered exclusively via the stdin turn object. Putting user text in argv leaks it to `ps(1)`, hits OS arg-length limits, and muddies trust-boundary reasoning. No hub profiles used this placeholder; no migration needed for hub users.
+- Runners no longer substitute `{{MESSAGE}}` in argv tokens. A profile with `args: ["{{MESSAGE}}"]` will now receive the literal string `{{MESSAGE}}` as an argv token (and the agent will read the message from stdin as usual).
+- `substitute()` / `substitute` in both SDKs: `{{MESSAGE}}` replacement removed.
+
+**Breaking: `max_reply_chars` and `truncation_suffix` removed**
+
+- Protocol-level reply length capping is an application-layer concern, not a runner concern. An IM bridge that needs to cap messages should do so after receiving `result.text`, not inside the runner.
+- `max_reply_chars` and `truncation_suffix` profile YAML fields are removed. Setting them in a profile is now silently ignored.
+- Three conformance scenarios covering truncation removed from `spec/conformance/scenarios.json`.
+
+**Versions.** SDK packages `0.11.0` → `0.12.0`. Wire protocol stays `0.4`. Doc revision bumps accordingly.
+
+---
+
+### Spec / SDK 0.11.0 — 2026-07-15
+
+**Breaking: `from_user` field removed from the turn object**
+
+- Removed the `from_user` required field from the turn object. It was a protocol-level field that no runner implementation ever read or forwarded to the agent CLI. Sender identity is an application-layer concern handled by the bridge author before the turn reaches the agent; there is no need for a generic slot in the wire format.
+- All SDKs updated: `RunOptions.from_user` / `RunOptions.fromUser` removed; `AgentContext.from_user` / `ctx.fromUser` removed; `--from` CLI flag removed.
+- All docs, fixtures, conformance tests, and hub READMEs updated.
+
+**Versions.** SDK packages `0.10.1` → `0.11.0`. Wire protocol stays `0.4`. Doc revision bumps accordingly.
+
+---
 
 ### Spec / SDK 0.10.1 — 2026-07-15
 

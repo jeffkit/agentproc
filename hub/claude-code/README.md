@@ -87,7 +87,7 @@ Expected output (streaming mode):
 
 ```bash
 cd hub/claude-code
-echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.4"}' | ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","protocol_version":"0.4"}' | ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" python3 bridge.py
 ```
 
 </details>

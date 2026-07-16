@@ -129,29 +129,10 @@
       "expect": {"reply": "ok", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     },
     {
-      "name": "non-streaming result truncated at max_reply_chars",
-      "profile_overrides": {"max_reply_chars": 10},
+      "name": "long result is passed through unchanged (no protocol-level truncation)",
       "lines": ["{\"type\":\"result\",\"text\":\"0123456789ABCDEF\"}"],
       "streaming": false,
-      "expect": {"reply": "0123456789\n\n…(truncated)", "session_id": "", "error": "", "exit_code": 0, "partials": []}
-    },
-    {
-      "name": "streaming partials truncated at max_reply_chars",
-      "profile_overrides": {"max_reply_chars": 10},
-      "lines": ["{\"type\":\"partial\",\"text\":\"hello \"}", "{\"type\":\"partial\",\"text\":\"world!!\"}", "{\"type\":\"result\",\"text\":\"\",\"session_id\":\"sess-1\"}"],
-      "streaming": true,
-      "expect": {"reply": "", "session_id": "sess-1", "error": "", "exit_code": 0, "partials": ["hello ", "worl", "\n\n…(truncated)"]}
-    },
-    {
-      "name": "streaming partials: first chunk already exceeds cap",
-      "profile_overrides": {"max_reply_chars": 3},
-      "lines": ["{\"type\":\"partial\",\"text\":\"hello\"}", "{\"type\":\"partial\",\"text\":\"world\"}"],
-      "streaming": true,
-      "expect": {
-        "reply": "", "session_id": "", "error": "", "exit_code": 0,
-        "partials_any_of": [["hel", "\n\n…(truncated)"], ["\n\n…(truncated)"]],
-        "_note": "Spec leaves it implementation-defined whether a chunk that exceeds the remaining cap is forwarded as a tail-truncated slice or dropped entirely."
-      }
+      "expect": {"reply": "0123456789ABCDEF", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     }
   ]
 }

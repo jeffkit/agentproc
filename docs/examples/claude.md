@@ -211,6 +211,6 @@ streaming: true
 Drive the bridge the same way the runner does — pipe a turn object to stdin:
 
 ```bash
-echo '{"type":"turn","message":"hello","session_id":"","from_user":"test","protocol_version":"0.4"}' \
+echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' \
   | python3 ./claude_bridge.py
 ```

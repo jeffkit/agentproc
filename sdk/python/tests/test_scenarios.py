@@ -52,7 +52,6 @@ def _write_bash_agent(tmp_path: Path, lines: List[str]) -> Path:
 def test_scenario_conformance(scenario: dict, tmp_path: Path) -> None:
     agent = _write_bash_agent(tmp_path, scenario["lines"])
     expect = scenario["expect"]
-    # scenario["profile_overrides"] lets tests set max_reply_chars etc.
     profile = {"command": str(agent), **scenario.get("profile_overrides", {})}
     partials: List[str] = []
     r = run(

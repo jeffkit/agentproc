@@ -16,7 +16,7 @@
  *
  * Responsibilities:
  *   - Parse and validate a profile object
- *   - Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders
+ *   - Substitute {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}} placeholders in argv and env
  *   - Build the child env (infra set + profile env block + CLI --env extras)
  *   - Spawn the agent command (no shell); command is always argv[0], never split
  *   - Write the turn object to the agent's stdin (and keep stdin open when
@@ -52,9 +52,6 @@ const PROTOCOL_VERSION = '0.4';
 
 const DEFAULT_TIMEOUT_SECS = 1800;
 const DEFAULT_KILL_GRACE_SECS = 5;
-const DEFAULT_MAX_REPLY_CHARS = 8000;
-const DEFAULT_TRUNCATION_SUFFIX = '\n\n…(truncated)';
-
 // Exit codes per spec
 const EXIT_SUCCESS = 0;
 const EXIT_ERROR = 1;
@@ -151,13 +148,6 @@ function normalizeProfile(raw) {
     permission: src.permission === true,
     timeout_secs: Number.isFinite(src.timeout_secs) ? src.timeout_secs : DEFAULT_TIMEOUT_SECS,
     kill_grace_secs: Number.isFinite(src.kill_grace_secs) ? src.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
-    max_reply_chars: Number.isFinite(src.max_reply_chars) ? src.max_reply_chars : DEFAULT_MAX_REPLY_CHARS,
-    // Spec profile YAML: optional truncation notice appended when the reply is
-    // capped. Defaults to "\n\n…(truncated)". An empty string disables the
-    // notice entirely (the cap still applies, just no visible marker).
-    truncation_suffix: typeof src.truncation_suffix === 'string'
-      ? src.truncation_suffix
-      : DEFAULT_TRUNCATION_SUFFIX,
     // Bridge-side hint: when false, the runner ignores {"type":"partial"} events
     // and assembles the reply from {"type":"result"} only. Not a wire field.
     streaming: src.streaming !== false,
@@ -296,12 +286,12 @@ function diagnoseSpawnError(err, { argv, cwd, env }) {
 }
 
 /**
- * Substitute {{MESSAGE}}, {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}}
+ * Substitute {{SESSION_ID}}, {{SESSION_NAME}}, {{PROFILE_DIR}}
  * placeholders in a string value. Per spec, no shell is involved.
+ * {{MESSAGE}} is intentionally not substituted — message travels via stdin only.
  */
 function substitute(value, ctx) {
   return String(value)
-    .replace(/\{\{MESSAGE\}\}/g, ctx.message || '')
     .replace(/\{\{SESSION_ID\}\}/g, ctx.sessionId || '')
     .replace(/\{\{SESSION_NAME\}\}/g, ctx.sessionName || '')
     .replace(/\{\{PROFILE_DIR\}\}/g, ctx.profileDir || '');
@@ -438,14 +428,13 @@ function isValidPermissionRequest(obj) {
   return true;
 }
 
-// Wire 0.4: the session id is an arbitrary JSON string on the wire (no
-// colon/whitespace restriction — that was an artifact of the 0.2
-// colon-delimited prefix). The only remaining constraint is STORAGE safety:
-// the SDK history helpers store each session as <id>.jsonl, so an id
-// containing a path separator (/ or \), a NUL / control char, or equal to
-// `.` / `..` would path-traverse out of the sessions directory. The runner
-// rejects such ids (preserving the previously captured id + a stderr warning)
-// so they do not round-trip. Colons, spaces, `+`, and unicode are all fine.
+// Wire 0.4: session ids must not contain path separators (/ or \) or control
+// characters. This is a WIRE constraint enforced at the runner classification
+// step (not just at file-persistence time): the SDK history helpers store
+// sessions as <id>.jsonl flat files, so a / in the id would create a
+// subdirectory instead of a file. The runner rejects non-conforming ids
+// (preserving the previously captured id + a stderr warning).
+// Colons, spaces, `+`, and unicode are all fine.
 function isValidSessionId(value) {
   if (typeof value !== 'string' || value.length === 0) return false;
   if (value === '.' || value === '..') return false;
@@ -463,7 +452,7 @@ function isValidSessionId(value) {
  * @property {string} message - User message (required).
  * @property {string} [sessionId] - Session id from the previous turn (empty = new).
  * @property {string} [sessionName] - Human-readable session name.
- * @property {string} [fromUser] - Sender identifier.
+
  * @property {boolean} [streaming] - Override profile.streaming (bridge-side hint).
  * @property {Object<string, string>} [extraEnv] - Additional env vars (CLI --env).
  * @property {Array<{kind:string,url:string}>} [attachments] - Attachments for the turn.
@@ -642,10 +631,6 @@ async function runViaExecutor(profile, options, executor) {
   let lastFinalText = null;
   let errorMessage = null;
   let partialsForwarded = false;
-  const maxChars = profile.max_reply_chars;
-  const truncSuffix = profile.truncation_suffix;
-  let cumPartialChars = 0;
-  let partialsTruncated = false;
 
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 
@@ -668,20 +653,9 @@ async function runViaExecutor(profile, options, executor) {
     if (parsed.error) {
       if (!errorMessage) errorMessage = parsed.error;
     } else if (parsed.partialText) {
-      if (!errorMessage && streaming && options.onPartial && !partialsTruncated) {
-        const remaining = maxChars - cumPartialChars;
-        if (parsed.partialText.length >= remaining) {
-          if (remaining > 0) {
-            options.onPartial(parsed.partialText.slice(0, remaining));
-            partialsForwarded = true;
-          }
-          if (truncSuffix) { options.onPartial(truncSuffix); partialsForwarded = true; }
-          partialsTruncated = true;
-        } else {
-          options.onPartial(parsed.partialText);
-          partialsForwarded = true;
-          cumPartialChars += parsed.partialText.length;
-        }
+      if (!errorMessage && streaming && options.onPartial) {
+        options.onPartial(parsed.partialText);
+        partialsForwarded = true;
       }
     }
 
@@ -783,9 +757,8 @@ async function run(profileRaw, options) {
     cwd = path.resolve(options.profileDir, cwd);
   }
 
-  // Build the substitution context for {{MESSAGE}} etc.
+  // Build the substitution context for {{SESSION_ID}} etc.
   const substCtx = {
-    message: options.message,
     sessionId,
     sessionName,
     profileDir: options.profileDir || '',
@@ -820,7 +793,6 @@ async function run(profileRaw, options) {
     message: options.message,
     session_id: sessionId,
     session_name: sessionName,
-    from_user: options.fromUser || '',
     protocol_version: PROTOCOL_VERSION,
   };
   // attachments: include the key when the caller provided an attachments
@@ -914,17 +886,6 @@ async function run(profileRaw, options) {
     try { child.stdin.end(); } catch {}
   }
 
-  // ---- streaming partial truncation tracking ----
-  // max_reply_chars is applied to the assembled text body in non-streaming
-  // mode and to the cumulative partial length in streaming mode.  Without
-  // this second check, streaming mode silently bypasses the cap.  The two
-  // paths now agree: once the combined partial text exceeds max_reply_chars,
-  // we emit a truncation notice and drop further partials.
-  let cumulativePartialChars = 0;
-  let partialsTruncated = false;
-  const maxChars = profile.max_reply_chars;
-  const truncSuffix = profile.truncation_suffix;
-
   // ---- stdout: line-by-line event parsing ----
   let stdoutBuf = '';
   child.stdout.on('data', chunk => {
@@ -967,24 +928,9 @@ async function run(profileRaw, options) {
     if (c.kind === 'partial') {
       // Spec: post-error partials are discarded (not forwarded).
       // `onProtocolLine` still fires so debug traces stay complete.
-      if (!errorSeen && streaming && options.onPartial && !partialsTruncated) {
-        const remaining = maxChars - cumulativePartialChars;
-        if (c.value.length >= remaining) {
-          // Emit whatever fits, then the truncation notice, then stop.
-          if (remaining > 0) {
-            options.onPartial(c.value.slice(0, remaining), c.role);
-            partialsForwarded = true;
-          }
-          if (truncSuffix) {
-            options.onPartial(truncSuffix);
-            partialsForwarded = true;
-          }
-          partialsTruncated = true;
-        } else {
-          options.onPartial(c.value, c.role);
-          partialsForwarded = true;
-          cumulativePartialChars += c.value.length;
-        }
+      if (!errorSeen && streaming && options.onPartial) {
+        options.onPartial(c.value, c.role);
+        partialsForwarded = true;
       }
       if (options.onProtocolLine) options.onProtocolLine(line);
     } else if (c.kind === 'result') {
@@ -1224,9 +1170,6 @@ async function run(profileRaw, options) {
   } else {
     result.reply = resultText;
   }
-  if (result.reply.length > profile.max_reply_chars) {
-    result.reply = result.reply.slice(0, profile.max_reply_chars) + profile.truncation_suffix;
-  }
 
   // Exit code per spec.
   if (killed) {
@@ -1255,8 +1198,6 @@ module.exports = {
   PROTOCOL_VERSION,
   DEFAULT_TIMEOUT_SECS,
   DEFAULT_KILL_GRACE_SECS,
-  DEFAULT_MAX_REPLY_CHARS,
-  DEFAULT_TRUNCATION_SUFFIX,
   EXIT_SUCCESS,
   EXIT_ERROR,
   EXIT_TIMEOUT,

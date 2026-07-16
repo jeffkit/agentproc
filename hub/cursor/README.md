@@ -92,7 +92,7 @@ The session id is emitted by `agent`'s `system/init` event up-front, so `session
 
 ```bash
 cd hub/cursor
-echo '{"type":"turn","message":"say hi in 5 words","session_id":"","from_user":"u1","protocol_version":"0.4"}' | python3 bridge.py
+echo '{"type":"turn","message":"say hi in 5 words","session_id":"","protocol_version":"0.4"}' | python3 bridge.py
 ```
 
 </details>

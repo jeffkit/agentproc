@@ -13,8 +13,6 @@ declare module 'agentproc' {
     sessionId: string;
     /** Human-readable session name (turn.session_name). */
     sessionName: string;
-    /** Sender identifier (turn.from_user). */
-    fromUser: string;
     /** Protocol version the bridge implements (turn.protocol_version). */
     protocolVersion: string;
     /** Attachment list (turn.attachments). Empty array = no attachments. */

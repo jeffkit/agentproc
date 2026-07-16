@@ -138,7 +138,6 @@ def _turn(**extra) -> dict:
         "message": "hi",
         "session_id": "",
         "session_name": "default",
-        "from_user": "",
         "protocol_version": "0.4",
     }
     base.update(extra)
@@ -256,7 +255,6 @@ class TestCreateProfileE2E:
             _turn(
                 session_id="prev-sess",
                 session_name="work",
-                from_user="u123",
                 attachments=[{"kind": "image", "url": "https://x/img.png"}],
             ),
             """
@@ -265,7 +263,6 @@ class TestCreateProfileE2E:
                 "msg": ctx.message,
                 "sid": ctx.session_id,
                 "sname": ctx.session_name,
-                "from": ctx.from_user,
                 "pv": ctx.protocol_version,
                 "atts": [a["kind"] + ":" + a["url"] for a in (ctx.attachments or [])],
             })
@@ -278,7 +275,6 @@ class TestCreateProfileE2E:
         assert ctx["msg"] == "hi"
         assert ctx["sid"] == "prev-sess"
         assert ctx["sname"] == "work"
-        assert ctx["from"] == "u123"
         assert ctx["pv"] == "0.4"
         assert ctx["atts"] == ["image:https://x/img.png"]
 
