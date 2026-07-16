@@ -27,7 +27,7 @@ const { runViaExecutor, normalizeProfile, isValidSessionId } = require('./runner
 describe('EXECUTORS registry', () => {
   const EXPECTED_NAMES = [
     'claude-code', 'codebuddy', 'codex', 'cursor',
-    'gemini-cli', 'kimi-code', 'opencode', 'qwen-code',
+    'gemini-cli', 'grok-build', 'kimi-code', 'opencode', 'qwen-code',
     'agy', 'aider', 'deepseek', 'pi',
   ];
 
@@ -64,7 +64,7 @@ describe('EXECUTORS registry', () => {
   });
 
   test('NDJSON executors have plain: false or omit it', () => {
-    const ndjsonNames = ['claude-code', 'codebuddy', 'codex', 'gemini-cli', 'opencode', 'qwen-code'];
+    const ndjsonNames = ['claude-code', 'codebuddy', 'codex', 'gemini-cli', 'grok-build', 'opencode', 'qwen-code'];
     for (const name of ndjsonNames) {
       assert.ok(!EXECUTORS[name].plain, `${name}: expected plain to be falsy`);
     }

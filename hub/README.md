@@ -12,6 +12,7 @@ See [PERMISSIONS.md](./PERMISSIONS.md) for which CLIs support mid-turn tool auth
 | [codex](./codex/) | `codex` (OpenAI) | official | Python · Node |
 | [codebuddy](./codebuddy/) | `codebuddy` (Tencent) | official | Python · Node |
 | [gemini-cli](./gemini-cli/) | `gemini` (Google) | official | Python · Node |
+| [grok-build](./grok-build/) | `grok` (xAI Grok Build) | community | Python · Node |
 | [cursor](./cursor/) | `agent` (Cursor Agent) | official | Python · Node |
 | [qwen-code](./qwen-code/) | `qwen` (Alibaba) | community | Python · Node |
 | [recursive](./recursive/) | `recursive` (self-improving Rust agent) | community | Python · Node |
@@ -32,6 +33,7 @@ The [ACP Registry](https://agentclientprotocol.com/get-started/registry) maintai
 | Claude Agent | ✅ | [claude-code](./claude-code/) | ✅ official |
 | Codex | ✅ | [codex](./codex/) | ✅ official |
 | Gemini CLI | ✅ | [gemini-cli](./gemini-cli/) | ✅ official |
+| Grok Build | ✅ | [grok-build](./grok-build/) | 🟡 community (verified against grok 0.2.101) |
 | Cursor | ✅ | [cursor](./cursor/) | ✅ official |
 | Codebuddy Code | ✅ | [codebuddy](./codebuddy/) | ✅ official |
 | Qwen Code | ✅ | [qwen-code](./qwen-code/) | 🟡 community (schema unverified) |
@@ -64,7 +66,7 @@ Pick whichever bridge language you prefer — both produce identical AgentProc o
 
 ### Shared bridge utilities
 
-NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `qwen-code`, `cursor`, `opencode`, `kimi-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text one-shot profiles (`aider`, `pi`, `deepseek`, `agy`, `echo-agent`) use the shared `run_plain_cli` / `runPlainCli` helper; `recursive` (which needs cross-turn transcript state the shared helper doesn't model) keeps a bespoke bridge.
+NDJSON-based profiles (`claude-code`, `codex`, `codebuddy`, `gemini-cli`, `grok-build`, `qwen-code`, `cursor`, `opencode`, `kimi-code`) share subprocess + line-reading + emission logic via [`_shared/stream_utils`](./_shared/). Each bridge stays ~30 lines, supplying only `build_args()` and `parse_event()`. Plain-text one-shot profiles (`aider`, `pi`, `deepseek`, `agy`, `echo-agent`) use the shared `run_plain_cli` / `runPlainCli` helper; `recursive` (which needs cross-turn transcript state the shared helper doesn't model) keeps a bespoke bridge.
 
 ## How to use a profile
 

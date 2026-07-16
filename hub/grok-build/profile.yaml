@@ -1,0 +1,45 @@
+name: grok-build
+description: Connect the grok CLI (xAI Grok Build) as an AgentProc agent with streaming and session continuity
+cli: grok
+cli_install: |
+  curl -fsSL https://x.ai/cli/install.sh | bash
+  # Windows PowerShell: irm https://x.ai/cli/install.ps1 | iex
+  # Then: grok login   (or export XAI_API_KEY)
+agentproc:
+  executor: grok-build
+  command: python3
+  args: ["{{PROFILE_DIR}}/bridge.py"]
+  # cwd is intentionally left unset. `agentproc hub run` defaults it to your
+  # current directory (so `grok` runs against your project); you can also
+  # pass --cwd explicitly. The {{PROFILE_DIR}} placeholder above locates the
+  # bridge script regardless of cwd.
+  timeout_secs: 600
+  streaming: true
+  env:
+    XAI_API_KEY: "${XAI_API_KEY}"
+    # Auth: run `grok login` (or `grok login --device-code`) once, OR set XAI_API_KEY.
+    # Optional overrides (uncomment to use):
+    # GROK_MODEL: "grok-4.5"   # any model id / alias `grok` accepts via -m
+  env_allowlist: [XAI_API_KEY, GROK_MODEL]
+tested: community
+maintainer: jeffkit
+tags: [coding, xai, grok, ai]
+notes: |
+  The bridge invokes:
+    grok -p <message> --output-format streaming-json --always-approve --no-auto-update
+        [-r <session_id>] [-m <model>]
+
+  Schema (verified against grok 0.2.101):
+    text     → coalesced into block-sized {"type":"partial"} (not per-token)
+    thought  → ignored (reasoning tokens)
+    end      → sessionId + full accumulated result body
+    error    → {"type":"error"}
+
+  Grok emits near token-sized text events; the bridge coalesces them into
+  Claude-like blocks before emitting partials.
+
+  Session resume uses `-r/--resume <sessionId>` from the prior `end` event.
+
+  Installer caveat: the official install script also links `agent` → grok.
+  That shadows the Cursor Agent CLI (`agent`). Prefer keeping
+  `~/.local/bin/agent` → `cursor-agent` and only expose `grok` on PATH.

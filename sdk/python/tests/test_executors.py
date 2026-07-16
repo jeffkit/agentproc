@@ -27,7 +27,7 @@ from agentproc.runner import (
 
 class TestRegistry(unittest.TestCase):
     REQUIRED_NAMES = [
-        "claude-code", "codebuddy", "codex", "cursor", "gemini-cli",
+        "claude-code", "codebuddy", "codex", "cursor", "gemini-cli", "grok-build",
         "kimi-code", "opencode", "qwen-code", "agy", "aider", "deepseek", "pi",
     ]
 
@@ -56,7 +56,7 @@ class TestRegistry(unittest.TestCase):
 
     def test_ndjson_executors_have_parse_event_or_make_handlers(self):
         ndjson_executors = {"claude-code", "codebuddy", "codex", "cursor", "gemini-cli",
-                           "kimi-code", "opencode", "qwen-code"}
+                           "grok-build", "kimi-code", "opencode", "qwen-code"}
         for name in ndjson_executors:
             ex = EXECUTORS[name]
             has_parse_event = callable(ex.get("parse_event"))

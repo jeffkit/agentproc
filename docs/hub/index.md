@@ -46,6 +46,9 @@ Add `--refresh` to force re-fetch from GitHub.
 | [claude-code](https://github.com/jeffkit/agentproc/tree/main/hub/claude-code) | `claude` (Anthropic) | official | Python · Node |
 | [codex](https://github.com/jeffkit/agentproc/tree/main/hub/codex) | `codex` (OpenAI) | official | Python · Node |
 | [codebuddy](https://github.com/jeffkit/agentproc/tree/main/hub/codebuddy) | `codebuddy` (Tencent) | official | Python · Node |
+| [gemini-cli](https://github.com/jeffkit/agentproc/tree/main/hub/gemini-cli) | `gemini` (Google) | official | Python · Node |
+| [grok-build](https://github.com/jeffkit/agentproc/tree/main/hub/grok-build) | `grok` (xAI Grok Build) | community | Python · Node |
+| [cursor](https://github.com/jeffkit/agentproc/tree/main/hub/cursor) | `agent` (Cursor Agent) | official | Python · Node |
 | [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
 | [recursive](https://github.com/jeffkit/agentproc/tree/main/hub/recursive) | `recursive` (self-improving Rust agent) | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | (no CLI) | official | Python · Node · Bash |
@@ -177,7 +180,7 @@ agentproc:
   streaming: true
 ```
 
-**Built-in executor names (Node SDK 0.10.0):** `claude-code`, `codebuddy`, `codex`, `cursor`, `gemini-cli`, `kimi-code`, `opencode`, `qwen-code`, `agy`, `aider`, `deepseek`, `pi`.
+**Built-in executor names (Node SDK 0.10.0+):** `claude-code`, `codebuddy`, `codex`, `cursor`, `gemini-cli`, `grok-build`, `kimi-code`, `opencode`, `qwen-code`, `agy`, `aider`, `deepseek`, `pi`.
 
 Introspect at runtime:
 ```js

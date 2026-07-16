@@ -4,9 +4,28 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml` and `sdk/node/package.json`. Currently `0.13.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.14.0`; the Rust crate is on its own track currently `0.11.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
+
+### Spec / SDK 0.14.0 — 2026-07-16
+
+**New: `grok-build` executor + hub profile (xAI grok CLI)**
+
+Adds a built-in `grok-build` executor and a matching `hub/grok-build/` profile for the grok CLI (xAI Grok Build). Implemented in all three SDKs at observable parity:
+
+- `sdk/python/src/agentproc/executors.py`, `sdk/node/src/executors.js`, `sdk/rust/src/executors.rs`: new `grok-build` entry in the executor registry. Builds args `grok -p <message> --output-format streaming-json --always-approve --no-auto-update [-r <session_id>] [-m <GROK_MODEL>]`. `thought` events are ignored (reasoning tokens); `text` events are coalesced into Claude-like partial blocks before flushing (soft flush at 40 chars on a sentence boundary `\n。！？；.!?;`, hard flush at 80 chars, plus a newline flush); `end` emits the accumulated `final_text` + `sessionId`; `error` emits the error message and preserves `sessionId` when present.
+- `hub/grok-build/`: `profile.yaml` + `bridge.py` + `bridge.js` + `README.md`. `tested: community`. Auth via `grok login` or `XAI_API_KEY`; optional `GROK_MODEL` override. `env_allowlist: [XAI_API_KEY, GROK_MODEL]`.
+- Hub registry docs updated: `hub/README.md`, `hub/PERMISSIONS.md`, `docs/hub/index.md`, `docs/zh/hub/index.md`, `AGENTS.md`.
+- Tests: `sdk/python/tests/test_bridges.py` and `sdk/python/tests/test_executors.py`, `sdk/node/src/executors.test.js`, and Rust executor tests cover arg building, resume via `-r`, model override, token coalescing into blocks, short-reply flush on `end`, and error-with-session.
+
+**Repo housekeeping: AGENTS.md version-bump checklist now includes Rust.**
+
+- The "Files that MUST be updated together when bumping the SDK package version" list now also names `sdk/rust/Cargo.toml — version`, reflecting that the Rust crate is a published package on its own version track.
+
+**Versions.** Python and Node SDK packages `0.13.0` → `0.14.0`. Rust crate `0.10.0` → `0.11.0`. Wire protocol stays `0.4`. Doc revision bumps accordingly.
+
+---
 
 ### Spec / SDK 0.13.0 — 2026-07-15
 

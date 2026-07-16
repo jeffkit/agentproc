@@ -46,6 +46,9 @@ export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
 | [claude-code](https://github.com/jeffkit/agentproc/tree/main/hub/claude-code) | `claude`（Anthropic） | official | Python · Node |
 | [codex](https://github.com/jeffkit/agentproc/tree/main/hub/codex) | `codex`（OpenAI） | official | Python · Node |
 | [codebuddy](https://github.com/jeffkit/agentproc/tree/main/hub/codebuddy) | `codebuddy`（腾讯） | official | Python · Node |
+| [gemini-cli](https://github.com/jeffkit/agentproc/tree/main/hub/gemini-cli) | `gemini`（Google） | official | Python · Node |
+| [grok-build](https://github.com/jeffkit/agentproc/tree/main/hub/grok-build) | `grok`（xAI Grok Build） | community | Python · Node |
+| [cursor](https://github.com/jeffkit/agentproc/tree/main/hub/cursor) | `agent`（Cursor Agent） | official | Python · Node |
 | [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
 | [recursive](https://github.com/jeffkit/agentproc/tree/main/hub/recursive) | `recursive`（自改进 Rust agent） | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | （无 CLI） | official | Python · Node · Bash |
