@@ -8,6 +8,17 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Released
 
+### Rust SDK (unreleased) — unattended claude-code argv fix
+
+- `sdk/rust/src/executors.rs`: the unattended (`permission: false`) claude-code
+  branch omitted `--verbose`, which Claude Code's CLI requires when invoked as
+  `claude --print --output-format=stream-json`. The missing flag surfaced as
+  `Error: When using --print, --output-format=stream-json requires --verbose`
+  for any IM bridge driving claude-code headlessly (e.g. im-agentproc). Added
+  `--verbose` to the unattended argv; the permission-mode branch already had it.
+- Test `claude_code_unattended_mode_omits_permission_flags` now asserts
+  `--verbose` is present, locking the fix.
+
 ### Spec / SDK 0.13.0 — 2026-07-15
 
 **Bug fix: Python executor fallback matched Node behavior**

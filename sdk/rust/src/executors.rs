@@ -421,6 +421,7 @@ impl TurnHandlers for ClaudeCodeTurn {
                 "--output-format".into(),
                 "stream-json".into(),
                 "--dangerously-skip-permissions".into(),
+                "--verbose".into(),
             ];
             let disallow = Self::disallow_arg(env);
             if !disallow.is_empty() {
@@ -1642,6 +1643,9 @@ mod tests {
         let args = h.build_args("hi", "", &env);
         assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
         assert!(!args.iter().any(|a| a == "--permission-prompt-tool"));
+        // Unattended path must still pass --verbose: claude --print
+        // --output-format=stream-json requires it (Claude Code CLI contract).
+        assert!(args.iter().any(|a| a == "--verbose"));
     }
 
     #[tokio::test]
