@@ -27,7 +27,7 @@ Adds a built-in `grok-build` executor and a matching `hub/grok-build/` profile f
 
 ---
 
-### Rust SDK 0.11.1 (unreleased) — unattended claude-code --verbose fix
+### Rust SDK 0.11.1 — unattended claude-code --verbose fix
 
 - `sdk/rust/src/executors.rs`: the unattended (`permission: false`) claude-code
   branch omitted `--verbose`, which Claude Code's CLI requires when invoked as
