@@ -366,6 +366,83 @@ class TestGeminiCliBridge:
         assert parsed["session"] == "gem-sess-1"
 
 
+class TestGrokBuildBridge:
+    """grok emits text/thought/end/error NDJSON (verified against grok 0.2.101).
+    thought is dropped; end carries sessionId + accumulated final text."""
+
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("grok-build")
+
+    def test_build_args_first_turn(self):
+        args = self.mod.build_args("hi", "", {})
+        assert args[0] == "grok"
+        assert "-p" in args and "hi" in args
+        assert "--output-format" in args and "streaming-json" in args
+        assert "--always-approve" in args
+        assert "--no-auto-update" in args
+
+    def test_build_args_resume_uses_short_r_flag(self):
+        args = self.mod.build_args("hi", "grok-sess-1", {})
+        assert "-r" in args and "grok-sess-1" in args
+        assert "--resume" not in args
+
+    def test_build_args_model_override(self):
+        args = self.mod.build_args("hi", "", {"GROK_MODEL": "grok-4.5"})
+        assert "-m" in args and "grok-4.5" in args
+
+    def test_streaming_coalesces_tokens_into_blocks(self):
+        """Grok emits token-sized text; bridge flushes Claude-like blocks."""
+        # >= SOFT_CHARS (40) ending with 。 → one soft flush, then leftover on end.
+        tokens = list("今天天气非常好猫咪在窗台上晒太阳打盹的样子非常可爱让人忍不住想要多看几眼真是惬意。")
+        assert len("".join(tokens)) >= 40
+        events = [{"type": "thought", "data": "planning"}]
+        events += [{"type": "text", "data": t} for t in tokens]
+        events += [{"type": "text", "data": "尾句"}]
+        events.append({
+            "type": "end",
+            "stopReason": "EndTurn",
+            "sessionId": "019f691a-769c-7a33-85e2-5b98100b7716",
+        })
+        rc, out = _run_bridge(self.mod, events)
+        parsed = _classify_output(out)
+        assert rc == 0
+        assert parsed["session"] == "019f691a-769c-7a33-85e2-5b98100b7716"
+        # Not one partial per token — a block flush + leftover on end.
+        assert len(parsed["partials"]) >= 1
+        assert len(parsed["partials"]) < len(tokens) + 1
+        assert "".join(parsed["partials"]) == "".join(tokens) + "尾句"
+        assert parsed["body"] == ["".join(tokens) + "尾句"]
+
+    def test_short_reply_flushes_on_end(self):
+        events = [
+            {"type": "text", "data": "hello"},
+            {"type": "text", "data": " world"},
+            {
+                "type": "end",
+                "stopReason": "EndTurn",
+                "sessionId": "sid-short",
+            },
+        ]
+        rc, out = _run_bridge(self.mod, events)
+        parsed = _classify_output(out)
+        assert rc == 0
+        # Too short to soft/hard flush mid-stream; drained as one block on end.
+        assert parsed["partials"] == ["hello world"]
+        assert parsed["body"] == ["hello world"]
+        assert parsed["session"] == "sid-short"
+
+    def test_error_preserves_session_when_present(self):
+        events = [
+            {"type": "error", "message": "Not signed in", "sessionId": "sid-1"},
+        ]
+        rc, out = _run_bridge(self.mod, events)
+        parsed = _classify_output(out)
+        assert rc == 1
+        assert parsed["error"] == "Not signed in"
+        assert parsed["session"] == "sid-1"
+
+
 class TestQwenCodeBridge:
     """qwen-code is a gemini-cli fork — schema should match. These tests pin
     that assumption so a schema drift shows up immediately."""

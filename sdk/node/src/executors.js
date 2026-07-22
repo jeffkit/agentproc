@@ -485,6 +485,92 @@ const deepseek = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// grok-build
+// ---------------------------------------------------------------------------
+// xAI Grok Build (`grok -p --output-format streaming-json`). NDJSON.
+// Stateful: coalesces token-sized text events into Claude-like blocks, and
+// keeps the full body for streaming:false.
+
+const GROK_SOFT_CHARS = 40;
+const GROK_HARD_CHARS = 80;
+const GROK_BOUNDARY = new Set(['\n', '。', '！', '？', '；', '.', '!', '?', ';']);
+
+function grokShouldFlush(buf) {
+  if (!buf) return false;
+  if (buf.length >= GROK_HARD_CHARS) return true;
+  const last = buf[buf.length - 1];
+  if (GROK_BOUNDARY.has(last) && buf.length >= GROK_SOFT_CHARS) return true;
+  if (last === '\n') return true;
+  return false;
+}
+
+const grokBuild = {
+  cliName: 'grok',
+  installHint: 'Install: curl -fsSL https://x.ai/cli/install.sh | bash',
+  plain: false,
+
+  makeHandlers() {
+    const full = [];
+    let pending = '';
+
+    function flushPending() {
+      if (!pending) return null;
+      const chunk = pending;
+      pending = '';
+      return chunk;
+    }
+
+    function buildArgs(message, sessionId, env) {
+      const args = [
+        'grok', '-p', message,
+        '--output-format', 'streaming-json',
+        '--always-approve',
+        '--no-auto-update',
+      ];
+      const model = (env.GROK_MODEL || '').trim();
+      if (model) args.push('-m', model);
+      if (sessionId) args.push('-r', sessionId);
+      return args;
+    }
+
+    function parseEvent(event) {
+      const etype = event.type;
+      if (etype === 'text') {
+        const data = event.data || '';
+        if (!data) return null;
+        full.push(data);
+        pending += data;
+        if (grokShouldFlush(pending)) {
+          return { partialText: flushPending() };
+        }
+        return null;
+      }
+      if (etype === 'thought') return null;
+      if (etype === 'end') {
+        const sid = event.sessionId;
+        const leftover = flushPending();
+        return {
+          sessionId: (typeof sid === 'string' && sid) ? sid : undefined,
+          partialText: leftover || undefined,
+          finalText: full.join(''),
+        };
+      }
+      if (etype === 'error') {
+        const sid = event.sessionId;
+        pending = '';
+        return {
+          sessionId: (typeof sid === 'string' && sid) ? sid : undefined,
+          error: event.message || 'grok reported an error',
+        };
+      }
+      return null;
+    }
+
+    return { buildArgs, parseEvent };
+  },
+};
+
 const pi = {
   cliName: 'pi',
   installHint: 'Install: npm install -g @earendil-works/pi-coding-agent',
@@ -509,6 +595,7 @@ const EXECUTORS = {
   'codex': codex,
   'cursor': cursor,
   'gemini-cli': geminiCli,
+  'grok-build': grokBuild,
   'kimi-code': kimiCode,
   'opencode': opencode,
   'qwen-code': qwenCode,

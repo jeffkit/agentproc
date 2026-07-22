@@ -489,6 +489,95 @@ PI = {
 }
 
 # ---------------------------------------------------------------------------
+# grok-build
+# ---------------------------------------------------------------------------
+
+_GROK_SOFT_CHARS = 40
+_GROK_HARD_CHARS = 80
+_GROK_BOUNDARY = frozenset("\n。！？；.!?;")
+
+
+def _grok_should_flush(buf: str) -> bool:
+    if not buf:
+        return False
+    if len(buf) >= _GROK_HARD_CHARS:
+        return True
+    if buf[-1] in _GROK_BOUNDARY and len(buf) >= _GROK_SOFT_CHARS:
+        return True
+    if buf[-1] == "\n":
+        return True
+    return False
+
+
+def _make_grok_build_handlers() -> Dict[str, Any]:
+    full: List[str] = []
+    pending = ""
+
+    def flush_pending() -> Optional[str]:
+        nonlocal pending
+        if not pending:
+            return None
+        chunk = pending
+        pending = ""
+        return chunk
+
+    def build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+        args = [
+            "grok", "-p", message,
+            "--output-format", "streaming-json",
+            "--always-approve",
+            "--no-auto-update",
+        ]
+        model = env.get("GROK_MODEL", "").strip()
+        if model:
+            args += ["-m", model]
+        if session_id:
+            args += ["-r", session_id]
+        return args
+
+    def parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        nonlocal pending
+        etype = event.get("type")
+        if etype == "text":
+            data = event.get("data") or ""
+            if not data:
+                return None
+            full.append(data)
+            pending += data
+            if _grok_should_flush(pending):
+                return {"partial_text": flush_pending()}
+            return None
+        if etype == "thought":
+            return None
+        if etype == "end":
+            sid = event.get("sessionId")
+            leftover = flush_pending()
+            out: Dict[str, Any] = {"final_text": "".join(full)}
+            if leftover:
+                out["partial_text"] = leftover
+            if isinstance(sid, str) and sid:
+                out["session_id"] = sid
+            return out
+        if etype == "error":
+            sid = event.get("sessionId")
+            pending = ""
+            out = {"error": event.get("message") or "grok reported an error"}
+            if isinstance(sid, str) and sid:
+                out["session_id"] = sid
+            return out
+        return None
+
+    return {"build_args": build_args, "parse_event": parse_event}
+
+
+GROK_BUILD = {
+    "cli_name": "grok",
+    "install_hint": "Install: curl -fsSL https://x.ai/cli/install.sh | bash",
+    "plain": False,
+    "make_handlers": _make_grok_build_handlers,
+}
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -498,6 +587,7 @@ EXECUTORS: Dict[str, Dict[str, Any]] = {
     "codex": CODEX,
     "cursor": CURSOR,
     "gemini-cli": GEMINI_CLI,
+    "grok-build": GROK_BUILD,
     "kimi-code": KIMI_CODE,
     "opencode": OPENCODE,
     "qwen-code": QWEN_CODE,

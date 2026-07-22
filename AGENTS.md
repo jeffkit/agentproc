@@ -38,6 +38,7 @@ agentproc/
 │   ├── codex/
 │   ├── codebuddy/
 │   ├── gemini-cli/
+│   ├── grok-build/
 │   ├── cursor/
 │   ├── qwen-code/
 │   ├── opencode/
@@ -128,9 +129,10 @@ Files that MUST be updated together when bumping the SDK package version:
 - `spec/protocol.zh.md` — `**版本：**` field at the top (same)
 - `sdk/python/pyproject.toml` — `version`
 - `sdk/node/package.json` — `version`
+- `sdk/rust/Cargo.toml` — `version` (the Rust crate is a published package on its own version track; it does not have to match the Python/Node number, but a spec-relevant change must bump it too)
 - `CHANGELOG.md` — new section
 
-The `PROTOCOL_VERSION` constant (the wire string `0.1`) has a single source of truth per SDK: `sdk/python/src/agentproc/runner.py` and `sdk/node/src/runner.js`. The package entry points (`__init__.py` / `index.js`) **re-export** it from the runner — do not copy the literal into the entry point. The wire version only bumps on a minor (e.g. `0.1` → `0.2`) when the bytes on stdin/stdout actually change; most SDK releases keep `0.1`.
+The `PROTOCOL_VERSION` constant (the wire string `0.1`) has a single source of truth per SDK: `sdk/python/src/agentproc/runner.py`, `sdk/node/src/runner.js`, and `sdk/rust/src/protocol.rs`. The package entry points (`__init__.py` / `index.js`) **re-export** it from the runner — do not copy the literal into the entry point. The wire version only bumps on a minor (e.g. `0.1` → `0.2`) when the bytes on stdin/stdout actually change; most SDK releases keep `0.1`.
 
 Editorial changes (clarifications, rewording, new examples) don't require a version bump.
 

@@ -179,6 +179,7 @@ static STATIC_EXECUTORS: Lazy<HashMap<&'static str, Factory>> = Lazy::new(|| {
     m.insert("codebuddy", codebuddy_factory as Factory);
     m.insert("cursor", cursor_factory as Factory);
     m.insert("gemini-cli", gemini_cli_factory as Factory);
+    m.insert("grok-build", grok_build_factory as Factory);
     m.insert("kimi-code", kimi_code_factory as Factory);
     m.insert("opencode", opencode_factory as Factory);
     m.insert("qwen-code", qwen_code_factory as Factory);
@@ -207,6 +208,9 @@ fn cursor_factory() -> Box<dyn Executor> {
 }
 fn gemini_cli_factory() -> Box<dyn Executor> {
     Box::new(GeminiCliExecutor)
+}
+fn grok_build_factory() -> Box<dyn Executor> {
+    Box::new(GrokBuildExecutor)
 }
 fn kimi_code_factory() -> Box<dyn Executor> {
     Box::new(KimiCodeExecutor)
@@ -926,6 +930,141 @@ impl TurnHandlers for GeminiCliTurn {
                     .and_then(|v| v.as_str())
                     .unwrap_or("gemini turn failed");
                 Some(ParseResult::error(msg))
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// grok-build
+// ---------------------------------------------------------------------------
+
+/// xAI Grok Build (`grok -p --output-format streaming-json`). NDJSON,
+/// stateful: coalesces token-sized text into Claude-like blocks; keeps the
+/// full body for streaming:false.
+pub struct GrokBuildExecutor;
+
+const GROK_SOFT_CHARS: usize = 40;
+const GROK_HARD_CHARS: usize = 80;
+
+fn grok_should_flush(buf: &str) -> bool {
+    if buf.is_empty() {
+        return false;
+    }
+    // Count Unicode scalars (matches JS/Python string length for CJK).
+    let n = buf.chars().count();
+    if n >= GROK_HARD_CHARS {
+        return true;
+    }
+    let last = buf.chars().last().unwrap();
+    if last == '\n' {
+        return true;
+    }
+    if "。！？；.!?;".contains(last) && n >= GROK_SOFT_CHARS {
+        return true;
+    }
+    false
+}
+
+impl Executor for GrokBuildExecutor {
+    fn cli_name(&self) -> &str {
+        "grok"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: curl -fsSL https://x.ai/cli/install.sh | bash"
+    }
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
+        Box::new(GrokBuildTurn {
+            full: Vec::new(),
+            pending: String::new(),
+        })
+    }
+}
+
+struct GrokBuildTurn {
+    full: Vec<String>,
+    pending: String,
+}
+
+impl GrokBuildTurn {
+    fn flush_pending(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        Some(std::mem::take(&mut self.pending))
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnHandlers for GrokBuildTurn {
+    fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            GrokBuildExecutor.cli_name().to_string(),
+            "-p".into(),
+            message.to_string(),
+            "--output-format".into(),
+            "streaming-json".into(),
+            "--always-approve".into(),
+            "--no-auto-update".into(),
+        ];
+        if let Some(model) = env.get("GROK_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("-m".into());
+            args.push(model.to_string());
+        }
+        if !session_id.is_empty() {
+            args.push("-r".into());
+            args.push(session_id.to_string());
+        }
+        args
+    }
+
+    fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+        let etype = event.get("type")?.as_str()?;
+        match etype {
+            "text" => {
+                let data = event.get("data").and_then(|v| v.as_str()).unwrap_or("");
+                if data.is_empty() {
+                    return None;
+                }
+                self.full.push(data.to_string());
+                self.pending.push_str(data);
+                if grok_should_flush(&self.pending) {
+                    let chunk = self.flush_pending()?;
+                    Some(ParseResult::partial(chunk))
+                } else {
+                    None
+                }
+            }
+            "thought" => None,
+            "end" => {
+                let session_id = event
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                let leftover = self.flush_pending();
+                Some(ParseResult {
+                    partial_text: leftover,
+                    final_text: Some(Some(self.full.join(""))),
+                    session_id,
+                    ..Default::default()
+                })
+            }
+            "error" => {
+                let session_id = event
+                    .get("sessionId")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(String::from);
+                self.pending.clear();
+                let msg = event
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("grok reported an error");
+                let mut r = ParseResult::error(msg);
+                r.session_id = session_id;
+                Some(r)
             }
             _ => None,
         }
@@ -1744,7 +1883,7 @@ mod tests {
     // ----- registry completeness -----
 
     #[test]
-    fn all_twelve_executors_registered() {
+    fn all_thirteen_executors_registered() {
         let names = executor_names();
         for expected in [
             "codex",
@@ -1752,6 +1891,7 @@ mod tests {
             "codebuddy",
             "cursor",
             "gemini-cli",
+            "grok-build",
             "kimi-code",
             "opencode",
             "qwen-code",
@@ -1765,13 +1905,13 @@ mod tests {
                 "executor `{expected}` not registered; have: {names:?}"
             );
         }
-        assert_eq!(names.len(), 12, "expected exactly 12 executors, got {}", names.len());
+        assert_eq!(names.len(), 13, "expected exactly 13 executors, got {}", names.len());
     }
 
     #[test]
-    fn lookup_returns_all_twelve() {
-        for name in ["codex", "claude-code", "codebuddy", "cursor", "gemini-cli", "kimi-code",
-            "opencode", "qwen-code", "agy", "aider", "deepseek", "pi"]
+    fn lookup_returns_all_thirteen() {
+        for name in ["codex", "claude-code", "codebuddy", "cursor", "gemini-cli", "grok-build",
+            "kimi-code", "opencode", "qwen-code", "agy", "aider", "deepseek", "pi"]
         {
             assert!(lookup(name).is_some(), "lookup({name}) returned None");
         }
@@ -1853,6 +1993,44 @@ mod tests {
             "type": "message", "role": "assistant", "content": "full", "delta": false
         }));
         assert!(final_evt.unwrap().final_text.is_some());
+    }
+
+    // ----- grok-build -----
+
+    #[test]
+    fn grok_build_args_and_parse() {
+        let mut h = GrokBuildExecutor.make_turn(&TurnCtx::default());
+        let env = HashMap::from([("GROK_MODEL".to_string(), "grok-4.5".to_string())]);
+        let args = h.build_args("hi", "sess-1", &env);
+        assert_eq!(args[0], "grok");
+        assert!(args.iter().any(|a| a == "streaming-json"));
+        assert!(args.iter().any(|a| a == "--always-approve"));
+        assert!(args.iter().any(|a| a == "-r"));
+        assert!(args.iter().any(|a| a == "sess-1"));
+        assert!(args.iter().any(|a| a == "-m"));
+        assert!(args.iter().any(|a| a == "grok-4.5"));
+
+        assert!(h.parse_event(json!({"type": "thought", "data": "x"})).is_none());
+        // Short tokens buffer — no mid-stream partial until end.
+        assert!(h.parse_event(json!({"type": "text", "data": "hello"})).is_none());
+        assert!(h.parse_event(json!({"type": "text", "data": " world"})).is_none());
+        let end = h.parse_event(json!({
+            "type": "end",
+            "sessionId": "sess-1",
+            "stopReason": "EndTurn"
+        })).unwrap();
+        assert_eq!(end.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(end.partial_text.as_deref(), Some("hello world"));
+        assert_eq!(end.final_text, Some(Some("hello world".to_string())));
+    }
+
+    #[test]
+    fn grok_build_coalesces_on_hard_limit() {
+        let mut h = GrokBuildExecutor.make_turn(&TurnCtx::default());
+        // 80 'a's → hard flush.
+        let chunk = "a".repeat(80);
+        let r = h.parse_event(json!({"type": "text", "data": chunk}));
+        assert_eq!(r.unwrap().partial_text.as_deref().map(|s| s.len()), Some(80));
     }
 
     // ----- kimi-code (stateful session id) -----
