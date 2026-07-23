@@ -18,14 +18,14 @@ features:
     title: 5 分钟装好
     description: 装 CLI，指向一个 hub profile，开始和你的 agent 对话。不用跑服务器，不用学框架。
   - icon: 🤖
-    title: 支持 claude、codex、codebuddy
-    description: 你已经在用的 AI CLI 都有开箱即用的 profile。从 Profile Hub 挑一个，跑一行命令。
+    title: 支持你已在用的 CLI
+    description: claude、codex、gemini、grok、cursor、codebuddy 等都有开箱即用的 profile。从 Profile Hub 挑一个，跑一行命令。
   - icon: 🔌
     title: 接入任意消息平台
     description: 微信、Slack、Telegram、Discord——bridge 把 AgentProc 适配到你的用户所在的任何平台。
   - icon: 📜
     title: 开放规范，零锁定
-    description: 一页协议，Node 和 Python 都有参考实现。5 分钟读完，半天能自己实现一遍。
+    description: 一页协议，Node、Python、Rust 都有参考实现。5 分钟读完，半天能自己实现一遍。
 ---
 
 <div class="get-started">
@@ -58,7 +58,7 @@ Homebrew 的 Python 默认不暴露 `pip`。可以跑 `python3 -m ensurepip && p
 
 ```bash
 agentproc --version
-# agentproc 0.10.1 (protocol 0.4)
+# agentproc 0.14.0 (protocol 0.4)
 ```
 
 ## ② 浏览 hub
@@ -67,8 +67,18 @@ agentproc --version
 agentproc hub list
 #   claude-code   official    Connect the claude CLI (Anthropic) as an AgentProc agent
 #   codex         official    Connect the codex CLI (OpenAI) as an AgentProc agent
+#   gemini-cli    official    Connect the gemini CLI (Google) as an AgentProc agent
+#   cursor        official    Connect the Cursor Agent CLI as an AgentProc agent
 #   codebuddy     official    Connect the codebuddy CLI (Tencent) as an AgentProc agent
+#   grok-build    community   Connect the grok CLI (xAI Grok Build) as an AgentProc agent
+#   qwen-code     community   Connect the qwen CLI (Alibaba) as an AgentProc agent
+#   kimi-code     community   Connect the kimi CLI (Moonshot AI) as an AgentProc agent
+#   deepseek      community   Connect the deepseek TUI as an AgentProc agent
+#   aider         community   Connect the aider CLI as an AgentProc agent
+#   opencode      community   Connect the opencode CLI as an AgentProc agent
 #   agy           community   Connect the agy CLI as an AgentProc agent
+#   pi            community   Connect the pi CLI (earendil-works) as an AgentProc agent
+#   recursive     community   Connect the recursive CLI (self-improving Rust agent) as an AgentProc agent
 #   echo-agent    official    Minimal hello-world agent
 ```
 
@@ -166,7 +176,7 @@ handleMessage(process.argv[2] || 'hello', '');
 - **[读协议规范](/zh/spec/)** —— 1 页，定义全部
 - **[Profile Hub](/zh/hub/)** —— 主流 CLI 的开箱即用 profile
 - **[CLI 参考](/zh/cli/)** —— 每个选项和参数
-- **[Python SDK](/zh/sdk/python) / [Node SDK](/zh/sdk/node)** —— 在你 bridge 里嵌入 AgentProc
+- **[Python SDK](/zh/sdk/python) / [Node SDK](/zh/sdk/node) / [Rust SDK](/zh/sdk/rust)** —— 在你 bridge 里嵌入 AgentProc
 - **[示例](/zh/examples/)** —— claude_code bridge、裸脚本等
 - **[故障排除](/zh/guide/troubleshooting)** —— 卡住了？常见错误和确切修法
 

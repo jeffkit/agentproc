@@ -18,14 +18,14 @@ features:
     title: 5-minute setup
     description: Install the CLI, point it at a hub profile, talk to your agent. No servers to run, no frameworks to learn.
   - icon: 🤖
-    title: Works with claude, codex, codebuddy
-    description: Drop-in profiles for the AI CLIs you already use. Pick one from the Profile Hub, run a single command.
+    title: Works with the CLIs you already use
+    description: Drop-in profiles for claude, codex, gemini, grok, cursor, codebuddy and more. Pick one from the Profile Hub, run a single command.
   - icon: 🔌
     title: Any messaging platform
     description: WeChat, Slack, Telegram, Discord — the bridge adapts AgentProc to wherever your users are.
   - icon: 📜
     title: Open spec, zero lock-in
-    description: A 1-page protocol with reference implementations in Node and Python. Read it in 5 minutes, implement it in an afternoon.
+    description: A 1-page protocol with reference implementations in Node, Python and Rust. Read it in 5 minutes, implement it in an afternoon.
 ---
 
 <div class="get-started">
@@ -58,7 +58,7 @@ Verify it works:
 
 ```bash
 agentproc --version
-# agentproc 0.10.1 (protocol 0.4)
+# agentproc 0.14.0 (protocol 0.4)
 ```
 
 ## ② Browse the hub
@@ -67,8 +67,18 @@ agentproc --version
 agentproc hub list
 #   claude-code   official    Connect the claude CLI (Anthropic) as an AgentProc agent
 #   codex         official    Connect the codex CLI (OpenAI) as an AgentProc agent
+#   gemini-cli    official    Connect the gemini CLI (Google) as an AgentProc agent
+#   cursor        official    Connect the Cursor Agent CLI as an AgentProc agent
 #   codebuddy     official    Connect the codebuddy CLI (Tencent) as an AgentProc agent
+#   grok-build    community   Connect the grok CLI (xAI Grok Build) as an AgentProc agent
+#   qwen-code     community   Connect the qwen CLI (Alibaba) as an AgentProc agent
+#   kimi-code     community   Connect the kimi CLI (Moonshot AI) as an AgentProc agent
+#   deepseek      community   Connect the deepseek TUI as an AgentProc agent
+#   aider         community   Connect the aider CLI as an AgentProc agent
+#   opencode      community   Connect the opencode CLI as an AgentProc agent
 #   agy           community   Connect the agy CLI as an AgentProc agent
+#   pi            community   Connect the pi CLI (earendil-works) as an AgentProc agent
+#   recursive     community   Connect the recursive CLI (self-improving Rust agent) as an AgentProc agent
 #   echo-agent    official    Minimal hello-world agent
 ```
 
@@ -166,7 +176,7 @@ Save as `bridge.js`, point it at a profile, and wire it to your messaging platfo
 - **[Read the protocol spec](/spec/)** — 1 page, defines everything
 - **[Profile Hub](/hub/)** — drop-in profiles for popular CLIs
 - **[CLI reference](/cli/)** — every flag and option
-- **[Python SDK](/sdk/python) / [Node SDK](/sdk/node)** — embed AgentProc in your bridge
+- **[Python SDK](/sdk/python) / [Node SDK](/sdk/node) / [Rust SDK](/sdk/rust)** — embed AgentProc in your bridge
 - **[Examples](/examples/)** — claude_code bridge, bare scripts, more
 - **[Troubleshooting](/guide/troubleshooting)** — stuck? Common errors and their fixes
 

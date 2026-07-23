@@ -45,6 +45,7 @@ export default defineConfig({
               { text: 'SDK 概览', link: '/zh/sdk/' },
               { text: 'Python SDK', link: '/zh/sdk/python' },
               { text: 'Node.js SDK', link: '/zh/sdk/node' },
+              { text: 'Rust SDK', link: '/zh/sdk/rust' },
             ],
           },
           {
@@ -110,6 +111,7 @@ export default defineConfig({
             { text: 'Overview', link: '/sdk/' },
             { text: 'Python SDK', link: '/sdk/python' },
             { text: 'Node.js SDK', link: '/sdk/node' },
+            { text: 'Rust SDK', link: '/sdk/rust' },
           ],
         },
       ],

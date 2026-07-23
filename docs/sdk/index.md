@@ -8,6 +8,7 @@ AgentProc SDKs remove the boilerplate of reading the turn object from stdin and 
 |----------|---------|---------|
 | Python | `agentproc` | `pip install agentproc` |
 | Node.js | `agentproc` | `npm install agentproc` |
+| Rust | `agentproc` | `cargo add agentproc` |
 
 ## Without an SDK
 
@@ -38,4 +39,20 @@ createProfile(async ({ message }) => {
 });
 ```
 
+```rust [Rust]
+use agentproc::{run, Profile, RunOptions};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let profile = Profile::from_path("profile.yaml")?;
+    let result = run(&profile, RunOptions::new("hello")).await?;
+    println!("{}", result.reply);
+    Ok(())
+}
+```
+
 :::
+
+- [Python SDK docs](/sdk/python)
+- [Node.js SDK docs](/sdk/node)
+- [Rust SDK docs](/sdk/rust)

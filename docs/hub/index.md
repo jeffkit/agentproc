@@ -49,8 +49,14 @@ Add `--refresh` to force re-fetch from GitHub.
 | [gemini-cli](https://github.com/jeffkit/agentproc/tree/main/hub/gemini-cli) | `gemini` (Google) | official | Python · Node |
 | [grok-build](https://github.com/jeffkit/agentproc/tree/main/hub/grok-build) | `grok` (xAI Grok Build) | community | Python · Node |
 | [cursor](https://github.com/jeffkit/agentproc/tree/main/hub/cursor) | `agent` (Cursor Agent) | official | Python · Node |
-| [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
+| [qwen-code](https://github.com/jeffkit/agentproc/tree/main/hub/qwen-code) | `qwen` (Alibaba) | community | Python · Node |
 | [recursive](https://github.com/jeffkit/agentproc/tree/main/hub/recursive) | `recursive` (self-improving Rust agent) | community | Python · Node |
+| [agy](https://github.com/jeffkit/agentproc/tree/main/hub/agy) | `agy` | community | Python · Node |
+| [pi](https://github.com/jeffkit/agentproc/tree/main/hub/pi) | `pi` (earendil-works) | community | Python · Node |
+| [opencode](https://github.com/jeffkit/agentproc/tree/main/hub/opencode) | `opencode` | community | Python · Node |
+| [aider](https://github.com/jeffkit/agentproc/tree/main/hub/aider) | `aider` | community | Python · Node |
+| [kimi-code](https://github.com/jeffkit/agentproc/tree/main/hub/kimi-code) | `kimi` (Moonshot AI) | community | Python · Node |
+| [deepseek](https://github.com/jeffkit/agentproc/tree/main/hub/deepseek) | `deepseek` (DeepSeek TUI) | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | (no CLI) | official | Python · Node · Bash |
 
 `tested`:
@@ -65,12 +71,21 @@ Add `--refresh` to force re-fetch from GitHub.
 ```bash
 # See what's available
 agentproc hub list
-#   claude-code     official    Connect the claude CLI as an AgentProc agent...
-#   codex           official    Connect the codex CLI as an AgentProc agent...
-#   codebuddy       official    Connect the codebuddy CLI as an AgentProc agent...
-#   agy             community   Connect the agy CLI as an AgentProc agent...
-#   recursive       community   Connect the recursive CLI as an AgentProc agent...
-#   echo-agent      official    Minimal AgentProc hello-world agent...
+#   claude-code   official    Connect the claude CLI (Anthropic) as an AgentProc agent
+#   codex         official    Connect the codex CLI (OpenAI) as an AgentProc agent
+#   gemini-cli    official    Connect the gemini CLI (Google) as an AgentProc agent
+#   cursor        official    Connect the Cursor Agent CLI as an AgentProc agent
+#   codebuddy     official    Connect the codebuddy CLI (Tencent) as an AgentProc agent
+#   grok-build    community   Connect the grok CLI (xAI Grok Build) as an AgentProc agent
+#   qwen-code     community   Connect the qwen CLI (Alibaba) as an AgentProc agent
+#   kimi-code     community   Connect the kimi CLI (Moonshot AI) as an AgentProc agent
+#   deepseek      community   Connect the deepseek TUI as an AgentProc agent
+#   aider         community   Connect the aider CLI as an AgentProc agent
+#   opencode      community   Connect the opencode CLI as an AgentProc agent
+#   agy           community   Connect the agy CLI as an AgentProc agent
+#   pi            community   Connect the pi CLI (earendil-works) as an AgentProc agent
+#   recursive     community   Connect the recursive CLI (self-improving Rust agent) as an AgentProc agent
+#   echo-agent    official    Minimal hello-world agent
 
 # Read its docs
 agentproc hub show claude-code
