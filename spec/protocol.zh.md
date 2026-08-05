@@ -270,7 +270,7 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 | 字段 | 类型 | 描述 |
 |-------|------|-------------|
 | `session_name` | string | 人类可读的会话名。缺省时默认为 `"default"`。 |
-| `attachments` | array | 本次 turn 的附件列表。每个元素是一个对象，至少含 `kind`（字符串，例如 `"image"`、`"file"`）和 `url`（字符串）；bridge **MAY** 包含额外字段（例如 `filename`、`mime_type`、`size`）。缺省或 `[]` = 本次 turn 无附件。不再有单独的单附件便利字段——`attachments` 是唯一的附件通道。 |
+| `attachments` | array | 本次 turn 的附件列表。每个元素 **MUST** 是含 `kind`（字符串）和 `url`（字符串）的对象；bridge 在已知时 **SHOULD** 同时附带 `filename` / `mime_type` / `size`，agent **MUST** 忽略未知的可选字段。`kind` 受控词表为 `image` / `file` / `audio` / `video` —— 未知值落回 `"other"`，bridge **SHOULD** 记录 warning。`url` **MUST** 用以下 scheme 之一：`file://`、`http://`、`https://`、`data:` —— 其他 scheme（含 `ftp://` / `javascript:`）bridge **MUST** warn 并丢弃，避免异常上游把 URL 偷塞进 agent prompt。相对 `file://` 路径按 profile 的 `cwd` 解析。缺省或 `[]` = 本次 turn 无附件。不再有单独的单附件便利字段——`attachments` 是唯一的附件通道。 |
 | `permission` | boolean | 当 profile 设了 `permission: true` 且 bridge 支持可选 permission 通道时为 `true`；否则缺省或 `false`。能发出 permission 请求的 agent **MUST** 在依赖 turn 中批准前检查此项——缺省意味着只能自动批准 / skip-permissions。 |
 
 profile `env` 块中声明的自定义变量通过环境注入，而非 turn 对象。
