@@ -22,6 +22,7 @@ See [PERMISSIONS.md](./PERMISSIONS.md) for which CLIs support mid-turn tool auth
 | [aider](./aider/) | `aider` | community | Python · Node |
 | [kimi-code](./kimi-code/) | `kimi` (Moonshot AI) | community | Python · Node |
 | [deepseek](./deepseek/) | `deepseek` (DeepSeek TUI) | community | Python · Node |
+| [dsh](./dsh/) | `dsh` (DeepSeek Harness headless) | community | Python · Node |
 | [echo-agent](./echo-agent/) | (no CLI — hello world) | official | Python · Node · Bash |
 
 ## Coverage vs ACP Registry

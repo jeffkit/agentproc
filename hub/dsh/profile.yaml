@@ -1,0 +1,58 @@
+name: dsh
+description: DeepSeek Harness (dsh) headless profile as an AgentProc agent — a full tool-using agent runtime, one-shot, plain text
+cli: dsh
+cli_install: |
+  # Requires Node.js >= 20:
+  #   npm install -g @deepseek-ai/dsh
+  # Authenticate (either way works):
+  #   export DEEPSEEK_API_KEY=...          # or store it via the web UI:
+  #   dsh --profile web                    # Models page writes the key once,
+  #                                       # headless picks it up from storage
+agentproc:
+  command: node
+  args: ["{{PROFILE_DIR}}/bridge.js"]
+  # cwd is intentionally left unset. `agentproc hub run` defaults it to your
+  # current directory, so the agent works on whatever project you are in.
+  timeout_secs: 1800        # headless runs a full agent turn (tools, bash);
+                            # give it room — override per-run if needed
+  streaming: false          # dsh headless prints the final assistant message
+                            # only; there is no partial stream to forward
+  env:
+    DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
+    # Unattended posture is bridge-enforced: the bridge defaults
+    # DSH_PERMISSION_MODE to danger-full-access when unset (same convention as
+    # the claude-code profile's --dangerously-skip-permissions default).
+    # Set DSH_PERMISSION_MODE here to override (workspace-write / read-only).
+    DSH_PERMISSION_MODE: "${DSH_PERMISSION_MODE}"
+    DSH_TOOLS_MODE: "${DSH_TOOLS_MODE}"
+  env_allowlist: [DEEPSEEK_API_KEY, DSH_PERMISSION_MODE, DSH_TOOLS_MODE]
+tested: community
+maintainer: kong
+tags: [coding, ai, deepseek, agent, harness]
+notes: |
+  Uses `dsh --profile headless "<task>"` (the DeepSeek Harness one-shot
+  bundle: coding persona, bash/fs/search tools, sandbox, persisted session
+  log). stdout is the final assistant message; errors go to stderr with a
+  non-zero exit code. Verified end-to-end against dsh 0.1.0-rc.6.
+
+  Stateless on the wire: headless creates one fresh persisted Agent per run
+  and does not expose --resume, so no session_id is stamped on events. The
+  underlying session IS persisted (JSONL under ~/.dsh/sessions) and can be
+  inspected/replayed with `dsh --profile tui --resume <session>` — the id
+  just cannot be learned from the process output.
+
+  No mid-turn tool authorization: dsh headless has no stdio approval channel,
+  so `permission: true` is not supported. The bridge defaults
+  DSH_PERMISSION_MODE=danger-full-access for unattended runs (auto-approve);
+  override to workspace-write / read-only to lean on the sandbox instead.
+
+  Attachments are appended to the task text as reference URLs — dsh's web
+  tool may fetch public URLs; local file paths are not readable this way.
+
+  Tool authorization posture, in one line:
+    DSH_PERMISSION_MODE=danger-full-access   auto-approve everything (default)
+    DSH_PERMISSION_MODE=workspace-write      sandboxed writes, "ask" policy —
+                                             an ask with no UI may stall or
+                                             deny; prefer read-only for strict
+                                             unattended runs
+    DSH_PERMISSION_MODE=read-only            strictest unattended mode

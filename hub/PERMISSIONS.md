@@ -16,6 +16,7 @@ programmatic channel the hub bridge can translate.
 | **cursor** | `agent` | (profile-specific) | **Unknown** | Not surveyed in depth; treat as auto-approve until a stdio protocol is documented. |
 | **qwen-code / opencode / aider / kimi / deepseek / …** | various | yolo / yes-always / exec | **No or N/A** | One-shot / TUI / no mid-turn stdio approval suitable for AgentProc. Stay on auto-approve. |
 | **recursive** | `recursive` | `--permission-mode auto` | External hooks only | Can set `RECURSIVE_PERMISSION_MODE=default` for external hooks — not AgentProc frames. |
+| **dsh** | `dsh` | bridge sets `DSH_PERMISSION_MODE=danger-full-access` | **No** | DeepSeek Harness headless has no stdio approval channel. dsh's default "ask" policy has no UI in headless; the hub bridge auto-sets `danger-full-access` for unattended runs. Override via env to `read-only`/`workspace-write` to lean on dsh's sandbox. |
 | **agy / echo-agent** | — | skip / n/a | No | |
 
 ## Recommendation
