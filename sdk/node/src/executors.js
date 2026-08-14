@@ -486,6 +486,32 @@ const deepseek = {
 };
 
 // ---------------------------------------------------------------------------
+// dsh
+// ---------------------------------------------------------------------------
+// DeepSeek Harness (`dsh --profile headless <task>`). Plain text.
+// Unlike the `deepseek` executor (a stateless chat exec), dsh headless boots a
+// one-shot full agent runtime: coding persona, bash/fs/search tools, sandbox,
+// and a persisted session log. stdout is the last non-empty assistant
+// message; errors go to stderr with a non-zero exit.
+//
+// Stateless on the wire: headless mints a fresh persisted Agent per run and
+// exposes no --resume, so no session id can be extracted (or resumed) by the
+// contract. Callers driving tools unattended should set
+// DSH_PERMISSION_MODE=danger-full-access in the profile env — dsh's own
+// default is an "ask" approval policy with no UI to answer it in headless
+// (the hub bridge applies the same default).
+
+const dsh = {
+  cliName: 'dsh',
+  installHint: 'Install: npm install -g @deepseek-ai/dsh',
+  plain: true,
+
+  buildArgs(message) {
+    return ['dsh', '--profile', 'headless', message];
+  },
+};
+
+// ---------------------------------------------------------------------------
 // grok-build
 // ---------------------------------------------------------------------------
 // xAI Grok Build (`grok -p --output-format streaming-json`). NDJSON.
@@ -602,6 +628,7 @@ const EXECUTORS = {
   'agy': agy,
   'aider': aider,
   'deepseek': deepseek,
+  'dsh': dsh,
   'pi': pi,
 };
 

@@ -28,7 +28,7 @@ describe('EXECUTORS registry', () => {
   const EXPECTED_NAMES = [
     'claude-code', 'codebuddy', 'codex', 'cursor',
     'gemini-cli', 'grok-build', 'kimi-code', 'opencode', 'qwen-code',
-    'agy', 'aider', 'deepseek', 'pi',
+    'agy', 'aider', 'deepseek', 'dsh', 'pi',
   ];
 
   test('all expected executors are registered', () => {
@@ -57,7 +57,7 @@ describe('EXECUTORS registry', () => {
   });
 
   test('plain executors have plain: true', () => {
-    const plainNames = ['agy', 'aider', 'deepseek', 'pi'];
+    const plainNames = ['agy', 'aider', 'deepseek', 'dsh', 'pi'];
     for (const name of plainNames) {
       assert.strictEqual(EXECUTORS[name].plain, true, `${name}: expected plain: true`);
     }
@@ -146,6 +146,22 @@ describe('buildArgs — deepseek (plain, no session)', () => {
     assert.ok(!joined.includes('session'));
     assert.ok(!joined.includes('conversation'));
     assert.ok(args.includes('deepseek'));
+  });
+});
+
+describe('buildArgs — dsh (plain, no session)', () => {
+  const { buildArgs } = EXECUTORS['dsh'];
+
+  test('boots the headless profile with the message as task', () => {
+    const args = buildArgs('run the tests', '', {});
+    assert.deepStrictEqual(args, ['dsh', '--profile', 'headless', 'run the tests']);
+  });
+
+  test('does not include any session flag', () => {
+    const args = buildArgs('hello', 'some-session', {});
+    const joined = args.join(' ');
+    assert.ok(!joined.includes('--resume'));
+    assert.ok(!joined.includes('session'), 'dsh headless has no session resume');
   });
 });
 
