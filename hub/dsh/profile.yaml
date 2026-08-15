@@ -35,11 +35,12 @@ notes: |
   log). stdout is the final assistant message; errors go to stderr with a
   non-zero exit code. Verified end-to-end against dsh 0.1.0-rc.6.
 
-  Stateless on the wire: headless creates one fresh persisted Agent per run
-  and does not expose --resume, so no session_id is stamped on events. The
-  underlying session IS persisted (JSONL under ~/.dsh/sessions) and can be
-  inspected/replayed with `dsh --profile tui --resume <session>` — the id
-  just cannot be learned from the process output.
+  Session continuity is feature-detected: when the installed dsh advertises
+  --resume + --print-session-id in `--profile headless --help`, the bridge
+  stamps session_id on events and resumes the persisted session on later
+  turns (true multi-turn for IM/email bridges). Older builds stay stateless
+  on the wire; the underlying sessions are always persisted as JSONL under
+  ~/.dsh/sessions.
 
   No mid-turn tool authorization: dsh headless has no stdio approval channel,
   so `permission: true` is not supported. The bridge defaults

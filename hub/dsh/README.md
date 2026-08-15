@@ -44,7 +44,7 @@ agentproc hub run dsh -p "what is this codebase?"
 |---|---|
 | Reply body | Final assistant message (plain stdout) |
 | Streaming (`partial`) | ✗ — headless prints the result once, at the end |
-| Session continuity (`session_id`) | ✗ on the wire — headless mints a fresh Agent per run and exposes no `--resume` |
+| Session continuity (`session_id`) | ◐ feature-detected — multi-turn when the installed dsh supports `--resume` + `--print-session-id` (bridge stamps and resumes `session_id` automatically); older builds stay stateless |
 | Tools | ✓ bash / fs / fs-search / skills (agent-grade turn against your `cwd`) |
 | Attachments | Partial — appended to the task text as reference URLs; dsh's web tool may fetch public URLs |
 | Mid-turn approval (`permission: true`) | ✗ — no stdio approval channel in headless (see below) |
@@ -82,10 +82,14 @@ prefer `read-only` for strict unattended runs.
 
 ## Limitations and upgrade paths
 
-- **Stateless turns.** Multi-turn continuity must be maintained externally via
-  the AgentProc SDK's `load_history` / `append_history` helpers. If dsh later
-  adds native session resume to headless (or prints the session id), this
-  bridge can stamp `session_id` on events — one small change in `bridge.js`.
+- **Stateless on old dsh only.** The bridge feature-detects session
+  continuity via `dsh --profile headless --help`: with `--resume` +
+  `--print-session-id` present (upstream PR pending; a fork branch carrying
+  the feature works today), it stamps `session_id` on every event and
+  resumes the persisted session on later turns — verified end-to-end with a
+  live model (cross-turn memory holds, id survives error turns). Without
+  those flags it stays stateless; use the AgentProc SDK's `load_history` /
+  `append_history` helpers for continuity on such builds.
 - **No mid-turn approval.** If dsh grows a stdio approval channel (its web
   profile already has an approval service behind a capability seam), the
   bridge can translate it to `permission_request` / `permission_response`
