@@ -52,6 +52,7 @@ def build_args(message: str, session_id: str, env) -> list[str]:
     args = [
         CLI_NAME, "-p", message,
         "--output-format", "stream-json",
+        "--verbose",
         "--dangerously-skip-permissions",
     ]
     disallow = env.get("CLAUDE_DISALLOW_TOOLS", "AskUserQuestion")

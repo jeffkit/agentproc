@@ -63,6 +63,8 @@ const claudeCode = {
     const args = [
       'claude', '-p', message,
       '--output-format', 'stream-json',
+      // claude CLI requires --verbose with --print + stream-json (parity with rust SDK)
+      '--verbose',
       '--dangerously-skip-permissions',
     ];
     const disallow = (env.CLAUDE_DISALLOW_TOOLS || 'AskUserQuestion').trim();

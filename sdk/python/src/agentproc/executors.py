@@ -53,6 +53,8 @@ def _claude_code_build_args(message: str, session_id: str, env: Dict[str, str]) 
     args = [
         "claude", "-p", message,
         "--output-format", "stream-json",
+        # claude CLI 硬要求：--print + stream-json 必须配 --verbose（rust SDK 已修，此处补齐）
+        "--verbose",
         "--dangerously-skip-permissions",
     ]
     disallow = env.get("CLAUDE_DISALLOW_TOOLS", "AskUserQuestion").strip()

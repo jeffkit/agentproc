@@ -35,6 +35,7 @@ function buildArgs(message, sessionId, env) {
   const args = [
     CLI_NAME, '-p', message,
     '--output-format', 'stream-json',
+    '--verbose',
     '--dangerously-skip-permissions',
   ];
   const disallow = (env.CLAUDE_DISALLOW_TOOLS || 'AskUserQuestion').trim();
