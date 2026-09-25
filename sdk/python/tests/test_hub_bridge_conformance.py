@@ -56,11 +56,16 @@ def _identity_parse_event(event: dict) -> "EventResult | None":
         if "text" in event:
             text = event.get("text")
             kwargs["final_text"] = text if isinstance(text, str) else ""
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            kwargs["usage"] = usage
         return EventResult(**kwargs) if kwargs else None
     if t == "error":
+        usage = event.get("usage")
         return EventResult(
             error=event.get("message", "") if isinstance(event.get("message"), str) else "",
             session_id=session_id,
+            **({"usage": usage} if isinstance(usage, dict) else {}),
         )
     return None
 

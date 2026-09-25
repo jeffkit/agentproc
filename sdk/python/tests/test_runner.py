@@ -75,6 +75,16 @@ class TestClassifyLine:
             "kind": "result", "value": "ok", "session_id": "abc"
         }
 
+    def test_result_with_usage(self):
+        assert classify_line('{"type":"result","text":"ok","usage":{"input_tokens":10}}') == {
+            "kind": "result", "value": "ok", "usage": {"input_tokens": 10}
+        }
+
+    def test_result_non_object_usage_dropped(self):
+        assert classify_line('{"type":"result","text":"ok","usage":"oops"}') == {
+            "kind": "result", "value": "ok"
+        }
+
     def test_result_missing_text(self):
         assert classify_line('{"type":"result"}') == {"kind": "result", "value": ""}
 
@@ -84,6 +94,11 @@ class TestClassifyLine:
     def test_error_with_session_id(self):
         assert classify_line('{"type":"error","message":"boom","session_id":"s1"}') == {
             "kind": "error", "value": "boom", "session_id": "s1"
+        }
+
+    def test_error_with_usage(self):
+        assert classify_line('{"type":"error","message":"boom","usage":{"input_tokens":3}}') == {
+            "kind": "error", "value": "boom", "usage": {"input_tokens": 3}
         }
 
     def test_permission_request(self):
@@ -503,6 +518,34 @@ class TestRunEndToEnd:
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.reply == "line 1\nline 2\nline 3"
+
+    def test_usage_on_result_captured(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "result", "text": "hello",
+                    "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}) + "\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.reply == "hello"
+        assert r.usage == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+
+    def test_usage_on_error_captured(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "error", "message": "rate limited", "usage": {"input_tokens": 3}}) + "\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.error == "rate limited"
+        assert r.usage == {"input_tokens": 3}
+
+    def test_no_usage_stays_none(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "result", "text": "plain"}) + "\n"
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.reply == "plain"
+        assert r.usage is None
 
     def test_malformed_lines_ignored(self, agent_script):
         agent = agent_script(

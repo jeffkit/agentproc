@@ -28,7 +28,7 @@ def parse_event(event: dict) -> EventResult | None: ...
 ```js
 // Node
 function buildArgs(message, sessionId, env) { return [...]; }
-function parseEvent(event) { return { partialText?, finalText?, sessionId?, error? } | null; }
+function parseEvent(event) { return { partialText?, finalText?, sessionId?, error?, usage? } | null; }
 ```
 
 `run_bridge` / `runBridge` then: read the turn from stdin, spawn the CLI built
@@ -36,7 +36,10 @@ by `build_args`, call `parse_event` on each stdout NDJSON line, and emit
 AgentProc NDJSON events on stdout. A final `{"type":"result"}` event is always
 emitted at the end (the `final_text`, or the last `partial_text` as fallback) —
 that is the reply body. `session_id` rides on partial / result / error events
-(not a separate session event).
+(not a separate session event). `usage` (result / error only) is an opaque
+plain-object pass-through: the first non-null usage captured rides on the
+terminal result / error event so hosts can do token/cost accounting without
+parsing the CLI stream.
 
 That keeps each bridge under ~50 lines. See `gemini-cli/bridge.py` for a
 minimal example.

@@ -20,7 +20,9 @@ A profile supplies:
   - ``cli_install_hint`` — short install instruction shown on ENOENT
   - ``build_args(message, session_id, env) -> list[str]``
   - ``parse_event(event) -> EventResult | None``
-      where EventResult has any of: partial_text, final_text, session_id, error
+      where EventResult has any of: partial_text, final_text, session_id, error,
+      usage (result/error only; opaque plain-object pass-through — the first
+      non-null usage captured rides on the terminal result / error event)
 
 This module handles turn parsing, subprocess lifecycle, line reading, JSON
 decoding, exit-code mapping, and the NDJSON emission contract. Each bridge
@@ -48,6 +50,9 @@ class EventResult:
     final_text: Optional[str] = None
     session_id: Optional[str] = None
     error: Optional[str] = None
+    # Opaque plain-object token/cost stats (result/error only). The first
+    # non-null usage captured rides on the terminal result / error event.
+    usage: Optional[Dict[str, Any]] = None
 
 
 def _emit_obj(obj: Dict[str, Any]) -> None:
@@ -69,17 +74,25 @@ def emit_partial(text: str, session_id: Optional[str] = None) -> None:
     _emit_obj(obj)
 
 
-def emit_result(text: str, session_id: Optional[str] = None) -> None:
+def _valid_usage(usage: Any) -> bool:
+    return usage is not None and isinstance(usage, dict)
+
+
+def emit_result(text: str, session_id: Optional[str] = None, usage: Optional[Dict[str, Any]] = None) -> None:
     obj: Dict[str, Any] = {"type": "result", "text": text}
     if session_id:
         obj["session_id"] = session_id
+    if _valid_usage(usage):
+        obj["usage"] = usage
     _emit_obj(obj)
 
 
-def emit_error(text: str, session_id: Optional[str] = None) -> None:
+def emit_error(text: str, session_id: Optional[str] = None, usage: Optional[Dict[str, Any]] = None) -> None:
     obj: Dict[str, Any] = {"type": "error", "message": text}
     if session_id:
         obj["session_id"] = session_id
+    if _valid_usage(usage):
+        obj["usage"] = usage
     _emit_obj(obj)
 
 
@@ -156,6 +169,7 @@ def run_bridge(
     last_final_text: Optional[str] = None
     last_partial_text: Optional[str] = None
     error_message: Optional[str] = None
+    usage: Optional[Dict[str, Any]] = None
 
     assert proc.stdout is not None
     for raw in proc.stdout:
@@ -177,6 +191,8 @@ def run_bridge(
             found_session_id = result.session_id
         if result.error:
             error_message = result.error
+        if usage is None and _valid_usage(result.usage):
+            usage = result.usage
         if result.partial_text:
             # Always emit partials; the runner forwards them only when the
             # profile's streaming is true (and drops them otherwise).
@@ -191,7 +207,7 @@ def run_bridge(
     if error_message:
         # Persist the session on the error event — the error terminates this
         # turn but does not invalidate the session.
-        emit_error(error_message, session_id=found_session_id)
+        emit_error(error_message, session_id=found_session_id, usage=usage)
         return 1
 
     reply_text = last_final_text if last_final_text is not None else last_partial_text
@@ -205,10 +221,10 @@ def run_bridge(
         msg = f"{cli_name} exited with {proc.returncode}"
         if stderr_output.strip():
             msg += f": {stderr_output.strip()[:500]}"
-        emit_error(msg, session_id=found_session_id)
+        emit_error(msg, session_id=found_session_id, usage=usage)
         return 1
 
-    emit_result(reply_text or "", session_id=found_session_id)
+    emit_result(reply_text or "", session_id=found_session_id, usage=usage)
     return 0
 
 

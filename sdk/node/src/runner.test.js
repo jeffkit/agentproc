@@ -86,6 +86,27 @@ describe('classifyLine', () => {
     );
   });
 
+  test('result with plain-object usage carries usage', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"result","text":"ok","usage":{"input_tokens":10}}'),
+      { kind: 'result', value: 'ok', usage: { input_tokens: 10 } },
+    );
+  });
+
+  test('result with non-object usage drops usage', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"result","text":"ok","usage":"oops"}'),
+      { kind: 'result', value: 'ok' },
+    );
+  });
+
+  test('error with plain-object usage carries usage', () => {
+    assert.deepStrictEqual(
+      classifyLine('{"type":"error","message":"boom","usage":{"input_tokens":3}}'),
+      { kind: 'error', value: 'boom', usage: { input_tokens: 3 } },
+    );
+  });
+
   test('legacy {"type":"text"} → malformed', () => {
     assert.deepStrictEqual(
       classifyLine('{"type":"text","text":"hello world"}'),
@@ -392,6 +413,43 @@ describe('run() — end-to-end', () => {
     assert.strictEqual(r.sessionId, '');
     assert.strictEqual(r.error, '');
     assert.strictEqual(r.exitCode, 0);
+  });
+
+  test('usage on result event → RunResult.usage captured', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"result","text":"hello","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'hello');
+    assert.deepStrictEqual(r.usage, { input_tokens: 10, output_tokens: 5, total_tokens: 15 });
+  });
+
+  test('usage on error event → RunResult.usage captured', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"error","message":"rate limited","usage":{"input_tokens":3}}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.error, 'rate limited');
+    assert.deepStrictEqual(r.usage, { input_tokens: 3 });
+  });
+
+  test('no usage on events → RunResult.usage stays null', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\necho \'{"type":"result","text":"plain"}\'\n');
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'plain');
+    assert.strictEqual(r.usage, null);
+  });
+
+  test('non-object usage ignored → RunResult.usage stays null', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"result","text":"ok","usage":"oops"}\'\n'
+    );
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'ok');
+    assert.strictEqual(r.usage, null);
   });
 
   // ----- inbound session_id (resume) scenarios -----

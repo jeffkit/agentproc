@@ -32,12 +32,17 @@ function identityParseEvent(event) {
     const out = {};
     if (sessionId !== undefined) out.sessionId = sessionId;
     if ('text' in event) out.finalText = typeof event.text === 'string' ? event.text : '';
+    if (event.usage !== null && typeof event.usage === 'object' && !Array.isArray(event.usage)) {
+      out.usage = event.usage;
+    }
     return Object.keys(out).length ? out : null;
   }
   if (t === 'error') {
     return {
       error: typeof event.message === 'string' ? event.message : '',
       ...(sessionId !== undefined ? { sessionId } : {}),
+      ...((event.usage !== null && typeof event.usage === 'object' && !Array.isArray(event.usage))
+        ? { usage: event.usage } : {}),
     };
   }
   return null;

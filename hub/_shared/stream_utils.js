@@ -18,10 +18,14 @@
  *
  * A profile supplies:
  *
- *   - `cliName`         e.g. "claude", "codex", "gemini"
- *   - `cliInstallHint`  short install instruction shown on ENOENT
- *   - `buildArgs(message, sessionId, env) -> string[]`
- *   - `parseEvent(event) -> { partialText?, finalText?, sessionId?, error? } | null`
+ *   - cliName         e.g. "claude", "codex", "gemini"
+ *   - cliInstallHint  short install instruction shown on ENOENT
+ *   - buildArgs(message, sessionId, env) -> string[]
+ *   - parseEvent(event) -> { partialText?, finalText?, sessionId?, error?, usage? } | null
+ *
+ * `usage` (result/error only) is an opaque plain-object pass-through: the
+ * first non-null usage captured rides on the terminal result / error event
+ * so hosts can do token/cost accounting without parsing the CLI stream.
  *
  * This module handles turn parsing, subprocess lifecycle, line reading, JSON
  * decoding, exit-code mapping, and the NDJSON emission contract.
@@ -49,19 +53,24 @@ function emitPartial(text, sessionId) {
 function emitResult(text, sessionId, usage) {
   const obj = { type: 'result', text };
   if (sessionId) obj.session_id = sessionId;
-  if (usage !== null && typeof usage === 'object' && !Array.isArray(usage)) obj.usage = usage;
+  if (validUsage(usage)) obj.usage = usage;
   emitObj(obj);
 }
 
 function emitError(text, sessionId, usage) {
   const obj = { type: 'error', message: text };
   if (sessionId) obj.session_id = sessionId;
-  if (usage !== null && typeof usage === 'object' && !Array.isArray(usage)) obj.usage = usage;
+  if (validUsage(usage)) obj.usage = usage;
   emitObj(obj);
 }
 
 function hasAnyAttachment(turn) {
   return Array.isArray(turn.attachments) && turn.attachments.length > 0;
+}
+
+/** Plain-object guard for the opaque usage pass-through. */
+function validUsage(usage) {
+  return usage !== null && typeof usage === 'object' && !Array.isArray(usage);
 }
 
 function readTurn() {
@@ -124,6 +133,7 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
   let lastFinalText = null;
   let lastPartialText = null;
   let errorMessage = null;
+  let usage = null;
 
   for await (const raw of rl) {
     const line = String(raw).trim();
@@ -138,6 +148,7 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
     // stamps the partial (runner first-non-empty wins if it arrives later).
     if (result.sessionId) foundSessionId = result.sessionId;
     if (result.error) errorMessage = result.error;
+    if (!usage && validUsage(result.usage)) usage = result.usage;
     if (result.partialText) {
       // Always emit partials; the runner forwards them only when the profile's
       // streaming is true (and drops them otherwise).
@@ -152,7 +163,7 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
   const code = await new Promise(resolve => child.on('close', resolve));
 
   if (errorMessage) {
-    emitError(errorMessage, foundSessionId);
+    emitError(errorMessage, foundSessionId, usage);
     process.exit(1);
   }
 
@@ -167,11 +178,11 @@ async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn 
     let msg = `${cliName} exited with ${code}`;
     const s = stderrBuf.trim();
     if (s) msg += `: ${s.slice(0, 500)}`;
-    emitError(msg, foundSessionId);
+    emitError(msg, foundSessionId, usage);
     process.exit(1);
   }
 
-  emitResult(replyText || '', foundSessionId);
+  emitResult(replyText || '', foundSessionId, usage);
   process.exit(0);
 }
 
