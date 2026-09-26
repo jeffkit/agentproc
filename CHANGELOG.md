@@ -4,10 +4,31 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.14.0`; the Rust crate is on its own track currently `0.11.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.15.0`; the Rust crate is on its own track currently `0.11.1`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 
+### Spec / SDK 0.15.0 — unreleased
+
+**Hub: `dsh` profile upgraded to the `--json` run-event stream (DeepSeek Harness ≥ 0.1.6-alpha.1)**
+
+- `hub/dsh/bridge.js` / `bridge.py`: when `dsh --profile headless --help` advertises `--json`, the bridge runs `dsh --profile headless --json -- <task>` and translates the newline-delimited run events — the opening `session` frame stamps `session_id`, `text` frames forward as `partial` events (commit-point granularity, `thinking` stays off the wire like the claude-code profile), `final` + exit 0 produce `result`, and `error` frames or error-reasoned turns produce `error`. Success is frame-driven: dsh's launcher maps SIGTERM to exit 0 and a turn that ends in an error reason still writes `final`, so the exit code alone is not a completion signal. Legacy builds (no `--json`) keep the plain one-shot fallback; the previous `--resume`/`--print-session-id` detection is removed — pristine upstream never shipped those flags.
+- Session continuity is now native: builds advertising `--session-id` adopt the persisted Session on later turns (true multi-turn for IM/email bridges). Upstream adoption is strict — unknown id, cwd mismatch, subagent/fork, and agent-preset sessions are refused; refusals surface as error events carrying the session id.
+- Usage: per-step `step_end` usage buckets are summed across the turn and mapped onto agentproc's recommended keys. dsh buckets are disjoint (`inputTokens` is uncached input only), so the bridge folds `cacheReadTokens`/`cacheWriteTokens` into the inclusive `input_tokens`; `output_tokens` / `total_tokens` / `cache_read_input_tokens` / `cache_creation_input_tokens` / `reasoning_tokens` map 1:1. Usage rides on both `result` and `error` terminal events.
+- `profile.yaml`: `streaming: true`; install note updated to Node ≥ 22.18 / ≥ 24.2 (the launcher entry reads `import.meta.main`; older Nodes exit silently) or Bun.
+- Tests: `hub/dsh/bridge.test.js` rewritten (15 cases — pure mapping/detection plus PATH-shim integration for partials, resume argv, error frame, final-with-error-exit, exit-0-without-final, timeout, and legacy fallback); Python parity added as `TestDshBridge` in `sdk/python/tests/test_bridges.py`.
+- Verified end-to-end against dsh 0.1.7-rc.2: streamed tool turn, two-turn session resume with cross-turn memory, usage mapping checked against real token counts, and the unknown-session error path.
+- Docs: `hub/dsh/README.md` rewritten (capability table, success semantics, session-adoption rules, usage mapping table); `docs/hub/index.md` + `docs/zh/hub/index.md` and `AGENTS.md` now list the profile.
+
+**fix(sdk/python): executor in-process path forwards `on_protocol_line` — aligning the `run_via_executor` contract with the spawn path.**
+
+**feat(hub): the shared `run_bridge` engine captures a terminal event's `usage` and forwards it on `result`/`error` — closing the CLI→bridge hop for NDJSON profiles (issue #2).**
+
+**fix(hub/claude-code): the unattended argv now includes `--verbose`, which Claude Code's CLI requires for `--print --output-format stream-json`.**
+
+**Versions.** Python and Node SDK packages `0.14.0` → `0.15.0`. Rust crate stays `0.11.1`. Wire protocol stays `0.4`.
+
+---
 ### Spec / SDK 0.14.0 — 2026-07-16
 
 **New: `grok-build` executor + hub profile (xAI grok CLI)**

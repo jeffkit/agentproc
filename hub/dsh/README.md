@@ -2,12 +2,13 @@
 
 Wraps the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) CLI (`dsh`) as an AgentProc agent, via its **headless profile** — a one-shot, full agent runtime with a coding persona, bash/fs/search tools, and a sandbox. Unlike the `deepseek` TUI profile (which shells out to a stateless chat exec), this profile runs a complete harness turn: the agent can read your project, run commands, and answer with the results.
 
-> Verified end-to-end against `dsh` 0.1.0-rc.6 (plain reply, error path, and a real bash tool-use turn through the agentproc runner). dsh is a developer preview — re-verify on major bumps.
+> Verified end-to-end against `dsh` 0.1.7-rc.2 (streamed reply with partials, a real bash tool-use turn, two-turn session resume with cross-turn memory, usage reporting, and the unknown-session error path, through the agentproc bridge). dsh is a developer preview — re-verify on major bumps.
 
 ## Quick test (zero config)
 
 ```bash
-# 1. Install the dsh CLI (Node.js >= 20):
+# 1. Install the dsh CLI (Node.js >= 22.18 / >= 24.2, or Bun — the launcher
+#    entry reads import.meta.main):
 npm install -g @deepseek-ai/dsh
 
 # 2. Authenticate (either way works):
@@ -42,17 +43,55 @@ agentproc hub run dsh -p "what is this codebase?"
 
 | Capability | Status |
 |---|---|
-| Reply body | Final assistant message (plain stdout) |
-| Streaming (`partial`) | ✗ — headless prints the result once, at the end |
-| Session continuity (`session_id`) | ◐ feature-detected — multi-turn when the installed dsh supports `--resume` + `--print-session-id` (bridge stamps and resumes `session_id` automatically); older builds stay stateless |
+| Reply body | Final assistant message (`result`) |
+| Streaming (`partial`) | ✓ feature-detected — dsh ≥ 0.1.6-alpha.1 (`--json` in `--help`) streams committed text as partials; commit-point granularity, not per-token |
+| Session continuity (`session_id`) | ✓ feature-detected — with `--session-id` advertised, the bridge stamps the id from the opening frame and resumes the persisted Session on later turns; older builds stay stateless |
+| Usage | ✓ on `result`/`error` — dsh ≥ 0.1.6-alpha.1, per-turn totals (see mapping below) |
 | Tools | ✓ bash / fs / fs-search / skills (agent-grade turn against your `cwd`) |
 | Attachments | Partial — appended to the task text as reference URLs; dsh's web tool may fetch public URLs |
 | Mid-turn approval (`permission: true`) | ✗ — no stdio approval channel in headless (see below) |
 
-The underlying session **is** persisted (JSONL under `~/.dsh/sessions`): inspect
-or replay a run with `dsh --profile tui --resume <session>` — the id just
-can't be learned from the process output, so AgentProc treats this profile as
-stateless.
+The underlying session is always persisted (`~/.dsh/sessions`, v4 JSONL,
+zstd-compressed by default): inspect or replay a run with
+`dsh --profile tui --resume <session>`.
+
+## How the bridge decides success
+
+dsh's launcher maps SIGTERM to exit 0, and a turn that ends in an error
+reason still writes its `final` event — so the bridge trusts frames, not the
+exit code: a turn counts as successful only when a `final` event arrived and
+the exit code was 0. Driver failures (unknown session, missing credential,
+adoption refusal) arrive as an `error` event with no final.
+
+## Session continuity, precisely
+
+- The session id comes from the run stream's opening `session` event; the
+  bridge stamps it on every event it emits.
+- A later turn passes `--session-id <id>`; dsh **adopts** the persisted
+  Session — an unknown id is an error, not a new session.
+- Adoption is strict upstream: same cwd, no subagent/fork, no agent preset.
+  A mismatch (e.g. the bridge runs from a different directory) surfaces as an
+  error event naming the conflict. Keep the bridge cwd stable for continuity.
+
+## Usage mapping
+
+dsh reports token counts in **disjoint** buckets (`inputTokens` is uncached
+input only; billed input = input + cacheRead + cacheWrite). agentproc's
+`input_tokens` is the inclusive billed input, so the bridge folds the cache
+buckets in and passes the rest through:
+
+| agentproc key | dsh field |
+|---|---|
+| `input_tokens` | `inputTokens + cacheReadTokens + cacheWriteTokens` |
+| `output_tokens` | `outputTokens` |
+| `total_tokens` | `totalTokens` |
+| `cache_read_input_tokens` | `cacheReadTokens` |
+| `cache_creation_input_tokens` | `cacheWriteTokens` |
+| `reasoning_tokens` | `reasoningTokens` |
+
+Optional buckets a turn omits are omitted from the mapping too. `thinking`
+frames (reasoning projection) stay off the wire, matching the claude-code
+profile's text-deltas-only posture.
 
 ## Configuration
 
@@ -82,14 +121,10 @@ prefer `read-only` for strict unattended runs.
 
 ## Limitations and upgrade paths
 
-- **Stateless on old dsh only.** The bridge feature-detects session
-  continuity via `dsh --profile headless --help`: with `--resume` +
-  `--print-session-id` present (upstream PR pending; a fork branch carrying
-  the feature works today), it stamps `session_id` on every event and
-  resumes the persisted session on later turns — verified end-to-end with a
-  live model (cross-turn memory holds, id survives error turns). Without
-  those flags it stays stateless; use the AgentProc SDK's `load_history` /
-  `append_history` helpers for continuity on such builds.
+- **Legacy fallback.** Without `--json` in the headless `--help` (pre-0.1.6
+  builds), the bridge uses plain one-shot stdout and stays stateless; use the
+  AgentProc SDK's `load_history` / `append_history` helpers for continuity on
+  such builds.
 - **No mid-turn approval.** If dsh grows a stdio approval channel (its web
   profile already has an approval service behind a capability seam), the
   bridge can translate it to `permission_request` / `permission_response`

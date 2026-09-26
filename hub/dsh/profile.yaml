@@ -1,13 +1,14 @@
 name: dsh
-description: DeepSeek Harness (dsh) headless profile as an AgentProc agent — a full tool-using agent runtime, one-shot, plain text
+description: DeepSeek Harness (dsh) headless profile as an AgentProc agent — a full tool-using agent runtime with streaming, sessions, and usage
 cli: dsh
 cli_install: |
-  # Requires Node.js >= 20:
+  # Requires Node.js >= 22.18 / >= 24.2 (the launcher entry reads
+  # import.meta.main) or Bun:
   #   npm install -g @deepseek-ai/dsh
   # Authenticate (either way works):
-  #   export DEEPSEEK_API_KEY=...          # or store it via the web UI:
-  #   dsh --profile web                    # Models page writes the key once,
-  #                                       # headless picks it up from storage
+  #   export DEEPSEEK_API_KEY=...
+  # or store it once via the web UI — headless reads stored credentials too:
+  #   dsh --profile web        # Models page writes the key, then exit
 agentproc:
   command: node
   args: ["{{PROFILE_DIR}}/bridge.js"]
@@ -15,8 +16,8 @@ agentproc:
   # current directory, so the agent works on whatever project you are in.
   timeout_secs: 1800        # headless runs a full agent turn (tools, bash);
                             # give it room — override per-run if needed
-  streaming: false          # dsh headless prints the final assistant message
-                            # only; there is no partial stream to forward
+  streaming: true           # --json text frames forward as partial events
+                            # (commit-point granularity, not per-token)
   env:
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
     # Unattended posture is bridge-enforced: the bridge defaults
@@ -30,17 +31,24 @@ tested: community
 maintainer: kong
 tags: [coding, ai, deepseek, agent, harness]
 notes: |
-  Uses `dsh --profile headless "<task>"` (the DeepSeek Harness one-shot
+  Runs `dsh --profile headless --json "<task>"` (the DeepSeek Harness one-shot
   bundle: coding persona, bash/fs/search tools, sandbox, persisted session
-  log). stdout is the final assistant message; errors go to stderr with a
-  non-zero exit code. Verified end-to-end against dsh 0.1.0-rc.6.
+  log). Verified end-to-end against dsh 0.1.7-rc.2.
 
-  Session continuity is feature-detected: when the installed dsh advertises
-  --resume + --print-session-id in `--profile headless --help`, the bridge
-  stamps session_id on events and resumes the persisted session on later
-  turns (true multi-turn for IM/email bridges). Older builds stay stateless
-  on the wire; the underlying sessions are always persisted as JSONL under
-  ~/.dsh/sessions.
+  Feature-detected via `dsh --profile headless --help`: builds advertising
+  `--json` (>= 0.1.6-alpha.1) stream partials from committed text frames and
+  report usage; builds also advertising `--session-id` (>= 0.1.6-alpha.1)
+  stamp session_id from the opening frame and resume the persisted Session on
+  later turns (true multi-turn for IM/email bridges). Older builds fall back
+  to plain one-shot text and stay stateless on the wire.
+
+  Session adoption is strict upstream: the Session must exist, run in the
+  same cwd, and not belong to a subagent/fork or an agent preset — mismatches
+  surface as error events. Keep the bridge cwd stable for continuity.
+
+  Usage: dsh reports token counts in disjoint buckets; the bridge folds
+  cacheRead/cacheWrite into the inclusive `input_tokens` agentproc expects
+  and maps the rest 1:1 (output/total/cache/reasoning).
 
   No mid-turn tool authorization: dsh headless has no stdio approval channel,
   so `permission: true` is not supported. The bridge defaults

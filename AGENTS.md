@@ -48,6 +48,7 @@ agentproc/
 │   ├── aider/
 │   ├── pi/
 │   ├── deepseek/
+│   ├── dsh/
 │   └── echo-agent/
 ├── docs/                    # VitePress site (agentproc.dev)
 │   ├── public/              # static files served at root (llms.txt, robots.txt)

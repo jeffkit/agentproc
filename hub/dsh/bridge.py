@@ -2,15 +2,38 @@
 """
 AgentProc bridge for the DeepSeek Harness CLI `dsh` (wire 0.4).
 
-Uses `dsh --profile headless "<task>"` for non-interactive output. dsh
-headless prints the final assistant message to stdout (plain text); errors
-go to stderr ("dsh: CODE: message") with a non-zero exit code.
+JSON mode (dsh >= 0.1.6-alpha.1, feature-detected via `--profile headless
+--help` advertising --json) runs `dsh --profile headless --json "<task>"` and
+translates the newline-delimited run-event stream:
 
-Session continuity is feature-detected: when the installed dsh supports
-`--resume <id>` and `--print-session-id`, the bridge stamps `session_id`
-on events and resumes the persisted session on later turns — true
-multi-turn for process bridges. Older dsh builds stay stateless on the
-wire, exactly as before.
+    {"type":"session","sessionId":...}      opening frame — session id source
+    {"type":"status","phase":"step_end","usage":{...}}
+                                            per-step token counts in DISJOINT
+                                            buckets; the bridge sums steps
+    {"type":"text"|"thinking","text":...}   committed assistant content
+    {"type":"final","text":...}             terminal answer — always written,
+                                            even when the turn ends in error
+    {"type":"error","message":...}          driver failure — no final follows
+
+The exit code separates completed (0) from error-ended (1) turns, but a
+SIGTERM'd dsh also exits 0 (launcher supervisor semantics), so the bridge
+trusts frames, not the exit code.
+
+Session continuity (JSON mode with --session-id advertised): session_id is
+stamped from the opening frame and later turns resume the persisted Session.
+Adoption is strict upstream (same cwd, no subagent/fork, no agent preset);
+mismatches surface as error events.
+
+Plain fallback (older dsh): `dsh --profile headless "<task>"` prints the final
+assistant message to stdout; errors go to stderr with a non-zero exit code.
+Stateless on the wire.
+
+Usage mapping: dsh buckets are disjoint (billed input = inputTokens +
+cacheReadTokens + cacheWriteTokens); agentproc's `input_tokens` is the
+inclusive billed input, so the cache buckets fold into it.
+
+`thinking` frames stay off the wire (reasoning projection, same posture as
+the claude-code profile, which forwards text deltas only).
 
 Per-CLI config (read from the process env the runner injects):
     DEEPSEEK_API_KEY    API key passthrough (alternative: store it once via
@@ -29,21 +52,20 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 
 _HUB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HUB_DIR not in sys.path:
     sys.path.insert(0, _HUB_DIR)
 
-from _shared.stream_utils import emit_error, emit_result  # noqa: E402
+from _shared.stream_utils import emit_error, emit_partial, emit_result  # noqa: E402
 
 CLI_NAME = "dsh"
 INSTALL_HINT = "Install: npm install -g @deepseek-ai/dsh"
 DEFAULT_TIMEOUT_SECS = 1800
 KILL_GRACE_SECS = 5
-#: stderr line through which a resume-capable dsh reports the session id.
-SESSION_ID_LINE = re.compile(r"^dsh: session-id: (\S+)\s*$", re.M)
 #: Wire rules: non-empty, no path separators or control characters.
-SESSION_ID_VALID = re.compile(r"^[^\s/\\\x00-\x1f]+$")
+SESSION_ID_RE = re.compile(r"^[^\s/\\\x00-\x1f]+$")
 
 
 def read_turn() -> dict:
@@ -74,42 +96,103 @@ def compose_task(message: str, turn: dict) -> str:
     return base + "\n\nAttachments (referenced by URL):\n" + "\n".join(lines)
 
 
-def build_args(task: str, session_id: str, supports_resume: bool) -> list[str]:
-    """dsh argv; with continuity support, print the id and resume a known session."""
+def detect_support(help_text: str) -> dict:
+    """Read feature support off the headless app's own --help text."""
+    text = help_text or ""
+    json_mode = "--json" in text
+    return {"json_mode": json_mode, "session_resume": json_mode and "--session-id" in text}
+
+
+def build_args(task: str, session_id: str, support: dict) -> list[str]:
+    """dsh argv. JSON mode always requests the event stream (and `--` so a
+    task starting with `-` stays a positional); with session support and an
+    inbound id, adopt that Session."""
     args = [CLI_NAME, "--profile", "headless"]
-    if supports_resume:
-        args.append("--print-session-id")
-        if session_id:
-            args += ["--resume", session_id]
-    args.append(task)
+    if support["json_mode"]:
+        args.append("--json")
+        if support["session_resume"] and session_id:
+            args += ["--session-id", session_id]
+        args += ["--", task]
+    else:
+        args.append(task)
     return args
 
 
-def parse_session_id(stderr: str) -> str:
-    """Extract the id a resume-capable dsh printed; '' when absent or invalid."""
-    m = SESSION_ID_LINE.search(stderr or "")
-    if m and SESSION_ID_VALID.match(m.group(1)):
-        return m.group(1)
-    return ""
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-_resume_support: bool | None = None
+def add_step(total: dict | None, usage) -> dict | None:
+    """Sum one step_end frame's usage buckets into the turn accumulator.
+    First reported step is adopted wholesale; afterwards buckets stay disjoint
+    per step and an optional bucket is kept only while every step reports it."""
+    if not isinstance(usage, dict):
+        return total
+    input_t = _num(usage.get("inputTokens"))
+    output_t = _num(usage.get("outputTokens"))
+    if input_t is None and output_t is None:
+        return total
+    if not total:
+        return {
+            "inputTokens": input_t or 0,
+            "outputTokens": output_t or 0,
+            "totalTokens": _num(usage.get("totalTokens")),
+            "cacheReadTokens": _num(usage.get("cacheReadTokens")),
+            "cacheWriteTokens": _num(usage.get("cacheWriteTokens")),
+            "reasoningTokens": _num(usage.get("reasoningTokens")),
+        }
+
+    def _sum(a, b):
+        return None if a is None or b is None else a + b
+
+    return {
+        "inputTokens": (total.get("inputTokens") or 0) + (input_t or 0),
+        "outputTokens": (total.get("outputTokens") or 0) + (output_t or 0),
+        "totalTokens": _sum(total.get("totalTokens"), _num(usage.get("totalTokens"))),
+        "cacheReadTokens": _sum(total.get("cacheReadTokens"), _num(usage.get("cacheReadTokens"))),
+        "cacheWriteTokens": _sum(total.get("cacheWriteTokens"), _num(usage.get("cacheWriteTokens"))),
+        "reasoningTokens": _sum(total.get("reasoningTokens"), _num(usage.get("reasoningTokens"))),
+    }
 
 
-def probe_resume_support() -> bool:
+def to_usage(u: dict | None) -> dict | None:
+    """Map the summed dsh buckets onto agentproc's recommended usage keys.
+    dsh counts input/cache buckets disjointly; agentproc's `input_tokens` is
+    the inclusive billed input, so the cache buckets fold into it."""
+    if not isinstance(u, dict):
+        return None
+    out: dict = {}
+    if _num(u.get("inputTokens")) is not None:
+        out["input_tokens"] = u["inputTokens"] + (u.get("cacheReadTokens") or 0) + (u.get("cacheWriteTokens") or 0)
+    if _num(u.get("outputTokens")) is not None:
+        out["output_tokens"] = u["outputTokens"]
+    if _num(u.get("totalTokens")) is not None:
+        out["total_tokens"] = u["totalTokens"]
+    if _num(u.get("cacheReadTokens")) is not None:
+        out["cache_read_input_tokens"] = u["cacheReadTokens"]
+    if _num(u.get("cacheWriteTokens")) is not None:
+        out["cache_creation_input_tokens"] = u["cacheWriteTokens"]
+    if _num(u.get("reasoningTokens")) is not None:
+        out["reasoning_tokens"] = u["reasoningTokens"]
+    return out or None
+
+
+_support_cache: dict | None = None
+
+
+def probe_support() -> dict:
     """Probe (once per process) via the headless app's --help output."""
-    global _resume_support
-    if _resume_support is None:
+    global _support_cache
+    if _support_cache is None:
         try:
             r = subprocess.run(
                 [CLI_NAME, "--profile", "headless", "--help"],
                 capture_output=True, text=True, timeout=30,
             )
-            help_text = (r.stdout or "") + (r.stderr or "")
-            _resume_support = "--resume" in help_text and "--print-session-id" in help_text
+            _support_cache = detect_support((r.stdout or "") + (r.stderr or ""))
         except Exception:
-            _resume_support = False
-    return _resume_support
+            _support_cache = detect_support("")
+    return _support_cache
 
 
 def child_env() -> dict:
@@ -123,6 +206,144 @@ def child_env() -> dict:
     return env
 
 
+def _stderr_hint(stderr: str) -> str:
+    """First actionable line of a dsh stderr diagnostic ("dsh: CODE: msg")."""
+    s = (stderr or "").strip()
+    if not s:
+        return ""
+    return re.sub(r"^dsh:\s*", "", s, count=1)[:500]
+
+
+def run_json(child: subprocess.Popen, timeout_secs: int) -> dict:
+    """Translate the run-event stream; returns the finish_json input dict."""
+    stderr_buf: list[str] = []
+
+    def _drain_stderr():
+        stderr_buf.append(child.stderr.read() or "")
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+
+    state = {"timed_out": False}
+
+    def _on_timeout():
+        state["timed_out"] = True
+        child.send_signal(signal.SIGTERM)
+
+    timer = threading.Timer(timeout_secs, _on_timeout)
+    timer.start()
+
+    session_id = ""
+    final_text = None
+    error_msg = None
+    usage = None
+    assert child.stdout is not None
+    for raw in child.stdout:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            frame = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(frame, dict):
+            continue
+        ftype = frame.get("type")
+        if ftype == "session":
+            sid = frame.get("sessionId")
+            if isinstance(sid, str) and SESSION_ID_RE.match(sid):
+                session_id = sid
+        elif ftype == "status":
+            if frame.get("phase") == "step_end":
+                usage = add_step(usage, frame.get("usage"))
+        elif ftype == "text":
+            text = frame.get("text")
+            if isinstance(text, str) and text:
+                emit_partial(text, session_id or None)
+        elif ftype == "final":
+            text = frame.get("text")
+            if isinstance(text, str):
+                final_text = text
+        elif ftype == "error":
+            msg = frame.get("message")
+            if isinstance(msg, str) and msg:
+                error_msg = msg
+        # thinking / tool_call / tool_result stay off the wire
+
+    child.wait()
+    timer.cancel()
+    if state["timed_out"] and child.poll() is None:
+        child.kill()
+        child.wait()
+    if child.stderr:
+        child.stderr.close()
+
+    return {
+        "code": child.returncode,
+        "stderr": stderr_buf[0] if stderr_buf else "",
+        "session_id": session_id,
+        "final_text": final_text,
+        "error_msg": error_msg,
+        "usage": to_usage(usage),
+        "timed_out": state["timed_out"],
+    }
+
+
+def finish_json(outcome: dict, timeout_secs: int) -> int:
+    """Frame-driven outcome: success requires a `final` frame AND exit 0."""
+    if outcome["timed_out"]:
+        emit_error(f"{CLI_NAME} timed out after {timeout_secs}s", outcome["session_id"] or None, outcome["usage"])
+        return 124
+    if outcome["error_msg"]:
+        emit_error(outcome["error_msg"], outcome["session_id"] or None, outcome["usage"])
+        return 1
+    if outcome["final_text"] is not None:
+        if outcome["code"] == 0:
+            emit_result(outcome["final_text"], outcome["session_id"] or None, outcome["usage"])
+            return 0
+        # The turn ended in an error reason after committing text; stderr has
+        # the actionable "dsh: CODE: message" diagnostic.
+        hint = _stderr_hint(outcome["stderr"])
+        msg = f"{CLI_NAME}: {hint}" if hint else f"{CLI_NAME} turn ended with an error (exit {outcome['code']})"
+        emit_error(msg, outcome["session_id"] or None, outcome["usage"])
+        return 1
+    # No final: killed mid-run (dsh maps SIGTERM to exit 0) or crashed early.
+    msg = f"{CLI_NAME} exited with {outcome['code']} without a final message"
+    hint = _stderr_hint(outcome["stderr"])
+    if hint:
+        msg += f": {hint}"
+    emit_error(msg, outcome["session_id"] or None, outcome["usage"])
+    return 1
+
+
+def finish_plain(child: subprocess.Popen, timeout_secs: int) -> int:
+    """Plain fallback: stateless one-shot, exactly the pre-0.1.6 behavior."""
+    try:
+        stdout, stderr = child.communicate(timeout=timeout_secs)
+    except subprocess.TimeoutExpired:
+        child.send_signal(signal.SIGTERM)
+        try:
+            child.communicate(timeout=KILL_GRACE_SECS)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.communicate()
+        emit_error(f"{CLI_NAME} timed out after {timeout_secs}s")
+        return 124
+
+    if child.returncode != 0:
+        msg = f"{CLI_NAME} exited with {child.returncode}"
+        hint = _stderr_hint(stderr)
+        if hint:
+            msg += f": {hint}"
+        emit_error(msg)
+        return 1
+    text = (stdout or "").strip()
+    if not text:
+        emit_error(f"{CLI_NAME} returned empty output (task completed with no assistant message)")
+        return 1
+    emit_result(text)
+    return 0
+
+
 def main() -> int:
     turn = read_turn()
     message = turn.get("message") if isinstance(turn.get("message"), str) else ""
@@ -133,8 +354,8 @@ def main() -> int:
         emit_error("turn.message is required (or include turn.attachments)")
         return 1
 
-    supports_resume = probe_resume_support()
-    args = build_args(compose_task(message, turn), inbound_session, supports_resume)
+    support = probe_support()
+    args = build_args(compose_task(message, turn), inbound_session, support)
     timeout_secs = int(os.environ.get("DSH_TIMEOUT") or DEFAULT_TIMEOUT_SECS)
     try:
         child = subprocess.Popen(
@@ -152,39 +373,13 @@ def main() -> int:
         emit_error(f"{CLI_NAME} failed to start: {e}")
         return 1
 
-    try:
-        stdout, stderr = child.communicate(timeout=timeout_secs)
-    except subprocess.TimeoutExpired:
-        child.send_signal(signal.SIGTERM)
-        try:
-            child.communicate(timeout=KILL_GRACE_SECS)
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.communicate()
-        emit_error(f"{CLI_NAME} timed out after {timeout_secs}s")
-        return 124
-
-    # The id line is bridge bookkeeping, not a user-facing error; stamp it on
-    # every outcome (error turns included) so continuity survives failures.
-    session_id = parse_session_id(stderr) if supports_resume else ""
-
-    if child.returncode != 0:
-        # dsh headless reports errors on stderr with the exit code; prefer
-        # that text ("dsh: MISSING_CREDENTIAL: ...") for an actionable message.
-        s = SESSION_ID_LINE.sub("", stderr or "").strip()
-        msg = f"{CLI_NAME} exited with {child.returncode}"
-        if s:
-            msg += f": {s[:500]}"
-        emit_error(msg, session_id or None)
-        return 1
-
-    text = (stdout or "").strip()
-    if not text:
-        emit_error(f"{CLI_NAME} returned empty output (task completed with no assistant message)", session_id or None)
-        return 1
-    emit_result(text, session_id or None)
-    return 0
+    if support["json_mode"]:
+        return finish_json(run_json(child, timeout_secs), timeout_secs)
+    return finish_plain(child, timeout_secs)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except BrokenPipeError:
+        sys.exit(1)

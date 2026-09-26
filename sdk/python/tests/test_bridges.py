@@ -889,3 +889,195 @@ class TestAgyBridge:
         parsed = _classify_output(out)
         assert rc == 1
         assert parsed["error"]
+
+
+# ---------------------------------------------------------------------------
+# dsh (DeepSeek Harness headless, --json run-event stream)
+# ---------------------------------------------------------------------------
+
+
+class _DshStderr:
+    def __init__(self, text: str):
+        self._text = text
+
+    def read(self):
+        return self._text
+
+    def close(self):
+        pass
+
+
+class _DshJsonProc:
+    """Fake Popen for dsh bridge.run_json: iterable stdout, readable stderr."""
+
+    def __init__(self, lines: List[str], returncode: int = 0, stderr: str = ""):
+        self.stdout = _FakePipe(lines)
+        self._stderr = _DshStderr(stderr)
+        self.returncode = returncode
+
+    @property
+    def stderr(self):
+        return self._stderr
+
+    def wait(self):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def send_signal(self, sig):
+        pass
+
+    def kill(self):
+        pass
+
+
+class TestDshBridge:
+    @pytest.fixture(autouse=True)
+    def _mod(self):
+        self.mod = _load_bridge("dsh")
+
+    def _events(self, capsys) -> List[dict]:
+        out = capsys.readouterr().out
+        return [json.loads(line) for line in out.strip().split("\n") if line.strip()]
+
+    # ── detect_support ─────────────────────────────────────────────────────
+
+    def test_detect_support(self):
+        both = self.mod.detect_support("--json\n  --session-id <id>\n")
+        assert both == {"json_mode": True, "session_resume": True}
+        json_only = self.mod.detect_support("  --json  ")
+        assert json_only == {"json_mode": True, "session_resume": False}
+        assert self.mod.detect_support("-h, --help only") == {"json_mode": False, "session_resume": False}
+
+    # ── build_args ─────────────────────────────────────────────────────────
+
+    def test_build_args_plain_fallback_is_stateless(self):
+        plain = {"json_mode": False, "session_resume": False}
+        assert self.mod.build_args("hi", "", plain) == ["dsh", "--profile", "headless", "hi"]
+        assert self.mod.build_args("hi", "s-1", plain) == ["dsh", "--profile", "headless", "hi"]
+
+    def test_build_args_json_mode_requests_stream_and_guards_task(self):
+        support = {"json_mode": True, "session_resume": True}
+        assert self.mod.build_args("hi", "", support) == ["dsh", "--profile", "headless", "--json", "--", "hi"]
+        assert self.mod.build_args("hi", "s-1", support) == [
+            "dsh", "--profile", "headless", "--json", "--session-id", "s-1", "--", "hi",
+        ]
+
+    def test_build_args_continuity_needs_session_id_flag(self):
+        json_only = {"json_mode": True, "session_resume": False}
+        assert self.mod.build_args("hi", "s-1", json_only) == ["dsh", "--profile", "headless", "--json", "--", "hi"]
+
+    # ── usage accumulation & mapping ───────────────────────────────────────
+
+    def test_add_step_adopts_first_then_sums(self):
+        u = self.mod.add_step(None, {"inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 3})
+        assert u["inputTokens"] == 10 and u["cacheReadTokens"] == 3
+        u = self.mod.add_step(u, {"inputTokens": 7, "outputTokens": 2})
+        assert u["inputTokens"] == 17 and u["cacheReadTokens"] is None
+        assert self.mod.add_step(u, None) == u
+
+    def test_to_usage_folds_disjoint_cache_buckets(self):
+        assert self.mod.to_usage({
+            "inputTokens": 17, "outputTokens": 7, "totalTokens": 28,
+            "cacheReadTokens": 5, "cacheWriteTokens": 4, "reasoningTokens": 2,
+        }) == {
+            "input_tokens": 26, "output_tokens": 7, "total_tokens": 28,
+            "cache_read_input_tokens": 5, "cache_creation_input_tokens": 4, "reasoning_tokens": 2,
+        }
+        assert self.mod.to_usage(None) is None
+        assert self.mod.to_usage({}) is None
+
+    # ── json-mode frame translation ────────────────────────────────────────
+
+    def _run_json(self, lines, returncode=0, stderr=""):
+        proc = _DshJsonProc(lines, returncode=returncode, stderr=stderr)
+        outcome = self.mod.run_json(proc, 600)
+        return outcome
+
+    def test_json_frames_emit_partial_then_result_with_usage(self, capsys):
+        outcome = self._run_json([
+            '{"type":"session","sessionId":"s-42","cwd":"/tmp"}',
+            '{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":17,"outputTokens":7,"totalTokens":28,"cacheReadTokens":5,"cacheWriteTokens":4,"reasoningTokens":2}}',
+            '{"type":"text","text":"partial one"}',
+            '{"type":"status","phase":"step_end","turn":1,"step":2}',
+            '{"type":"final","text":"done"}',
+        ])
+        rc = self.mod.finish_json(outcome, 1800)
+        assert rc == 0
+        events = self._events(capsys)
+        assert events[0] == {"type": "partial", "text": "partial one", "session_id": "s-42"}
+        assert events[1]["type"] == "result"
+        assert events[1]["text"] == "done"
+        assert events[1]["session_id"] == "s-42"
+        assert events[1]["usage"]["input_tokens"] == 26
+        assert events[1]["usage"]["cache_read_input_tokens"] == 5
+
+    def test_json_error_frame_emits_error_with_session(self, capsys):
+        outcome = self._run_json(
+            [
+                '{"type":"session","sessionId":"s-42","cwd":"/tmp"}',
+                '{"type":"error","message":"session \\"s-42\\" was recorded in \\"/a\\", not \\"/b\\""}',
+            ],
+            returncode=1,
+        )
+        rc = self.mod.finish_json(outcome, 1800)
+        assert rc == 1
+        events = self._events(capsys)
+        assert events == [{
+            "type": "error",
+            "message": 'session "s-42" was recorded in "/a", not "/b"',
+            "session_id": "s-42",
+        }]
+
+    def test_json_final_with_error_exit_carries_stderr_diagnostic(self, capsys):
+        outcome = self._run_json(
+            [
+                '{"type":"session","sessionId":"s-42","cwd":"/tmp"}',
+                '{"type":"final","text":"partial answer"}',
+            ],
+            returncode=1,
+            stderr="dsh: PROVIDER_ERROR: quota exceeded\n",
+        )
+        rc = self.mod.finish_json(outcome, 1800)
+        assert rc == 1
+        events = self._events(capsys)
+        assert events == [{
+            "type": "error",
+            "message": "dsh: PROVIDER_ERROR: quota exceeded",
+            "session_id": "s-42",
+        }]
+
+    def test_json_exit_zero_without_final_is_an_error(self, capsys):
+        outcome = self._run_json(['{"type":"session","sessionId":"s-42","cwd":"/tmp"}'])
+        rc = self.mod.finish_json(outcome, 1800)
+        assert rc == 1
+        events = self._events(capsys)
+        assert events[0]["type"] == "error"
+        assert "without a final message" in events[0]["message"]
+
+    def test_json_timeout_reports_124(self, capsys):
+        outcome = {
+            "code": None, "stderr": "", "session_id": "s-42", "final_text": None,
+            "error_msg": None, "usage": None, "timed_out": True,
+        }
+        rc = self.mod.finish_json(outcome, 1800)
+        assert rc == 124
+        events = self._events(capsys)
+        assert events[0]["type"] == "error"
+        assert "timed out after 1800s" in events[0]["message"]
+
+    # ── plain fallback ─────────────────────────────────────────────────────
+
+    def test_plain_fallback_emits_result_without_session(self, capsys):
+        class _PlainProc:
+            def __init__(self):
+                self.returncode = 0
+
+            def communicate(self, timeout=None):
+                return ("shim reply\n", "")
+
+        rc = self.mod.finish_plain(_PlainProc(), 1800)
+        assert rc == 0
+        events = self._events(capsys)
+        assert events == [{"type": "result", "text": "shim reply"}]

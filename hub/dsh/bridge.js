@@ -3,19 +3,47 @@
 /**
  * AgentProc bridge for the DeepSeek Harness CLI `dsh` (wire 0.4).
  *
- *   dsh --profile headless "<task>"
+ *   dsh --profile headless --json "<task>"
  *
  * dsh headless is a one-shot, full agent runtime: it boots the headless
  * bundle (coding persona + bash/fs/search tools + sandbox), runs the task to
- * quiescence, and prints the last non-empty assistant message to stdout.
- * Errors are written to stderr ("dsh: CODE: message") with a non-zero exit.
+ * quiescence, flushes the Session, and reports the answer.
  *
- * Session continuity is feature-detected: when the installed dsh supports
- * `--resume <id>` and `--print-session-id` (upstream PR pending; tracked in
- * the README's upgrade-hook note), the bridge stamps `session_id` on events
- * and resumes the persisted session on later turns — true multi-turn for
- * process bridges. Older dsh builds stay stateless on the wire (no id
- * stamped), exactly as before.
+ * JSON mode (dsh >= 0.1.6-alpha.1, feature-detected via `--profile headless
+ * --help`) reads newline-delimited run events from stdout:
+ *
+ *   {type:"session",sessionId,cwd}   opening frame — the session id source
+ *   {type:"status",phase:"step_end",usage:{inputTokens,...}}
+ *                                    per-step token counts in DISJOINT
+ *                                    buckets (uncached input only; billed
+ *                                    input = input + cacheRead + cacheWrite).
+ *                                    The bridge sums steps into a turn total.
+ *   {type:"text"|"thinking",text}    committed assistant content
+ *   {type:"final",text}              terminal answer — always written, even
+ *                                    when the turn ends in error (exit 1)
+ *   {type:"error",message}           driver failure — no final follows
+ *
+ * The exit code separates completed (0) from error-ended (1) turns, but a
+ * SIGTERM'd dsh also exits 0 (launcher supervisor semantics), so the bridge
+ * trusts frames, not the exit code: a run counts as successful only when a
+ * `final` frame arrived and the exit code was 0.
+ *
+ * Session continuity (JSON mode with `--session-id` advertised): the bridge
+ * stamps `session_id` from the opening frame and resumes the persisted
+ * Session on later turns. Adoption is strict upstream — same cwd, no
+ * subagent/fork, no agent preset — and a mismatch surfaces as an error
+ * event ("session … was recorded in …").
+ *
+ * Plain fallback (older dsh): the final assistant message is plain stdout;
+ * errors go to stderr ("dsh: CODE: message") with a non-zero exit. Stateless
+ * on the wire.
+ *
+ * Usage mapping: dsh buckets are disjoint, agentproc's `input_tokens` is the
+ * inclusive billed input, so the bridge adds cacheRead/cacheWrite into it
+ * and passes the buckets through under their agentproc names.
+ *
+ * `thinking` frames stay off the wire (reasoning projection, same posture as
+ * the claude-code profile, which forwards text deltas only).
  *
  * Per-CLI config (read from the process env the runner injects):
  *   DEEPSEEK_API_KEY    API key passthrough (alternative: store it once via
@@ -28,9 +56,11 @@
  */
 
 const path = require('node:path');
+const readline = require('node:readline');
 const { spawn, spawnSync } = require('node:child_process');
 const {
   readTurn,
+  emitPartial,
   emitResult,
   emitError,
 } = require(path.join(__dirname, '..', '_shared', 'stream_utils.js'));
@@ -39,8 +69,6 @@ const CLI_NAME = 'dsh';
 const INSTALL_HINT = 'Install: npm install -g @deepseek-ai/dsh';
 const DEFAULT_TIMEOUT_SECS = 1800;
 const KILL_GRACE_SECS = 5;
-/** stderr line through which a resume-capable dsh reports the session id. */
-const SESSION_ID_LINE = /^dsh: session-id: (\S+)\s*$/;
 /**
  * Wire rules for session_id: non-empty, no path separators or control
  * characters (the runner drops non-conforming values, so fail soft here).
@@ -63,52 +91,115 @@ function composeTask(message, turn) {
 }
 
 /**
- * Build the dsh argv. With continuity support, always request the id print
- * and resume a known session; otherwise stay stateless.
+ * Read feature support off the headless app's own --help text.
+ * `--json` alone upgrades the transport; `--session-id` additionally gates
+ * session continuity.
+ * @param {string} help
+ * @returns {{jsonMode: boolean, sessionResume: boolean}}
+ */
+function detectSupport(help) {
+  const text = String(help || '');
+  const jsonMode = text.includes('--json');
+  return { jsonMode, sessionResume: jsonMode && text.includes('--session-id') };
+}
+
+/**
+ * Build the dsh argv. JSON mode always requests the event stream (and `--`
+ * so a task starting with `-` stays a positional); with session support and
+ * an inbound id, adopt that Session.
  * @param {string} task
  * @param {string} sessionId - inbound turn session id ('' = new session)
- * @param {boolean} supportsResume
+ * @param {{jsonMode: boolean, sessionResume: boolean}} support
  */
-function buildArgs(task, sessionId, supportsResume) {
+function buildArgs(task, sessionId, support) {
   const args = [CLI_NAME, '--profile', 'headless'];
-  if (supportsResume) {
-    args.push('--print-session-id');
-    if (sessionId) args.push('--resume', sessionId);
+  if (support.jsonMode) {
+    args.push('--json');
+    if (support.sessionResume && sessionId) args.push('--session-id', sessionId);
+    args.push('--', task);
+  } else {
+    args.push(task);
   }
-  args.push(task);
   return args;
 }
 
 /**
- * Extract the session id a resume-capable dsh printed on stderr.
- * @returns {string} the id, or '' when absent or wire-invalid.
+ * Sum one step_end frame's usage buckets into the turn accumulator. Buckets
+ * stay disjoint per step (they are summed across attempts inside dsh); an
+ * optional bucket is kept only while every step reports it.
+ * @param {object|null} total - accumulator so far (null = none yet)
+ * @param {object} usage - one frame's {inputTokens,outputTokens,...}
  */
-function parseSessionId(stderr) {
-  for (const line of String(stderr).split('\n')) {
-    const m = line.match(SESSION_ID_LINE);
-    if (m && SESSION_ID_VALID.test(m[1])) return m[1];
+function addStep(total, usage) {
+  if (!usage || typeof usage !== 'object') return total || null;
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const input = num(usage.inputTokens);
+  const output = num(usage.outputTokens);
+  if (input === undefined && output === undefined) return total || null;
+  if (!total) {
+    // First reported step: adopt its buckets wholesale (dsh's addUsage
+    // semantics — there is nothing to sum into yet).
+    return {
+      inputTokens: input || 0,
+      outputTokens: output || 0,
+      totalTokens: num(usage.totalTokens),
+      cacheReadTokens: num(usage.cacheReadTokens),
+      cacheWriteTokens: num(usage.cacheWriteTokens),
+      reasoningTokens: num(usage.reasoningTokens),
+    };
   }
-  return '';
+  const sum = (a, b) => (a === undefined || b === undefined ? undefined : a + b);
+  return {
+    inputTokens: (total.inputTokens || 0) + (input || 0),
+    outputTokens: (total.outputTokens || 0) + (output || 0),
+    totalTokens: sum(total.totalTokens, num(usage.totalTokens)),
+    cacheReadTokens: sum(total.cacheReadTokens, num(usage.cacheReadTokens)),
+    cacheWriteTokens: sum(total.cacheWriteTokens, num(usage.cacheWriteTokens)),
+    reasoningTokens: sum(total.reasoningTokens, num(usage.reasoningTokens)),
+  };
 }
 
 /**
- * Probe (once per process) whether this dsh exposes session continuity by
- * reading the headless app's own --help. A failed probe means "unsupported".
+ * Map the summed dsh buckets onto agentproc's recommended usage keys.
+ * dsh counts input/cache buckets disjointly; agentproc's `input_tokens` is
+ * the inclusive billed input, so the cache buckets fold into it.
+ * @returns {object|null} null when the accumulator carries no usable counts
  */
-let resumeSupport = null;
-function probeResumeSupport() {
-  if (resumeSupport !== null) return resumeSupport;
+function toUsage(u) {
+  if (!u || typeof u !== 'object') return null;
+  const has = (k) => typeof u[k] === 'number' && Number.isFinite(u[k]);
+  const out = {};
+  if (has('inputTokens')) {
+    out.input_tokens = u.inputTokens
+      + (has('cacheReadTokens') ? u.cacheReadTokens : 0)
+      + (has('cacheWriteTokens') ? u.cacheWriteTokens : 0);
+  }
+  if (has('outputTokens')) out.output_tokens = u.outputTokens;
+  if (has('totalTokens')) out.total_tokens = u.totalTokens;
+  if (has('cacheReadTokens')) out.cache_read_input_tokens = u.cacheReadTokens;
+  if (has('cacheWriteTokens')) out.cache_creation_input_tokens = u.cacheWriteTokens;
+  if (has('reasoningTokens')) out.reasoning_tokens = u.reasoningTokens;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Probe (once per process) what this dsh supports by reading the headless
+ * app's own --help. A failed probe means "plain fallback".
+ * @returns {{jsonMode: boolean, sessionResume: boolean}}
+ */
+let supportCache = null;
+function probeSupport() {
+  if (supportCache !== null) return supportCache;
   try {
     const r = spawnSync(CLI_NAME, ['--profile', 'headless', '--help'], {
       encoding: 'utf8',
       timeout: 30_000,
     });
-    const help = `${r.stdout || ''}${r.stderr || ''}`;
-    resumeSupport = help.includes('--resume') && help.includes('--print-session-id');
+    supportCache = detectSupport(`${r.stdout || ''}${r.stderr || ''}`);
   } catch {
-    resumeSupport = false;
+    supportCache = detectSupport('');
   }
-  return resumeSupport;
+  return supportCache;
 }
 
 /**
@@ -132,6 +223,117 @@ function childEnv() {
   return env;
 }
 
+/** First actionable line of a dsh stderr diagnostic ("dsh: CODE: msg"). */
+function stderrHint(stderr) {
+  const s = String(stderr || '').trim();
+  if (!s) return '';
+  return s.replace(/^dsh:\s*/g, '').slice(0, 500);
+}
+
+/**
+ * JSON mode: translate the run-event stream into AgentProc events. The run
+ * is a success only when a `final` frame arrived AND the exit code was 0 —
+ * an error-reasoned turn still writes `final`, and a SIGTERM'd dsh exits 0
+ * without one.
+ */
+async function runJson(child, support) {
+  const rl = readline.createInterface({ input: child.stdout });
+  let stderr = '';
+  child.stderr.on('data', (d) => { stderr += d.toString(); });
+
+  let sessionId = '';
+  let finalText = null;
+  let errorMsg = null;
+  let usage = null;
+
+  const pump = (async () => {
+    for await (const raw of rl) {
+      const line = String(raw).trim();
+      if (!line) continue;
+      let frame;
+      try { frame = JSON.parse(line); } catch { continue; }
+      if (!frame || typeof frame !== 'object') continue;
+      switch (frame.type) {
+        case 'session':
+          if (typeof frame.sessionId === 'string' && SESSION_ID_VALID.test(frame.sessionId)) {
+            sessionId = frame.sessionId;
+          }
+          break;
+        case 'status':
+          if (frame.phase === 'step_end') usage = addStep(usage, frame.usage);
+          break;
+        case 'text':
+          if (typeof frame.text === 'string' && frame.text) emitPartial(frame.text, sessionId);
+          break;
+        case 'final':
+          if (typeof frame.text === 'string') finalText = frame.text;
+          break;
+        case 'error':
+          if (typeof frame.message === 'string' && frame.message) errorMsg = frame.message;
+          break;
+        default:
+          break; // thinking / tool_call / tool_result stay off the wire
+      }
+    }
+  })();
+  pump.catch(() => {}); // readline destruction races the close event; frames already seen win
+
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  const mapped = toUsage(usage);
+  return { code, stderr, sessionId, finalText, errorMsg, usage: mapped };
+}
+
+function finishJson({ code, stderr, sessionId, finalText, errorMsg, usage }, timedOut, timeoutSecs) {
+  if (timedOut) {
+    emitError(`${CLI_NAME} timed out after ${timeoutSecs}s`, sessionId, usage);
+    process.exit(124);
+  }
+  if (errorMsg) {
+    emitError(errorMsg, sessionId, usage);
+    process.exit(1);
+  }
+  if (finalText !== null) {
+    if (code === 0) {
+      emitResult(finalText, sessionId, usage);
+      process.exit(0);
+    }
+    // The turn ended in an error reason after committing text; stderr has
+    // the actionable "dsh: CODE: message" diagnostic.
+    const hint = stderrHint(stderr);
+    const msg = hint ? `${CLI_NAME}: ${hint}` : `${CLI_NAME} turn ended with an error (exit ${code})`;
+    emitError(msg, sessionId, usage);
+    process.exit(1);
+  }
+  // No final: killed mid-run (dsh maps SIGTERM to exit 0) or crashed early.
+  const hint = stderrHint(stderr);
+  let msg = `${CLI_NAME} exited with ${code} without a final message`;
+  if (hint) msg += `: ${hint}`;
+  emitError(msg, sessionId, usage);
+  process.exit(1);
+}
+
+/** Plain fallback: stateless one-shot, exactly the pre-0.1.6 behavior. */
+function finishPlain({ code, stdout, stderr }, timedOut, timeoutSecs) {
+  if (timedOut) {
+    emitError(`${CLI_NAME} timed out after ${timeoutSecs}s`);
+    process.exit(124);
+  }
+  if (code !== 0) {
+    let msg = `${CLI_NAME} exited with ${code}`;
+    const hint = stderrHint(stderr);
+    if (hint) msg += `: ${hint}`;
+    emitError(msg);
+    process.exit(1);
+  }
+  const text = stdout.trim();
+  if (!text) {
+    emitError(`${CLI_NAME} returned empty output (task completed with no assistant message)`);
+    process.exit(1);
+  }
+  emitResult(text);
+  process.exit(0);
+}
+
 async function main() {
   const turn = await readTurn();
   const message = typeof turn.message === 'string' ? turn.message : '';
@@ -142,8 +344,8 @@ async function main() {
     process.exit(1);
   }
 
-  const supportsResume = probeResumeSupport();
-  const args = buildArgs(composeTask(message, turn), inboundSession, supportsResume);
+  const support = probeSupport();
+  const args = buildArgs(composeTask(message, turn), inboundSession, support);
   let child;
   try {
     child = spawn(args[0], args.slice(1), {
@@ -154,16 +356,16 @@ async function main() {
     emitError(`${CLI_NAME} CLI not found. ${INSTALL_HINT}`);
     process.exit(1);
   }
-
-  let stdout = '';
-  let stderr = '';
-  let spawnError = null;
-  let timedOut = false;
-  child.on('error', (err) => { spawnError = err; });
-  child.stdout.on('data', (d) => { stdout += d.toString(); });
-  child.stderr.on('data', (d) => { stderr += d.toString(); });
+  child.on('error', (err) => {
+    const msg = err && err.code === 'ENOENT'
+      ? `${CLI_NAME} CLI not found. ${INSTALL_HINT}`
+      : (err && err.message) || 'failed to start';
+    emitError(msg);
+    process.exit(1);
+  });
 
   const timeoutSecs = parseInt(process.env.DSH_TIMEOUT || String(DEFAULT_TIMEOUT_SECS), 10);
+  let timedOut = false;
   let killer = null;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -171,43 +373,21 @@ async function main() {
     killer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_SECS * 1000);
   }, timeoutSecs * 1000);
 
-  const code = await new Promise((resolve) => child.on('close', resolve));
+  let outcome = null;
+  if (support.jsonMode) {
+    outcome = await runJson(child, support);
+  } else {
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => { stdout += d.toString(); });
+    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    const code = await new Promise((resolve) => child.on('close', resolve));
+    outcome = { code, stdout, stderr };
+  }
   clearTimeout(timer);
   if (killer) clearTimeout(killer);
-
-  // The id line is bridge bookkeeping, not a user-facing error; stamp it on
-  // every outcome (error turns included) so continuity survives failures.
-  const sessionId = supportsResume ? parseSessionId(stderr) : '';
-
-  if (spawnError) {
-    const notFound = spawnError.code === 'ENOENT';
-    const msg = notFound
-      ? `${CLI_NAME} CLI not found. ${INSTALL_HINT}`
-      : spawnError.message;
-    emitError(msg, sessionId);
-    process.exit(1);
-  }
-  if (timedOut) {
-    emitError(`${CLI_NAME} timed out after ${timeoutSecs}s`, sessionId);
-    process.exit(124);
-  }
-  if (code !== 0) {
-    // dsh headless reports errors on stderr with the exit code; prefer that
-    // text ("dsh: MISSING_CREDENTIAL: ...") for an actionable message.
-    const s = stderr.split('\n').filter((line) => !SESSION_ID_LINE.test(line)).join('\n').trim();
-    let msg = `${CLI_NAME} exited with ${code}`;
-    if (s) msg += `: ${s.slice(0, 500)}`;
-    emitError(msg, sessionId);
-    process.exit(1);
-  }
-
-  const text = stdout.trim();
-  if (!text) {
-    emitError(`${CLI_NAME} returned empty output (task completed with no assistant message)`, sessionId);
-    process.exit(1);
-  }
-  emitResult(text, sessionId);
-  process.exit(0);
+  if (support.jsonMode) finishJson(outcome, timedOut, timeoutSecs);
+  else finishPlain(outcome, timedOut, timeoutSecs);
 }
 
 if (require.main === module) {
@@ -217,4 +397,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { composeTask, buildArgs, parseSessionId, probeResumeSupport, childEnv };
+module.exports = { composeTask, buildArgs, detectSupport, addStep, toUsage, probeSupport, childEnv };

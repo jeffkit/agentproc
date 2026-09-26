@@ -57,6 +57,7 @@ export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
 | [aider](https://github.com/jeffkit/agentproc/tree/main/hub/aider) | `aider` | community | Python · Node |
 | [kimi-code](https://github.com/jeffkit/agentproc/tree/main/hub/kimi-code) | `kimi`（月之暗面） | community | Python · Node |
 | [deepseek](https://github.com/jeffkit/agentproc/tree/main/hub/deepseek) | `deepseek`（DeepSeek TUI） | community | Python · Node |
+| [dsh](https://github.com/jeffkit/agentproc/tree/main/hub/dsh) | `dsh`（DeepSeek Harness headless） | community | Python · Node |
 | [echo-agent](https://github.com/jeffkit/agentproc/tree/main/hub/echo-agent) | （无 CLI） | official | Python · Node · Bash |
 
 `tested` 含义：
@@ -80,6 +81,7 @@ agentproc hub list
 #   qwen-code     community   Connect the qwen CLI (Alibaba) as an AgentProc agent
 #   kimi-code     community   Connect the kimi CLI (Moonshot AI) as an AgentProc agent
 #   deepseek      community   Connect the deepseek TUI as an AgentProc agent
+#   dsh           community   Connect the DeepSeek Harness CLI as an AgentProc agent
 #   aider         community   Connect the aider CLI as an AgentProc agent
 #   opencode      community   Connect the opencode CLI as an AgentProc agent
 #   agy           community   Connect the agy CLI as an AgentProc agent
