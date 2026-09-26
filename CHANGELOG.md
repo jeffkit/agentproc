@@ -31,7 +31,7 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 **fix(hub/claude-code): the unattended argv now includes `--verbose`, which Claude Code's CLI requires for `--print --output-format stream-json`.**
 
-**Versions.** Python and Node SDK packages `0.14.0` → `0.15.0`. Rust crate stays `0.11.1`. Wire protocol stays `0.4`.
+**Versions.** Python and Node SDK packages `0.14.0` → `0.15.0`. Rust crate `0.11.1` → `0.12.0` (new built-in `dsh` executor). Wire protocol stays `0.4`.
 
 ---
 ### Spec / SDK 0.14.0 — 2026-07-16
