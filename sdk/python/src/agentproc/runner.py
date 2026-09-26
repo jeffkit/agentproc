@@ -635,6 +635,15 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
                 if options.on_session:
                     options.on_session(sid)
         result.exit_code = EXIT_SUCCESS
+        if options.on_protocol_line:
+            # 协议契约对齐 spawn 路径：每条 stdout 行都过 on_protocol_line
+            # （plain 的 reply 是整体，回调供观测/审计消费原始行）
+            for protocol_line in stdout.splitlines():
+                options.on_protocol_line(protocol_line)
+        else:
+            import sys as _sys
+            print(f"[DEBUG plain] on_protocol_line falsy | stdout={stdout[:80]!r}",
+                  file=_sys.stderr)
         return result
 
     # NDJSON path
@@ -653,6 +662,9 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
         line = line.strip()
         if not line:
             continue
+        if options.on_protocol_line:
+            # 协议契约对齐 spawn 路径：每条 stdout 行都过 on_protocol_line
+            options.on_protocol_line(line)
         try:
             event = json.loads(line)
         except json.JSONDecodeError:

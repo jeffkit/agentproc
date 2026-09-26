@@ -359,6 +359,47 @@ class TestRunViaExecutorNDJSON(unittest.TestCase):
         self.assertEqual(result.session_id, "s1")
 
 
+class TestOnProtocolLineContract(unittest.TestCase):
+    """协议契约：executor 路径的每条 stdout 行都过 on_protocol_line
+    （与 spawn 路径对齐——观测/审计消费原始行的依据）。"""
+
+    def test_plain_path_forwards_lines(self):
+        ex = {
+            "cli_name": "echo-plain", "install_hint": "", "plain": True,
+            "build_args": lambda m, s, e: ["echo", '{"type":"result","text":"ok"}'],
+        }
+        seen = []
+        result = run_via_executor(ex, _make_opts(on_protocol_line=seen.append))
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertTrue(any("result" in l for l in seen), seen)
+
+    def test_ndjson_path_forwards_lines(self):
+        import json
+        lines = [
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "hi"}]}}),
+            json.dumps({"type": "result", "result": "hi", "usage":
+                        {"input_tokens": 3, "output_tokens": 1}}),
+        ]
+        ex = {
+            "cli_name": "echo-ndjson", "install_hint": "", "plain": False,
+            # printf 对每个参数复用格式串 → 每行一个事件
+            "build_args": lambda m, s, e: (
+                ["printf", "%s\n"] + lines),
+            "parse_event": lambda e: (
+                {"final_text": e.get("result")} if e.get("type") == "result" else None),
+        }
+        seen = []
+        import agentproc.runner as _r
+        print("RUNNER FILE:", _r.__file__)
+        result = run_via_executor(ex, _make_opts(on_protocol_line=seen.append))
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
+        self.assertEqual(len(seen), 2, seen)
+        # usage 兜底消费方可从原始行取回 result 事件的 usage
+        result_event = json.loads(seen[-1])
+        self.assertEqual(result_event["usage"]["input_tokens"], 3)
+
+
 # ---------------------------------------------------------------------------
 # run() routing via executor: field in profile
 # ---------------------------------------------------------------------------
