@@ -8,7 +8,7 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Released
 
-### Spec / SDK 0.15.0 — unreleased
+### Spec / SDK 0.16.0 — unreleased
 
 **Hub: `dsh` profile upgraded to the `--json` run-event stream (DeepSeek Harness ≥ 0.1.6-alpha.1)**
 
@@ -31,7 +31,9 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 **fix(hub/claude-code): the unattended argv now includes `--verbose`, which Claude Code's CLI requires for `--print --output-format stream-json`.**
 
-**Versions.** Python and Node SDK packages `0.14.0` → `0.15.0`. Rust crate `0.11.1` → `0.12.0` (new built-in `dsh` executor). Wire protocol stays `0.4`.
+**Versions.** Python and Node SDK packages `0.15.0` → `0.16.0`. Rust crate `0.11.1` → `0.12.0` (new built-in `dsh` executor). Wire protocol stays `0.4`.
+
+> Release note: `0.15.0` reached PyPI only — the `v0.15.0` tag run failed at `publish-npm` on a stale NPM_TOKEN, so the npm release skips straight to `0.16.0` (which carries all of the `dsh` work below; the PyPI `0.15.0` predates it).
 
 ---
 ### Spec / SDK 0.14.0 — 2026-07-16
