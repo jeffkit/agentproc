@@ -473,6 +473,18 @@ DEEPSEEK = {
 }
 
 
+def _dsh_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+    return ["dsh", "--profile", "headless", message]
+
+
+DSH = {
+    "cli_name": "dsh",
+    "install_hint": "Install: npm install -g @deepseek-ai/dsh",
+    "plain": True,
+    "build_args": _dsh_build_args,
+}
+
+
 def _pi_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
     args = ["pi", "-p", message, "--approve"]
     if (env.get("PI_NO_EXTENSIONS") or "1") != "0":
@@ -596,6 +608,7 @@ EXECUTORS: Dict[str, Dict[str, Any]] = {
     "agy": AGY,
     "aider": AIDER,
     "deepseek": DEEPSEEK,
+    "dsh": DSH,
     "pi": PI,
 }
 

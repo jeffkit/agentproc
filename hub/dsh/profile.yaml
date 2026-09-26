@@ -12,6 +12,7 @@ cli_install: |
 agentproc:
   command: node
   args: ["{{PROFILE_DIR}}/bridge.js"]
+  executor: dsh
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your
   # current directory, so the agent works on whatever project you are in.
   timeout_secs: 1800        # headless runs a full agent turn (tools, bash);

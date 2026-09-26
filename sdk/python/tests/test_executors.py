@@ -28,7 +28,7 @@ from agentproc.runner import (
 class TestRegistry(unittest.TestCase):
     REQUIRED_NAMES = [
         "claude-code", "codebuddy", "codex", "cursor", "gemini-cli", "grok-build",
-        "kimi-code", "opencode", "qwen-code", "agy", "aider", "deepseek", "pi",
+        "kimi-code", "opencode", "qwen-code", "agy", "aider", "deepseek", "dsh", "pi",
     ]
 
     def test_executor_names_list(self):
@@ -50,7 +50,7 @@ class TestRegistry(unittest.TestCase):
             self.assertIsInstance(ex["install_hint"], str)
 
     def test_plain_executors(self):
-        plain_executors = {"agy", "aider", "deepseek", "pi"}
+        plain_executors = {"agy", "aider", "deepseek", "dsh", "pi"}
         for name in plain_executors:
             self.assertTrue(EXECUTORS[name].get("plain"), f"executor '{name}' should be plain")
 
@@ -155,6 +155,16 @@ class TestDeepSeekBuildArgs(unittest.TestCase):
         args = self._build("hello")
         self.assertIn("deepseek", args)
         self.assertIn("hello", args)
+
+
+class TestDshBuildArgs(unittest.TestCase):
+    def _build(self, message="hi", session_id="", env=None):
+        ex = EXECUTORS["dsh"]
+        return ex["build_args"](message, session_id, env or {})
+
+    def test_basic(self):
+        args = self._build("hello")
+        self.assertEqual(args, ["dsh", "--profile", "headless", "hello"])
 
 
 class TestPiBuildArgs(unittest.TestCase):

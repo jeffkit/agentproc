@@ -20,6 +20,11 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - Verified end-to-end against dsh 0.1.7-rc.2: streamed tool turn, two-turn session resume with cross-turn memory, usage mapping checked against real token counts, and the unknown-session error path.
 - Docs: `hub/dsh/README.md` rewritten (capability table, success semantics, session-adoption rules, usage mapping table); `docs/hub/index.md` + `docs/zh/hub/index.md` and `AGENTS.md` now list the profile.
 
+**Hub: `dsh` executor parity across all three SDKs + profile declares `executor:`**
+
+- `sdk/python/src/agentproc/executors.py` and `sdk/rust/src/executors.rs` gain the built-in `dsh` executor (Node already had it), observable parity with the Node registry: `plain: true`, argv `dsh --profile headless <message>` — the in-process fast path over the one-shot plain run; session continuity stays on the hub bridge (spawn) path. Python/Rust tests updated (`TestDshBuildArgs`, the 13→14 registry assertions, and `dsh_build_args_headless_one_shot`).
+- `hub/dsh/profile.yaml` now declares `executor: dsh`, so the profile resolves in-process on every SDK host; `sdk/rust/tests/official_hub_profiles.rs` covers the declaration.
+
 **fix(sdk/python): executor in-process path forwards `on_protocol_line` — aligning the `run_via_executor` contract with the spawn path.**
 
 **feat(hub): the shared `run_bridge` engine captures a terminal event's `usage` and forwards it on `result`/`error` — closing the CLI→bridge hop for NDJSON profiles (issue #2).**

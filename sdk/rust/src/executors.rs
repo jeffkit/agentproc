@@ -186,6 +186,7 @@ static STATIC_EXECUTORS: Lazy<HashMap<&'static str, Factory>> = Lazy::new(|| {
     m.insert("agy", agy_factory as Factory);
     m.insert("aider", aider_factory as Factory);
     m.insert("deepseek", deepseek_factory as Factory);
+    m.insert("dsh", dsh_factory as Factory);
     m.insert("pi", pi_factory as Factory);
     m
 });
@@ -229,6 +230,9 @@ fn aider_factory() -> Box<dyn Executor> {
 }
 fn deepseek_factory() -> Box<dyn Executor> {
     Box::new(DeepseekExecutor)
+}
+fn dsh_factory() -> Box<dyn Executor> {
+    Box::new(DshExecutor)
 }
 fn pi_factory() -> Box<dyn Executor> {
     Box::new(PiExecutor)
@@ -1466,6 +1470,43 @@ impl TurnHandlers for DeepseekTurn {
     }
 }
 
+/// DeepSeek Harness (`dsh --profile headless`). Plain text, stateless —
+/// the in-process fast path; session continuity lives in the hub bridge.
+pub struct DshExecutor;
+
+impl Executor for DshExecutor {
+    fn cli_name(&self) -> &str {
+        "dsh"
+    }
+    fn install_hint(&self) -> &str {
+        "Install: npm install -g @deepseek-ai/dsh"
+    }
+    fn plain(&self) -> bool {
+        true
+    }
+    fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
+        Box::new(DshTurn)
+    }
+}
+
+struct DshTurn;
+
+#[async_trait::async_trait]
+impl TurnHandlers for DshTurn {
+    fn build_args(&self, message: &str, _session_id: &str, _env: &HashMap<String, String>) -> Vec<String> {
+        vec![
+            DshExecutor.cli_name().to_string(),
+            "--profile".into(),
+            "headless".into(),
+            message.to_string(),
+        ]
+    }
+
+    fn parse_event(&mut self, _event: serde_json::Value) -> Option<ParseResult> {
+        None
+    }
+}
+
 /// earendil-works `pi` coding agent. Plain text, stateless.
 pub struct PiExecutor;
 
@@ -1883,7 +1924,7 @@ mod tests {
     // ----- registry completeness -----
 
     #[test]
-    fn all_thirteen_executors_registered() {
+    fn all_fourteen_executors_registered() {
         let names = executor_names();
         for expected in [
             "codex",
@@ -1898,6 +1939,7 @@ mod tests {
             "agy",
             "aider",
             "deepseek",
+            "dsh",
             "pi",
         ] {
             assert!(
@@ -1905,16 +1947,26 @@ mod tests {
                 "executor `{expected}` not registered; have: {names:?}"
             );
         }
-        assert_eq!(names.len(), 13, "expected exactly 13 executors, got {}", names.len());
+        assert_eq!(names.len(), 14, "expected exactly 14 executors, got {}", names.len());
     }
 
     #[test]
-    fn lookup_returns_all_thirteen() {
+    fn lookup_returns_all_fourteen() {
         for name in ["codex", "claude-code", "codebuddy", "cursor", "gemini-cli", "grok-build",
-            "kimi-code", "opencode", "qwen-code", "agy", "aider", "deepseek", "pi"]
+            "kimi-code", "opencode", "qwen-code", "agy", "aider", "deepseek", "dsh", "pi"]
         {
             assert!(lookup(name).is_some(), "lookup({name}) returned None");
         }
+    }
+
+    // ----- dsh -----
+
+    #[test]
+    fn dsh_build_args_headless_one_shot() {
+        let h = DshExecutor.make_turn(&TurnCtx::default());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        assert_eq!(args, vec!["dsh", "--profile", "headless", "hi"]);
     }
 
     // ----- codebuddy -----

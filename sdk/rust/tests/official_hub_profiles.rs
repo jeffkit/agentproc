@@ -33,6 +33,7 @@ fn every_hub_executor_profile_resolves_to_known_rust_executor() {
         "agy",
         "aider",
         "deepseek",
+        "dsh",
         "pi",
     ];
 
