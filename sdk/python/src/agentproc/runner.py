@@ -526,6 +526,28 @@ def is_valid_session_id(value: Any) -> bool:
 # run_via_executor() — in-process executor path
 # ---------------------------------------------------------------------------
 
+def _signal_process_group(proc: subprocess.Popen, sig: int) -> None:
+    """对 agent 的整个进程组发信号（子进程用 start_new_session 脱离本组时尽力而为）。"""
+    import os
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.send_signal(sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """超时兜底：SIGKILL 整个进程组并回收。"""
+    import time
+    _signal_process_group(proc, signal.SIGKILL)
+    try:
+        proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, ValueError):
+        time.sleep(0.1)
+
+
 def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult:
     """Run using a registered in-process executor (no bridge subprocess).
 
@@ -578,21 +600,18 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
     plain = executor.get("plain", False)
     timeout_secs = options.timeout_secs if options.timeout_secs is not None else DEFAULT_TIMEOUT_SECS
 
+    # 独立进程组：超时 killpg 时把 agent CLI 的全部子孙（bash 工具调用等）一起清掉，
+    # 否则只杀直接子进程，agent 的子树会变成孤儿继续持有凭据运行（2026-09-27 实测事故）。
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             argv,
-            input=(options.message or ""),
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout_secs,
+            start_new_session=True,
             env=env,
         )
-    except subprocess.TimeoutExpired:
-        result.error = f"executor '{cli_name}' timed out after {timeout_secs}s"
-        result.exit_code = EXIT_TIMEOUT
-        if options.on_error:
-            options.on_error(result.error)
-        return result
     except FileNotFoundError:
         hint = executor.get("install_hint", "")
         result.error = f"executor '{cli_name}': command not found: {argv[0]}. {hint}".strip()
@@ -600,8 +619,19 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             options.on_error(result.error)
         return result
 
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    timed_out_plain = False
+    try:
+        stdout, stderr = proc.communicate(input=(options.message or ""), timeout=timeout_secs)
+    except subprocess.TimeoutExpired:
+        timed_out_plain = True
+        _kill_process_group(proc)
+        stdout, stderr = "", ""
+    if timed_out_plain:
+        result.error = f"executor '{cli_name}' timed out after {timeout_secs}s"
+        result.exit_code = EXIT_TIMEOUT
+        if options.on_error:
+            options.on_error(result.error)
+        return result
 
     if proc.returncode != 0:
         result.error = (
@@ -864,6 +894,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,  # 独立进程组：超时 killpg 清整个子树
         )
     except FileNotFoundError as e:
         tip = _diagnose_spawn_error(e, argv=argv, cwd=cwd, env=env)
@@ -1098,20 +1129,13 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                                 "message": "permission timed out",
                             })
                         _close_stdin()
-                        # terminate() is SIGTERM on POSIX, TerminateProcess on
-                        # Windows — both are the "polite shutdown" the spec's
-                        # SIGTERM→SIGKILL contract refers to.
-                        try:
-                            proc.terminate()
-                        except (ProcessLookupError, PermissionError):
-                            pass
+                        # 先对进程组 SIGTERM（polite shutdown），宽限后 killpg SIGKILL——
+                        # 只 terminate 直接子进程会漏掉 agent 的子树（2026-09-27 事故）。
+                        _signal_process_group(proc, signal.SIGTERM)
                         try:
                             proc.wait(timeout=profile["kill_grace_secs"])
                         except subprocess.TimeoutExpired:
-                            try:
-                                proc.kill()
-                            except (ProcessLookupError, PermissionError):
-                                pass
+                            _signal_process_group(proc, signal.SIGKILL)
                         try:
                             exit_code = proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
