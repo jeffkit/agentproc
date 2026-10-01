@@ -7,7 +7,7 @@ Guidance for AI coding agents (Claude Code, Cursor, Aider, etc.) working in this
 AgentProc is a minimal protocol specification that defines how a messaging-platform bridge talks to an agent process. The repo contains:
 
 - The protocol spec (source of truth)
-- Two reference SDKs (Python and Node.js) that implement the spec
+- Three reference SDKs (Python, Node.js, and Rust) that implement the spec
 - Examples (bare scripts + claude CLI wrappers)
 - A VitePress documentation site
 
@@ -126,14 +126,14 @@ The spec document, the Python package, and the Node package each carry their own
 
 Files that MUST be updated together when bumping the SDK package version:
 
-- `spec/protocol.md` — `**Version:**` field at the top (only if the wire protocol itself changes; the wire version is `0.1` and is separate from the doc revision)
+- `spec/protocol.md` — `**Version:**` field at the top (only if the wire protocol itself changes; the wire version is `0.4` and is separate from the doc revision)
 - `spec/protocol.zh.md` — `**版本：**` field at the top (same)
 - `sdk/python/pyproject.toml` — `version`
 - `sdk/node/package.json` — `version`
 - `sdk/rust/Cargo.toml` — `version` (the Rust crate is a published package on its own version track; it does not have to match the Python/Node number, but a spec-relevant change must bump it too)
 - `CHANGELOG.md` — new section
 
-The `PROTOCOL_VERSION` constant (the wire string `0.1`) has a single source of truth per SDK: `sdk/python/src/agentproc/runner.py`, `sdk/node/src/runner.js`, and `sdk/rust/src/protocol.rs`. The package entry points (`__init__.py` / `index.js`) **re-export** it from the runner — do not copy the literal into the entry point. The wire version only bumps on a minor (e.g. `0.1` → `0.2`) when the bytes on stdin/stdout actually change; most SDK releases keep `0.1`.
+The `PROTOCOL_VERSION` constant (the wire string `0.4`) has a single source of truth per SDK: `sdk/python/src/agentproc/runner.py`, `sdk/node/src/runner.js`, and `sdk/rust/src/protocol.rs`. The package entry points (`__init__.py` / `index.js`) **re-export** it from the runner — do not copy the literal into the entry point. The wire version only bumps on a minor (e.g. `0.4` → `0.5`) when the bytes on stdin/stdout actually change; most SDK releases keep `0.4`.
 
 Editorial changes (clarifications, rewording, new examples) don't require a version bump.
 

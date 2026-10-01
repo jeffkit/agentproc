@@ -4,7 +4,7 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.15.0`; the Rust crate is on its own track currently `0.11.1`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.16.0` (unreleased); the Rust crate is on its own track currently `0.12.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 

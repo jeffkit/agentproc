@@ -125,7 +125,7 @@ See the [full spec](./spec/protocol.md#comparison-with-related-protocols) for th
 
 ## Status
 
-Wire protocol `0.3`, document revision `1.0` (Draft). The on-the-wire contract (stdin turn object + NDJSON stdout events) is stable enough to implement against; the spec document is revised independently and may clarify wording without bumping the wire version. See [CHANGELOG](./CHANGELOG.md).
+Wire protocol `0.4`, document revision `1.1`. The on-the-wire contract (stdin turn object + NDJSON stdout events) is stable enough to implement against; the spec document is revised independently and may clarify wording without bumping the wire version. See [CHANGELOG](./CHANGELOG.md).
 
 ## License
 
