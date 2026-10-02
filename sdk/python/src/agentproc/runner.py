@@ -42,6 +42,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from . import run_lock as _run_lock
+
 # Imported lazily to avoid circular imports; only used by run_via_executor.
 from agentproc.executors import EXECUTORS, executor_names  # noqa: E402
 
@@ -141,6 +143,9 @@ class RunOptions:
     attachments: List[Dict[str, Any]] = field(default_factory=list)
     cwd: Optional[str] = None
     profile_dir: Optional[str] = None
+    # 遗言锁键（通常=workspace 绝对路径）：设置后 spawn 写 / 收尾清
+    # run-lock 文件，供 kill-before-start 孤儿清场定位进程组（run_lock 模块）。
+    run_lock_key: Optional[str] = None
     timeout_secs: Optional[int] = None
     on_partial: Optional[Callable[[str], None]] = None
     on_session: Optional[Callable[[str], None]] = None
@@ -619,6 +624,12 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             options.on_error(result.error)
         return result
 
+    if options.run_lock_key:
+        # 遗言锁：worker 硬死时接管者据此定位并清理孤儿进程组。早退路径不
+        # 统一清理是自愈安全的——能走到早退说明子进程已死（communicate 返回
+        # 或已 killpg），残留锁下次 preflight 按 stale 清（run_lock docstring）。
+        _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
+
     timed_out_plain = False
     try:
         stdout, stderr = proc.communicate(input=(options.message or ""), timeout=timeout_secs)
@@ -674,6 +685,8 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             import sys as _sys
             print(f"[DEBUG plain] on_protocol_line falsy | stdout={stdout[:80]!r}",
                   file=_sys.stderr)
+        if options.run_lock_key:
+            _run_lock.clear_run_lock(options.run_lock_key)
         return result
 
     # NDJSON path
@@ -731,6 +744,8 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             options.on_error(result.error)
         return result
     result.exit_code = EXIT_SUCCESS
+    if options.run_lock_key:
+        _run_lock.clear_run_lock(options.run_lock_key)
     return result
 
 
@@ -917,6 +932,10 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             result.error = str(e)
         result.exit_code = EXIT_ERROR
         return result
+
+    if options.run_lock_key:
+        # 遗言锁（同 in-process 路径）：早退不清理是自愈安全的，见 run_lock。
+        _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
 
     def _write_permission_response(decision: Dict[str, Any]) -> bool:
         nonlocal stdin_closed
@@ -1204,4 +1223,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     else:
         result.exit_code = exit_code
 
+    if options.run_lock_key:
+        _run_lock.clear_run_lock(options.run_lock_key)
     return result
