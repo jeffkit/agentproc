@@ -39,6 +39,8 @@ export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
 
 加 `--refresh` 强制从 GitHub 重新拉取。
 
+设置环境变量 `AGENTPROC_HUB_REF` 可将拉取固定到某个 tag、分支或 commit sha（默认 `main`）。profile 缓存按 ref 区分——切换该变量会重新拉取，而不会误用其他 ref 的缓存副本。
+
 ## 现有 profile
 
 | Profile | CLI | 测试状态 | 语言 |
@@ -144,6 +146,7 @@ agentproc --profile ./claude-code/profile.yaml -p "hi" --cwd ./claude-code
 - 缓存位置：`~/.agentproc/cache/hub/<name>/`
 - TTL：24 小时（拉取后这段时间内直接用本地副本，不联网）
 - 强制刷新：任何 hub 命令加 `--refresh`
+- 缓存条目记录拉取时的 hub ref（`AGENTPROC_HUB_REF`，默认 `main`）；不同 ref 的缓存视为未命中
 - 每个 profile 是平铺目录：`profile.yaml`、`bridge.py`、`bridge.js`、`README.md`
 
 CLI 用 GitHub 的 git-tree API（1 个请求拿到全部文件清单）+ raw.githubusercontent.com（无 rate limit），所以未鉴权用户也能保持流畅。

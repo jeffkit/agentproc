@@ -461,3 +461,80 @@ def test_hub_cache_ttl_is_24h():
 def test_hub_repo_constants():
     assert hub_mod.HUB_REPO == "jeffkit/agentproc"
     assert hub_mod.HUB_REF == "main"
+
+
+# ---------------------------------------------------------------------------
+# AGENTPROC_HUB_REF (issue #15)
+# ---------------------------------------------------------------------------
+
+class TestHubRefOverride:
+    def test_env_ref_is_used_in_fetch_urls(self, isolated_cache, monkeypatch):
+        monkeypatch.setenv("AGENTPROC_HUB_REF", "v9.9.9")
+        seen = []
+
+        def spy(url, timeout=30):
+            seen.append(url)
+            return _make_fake_http_get_text()(url, timeout)
+
+        with patch("agentproc.hub._http_get_text", side_effect=spy), \
+             patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()):
+            hub_mod.fetch_profile("echo-agent", refresh=True)
+
+        assert seen, "expected network fetch"
+        for url in seen:
+            assert "@v9.9.9/" in url, f"ref override not applied: {url}"
+
+    def test_cache_meta_records_ref(self, isolated_cache, monkeypatch):
+        monkeypatch.setenv("AGENTPROC_HUB_REF", "deadbeef")
+        with patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()), \
+             patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()):
+            hub_mod.fetch_profile("echo-agent", refresh=True)
+
+        meta = json.loads(
+            (hub_mod.cache_dir("echo-agent") / ".cache-meta.json").read_text()
+        )
+        assert meta.get("ref") == "deadbeef"
+
+    def test_default_ref_unchanged_without_env(self, isolated_cache, monkeypatch):
+        monkeypatch.delenv("AGENTPROC_HUB_REF", raising=False)
+        with patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()), \
+             patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()):
+            hub_mod.fetch_profile("echo-agent", refresh=True)
+        meta = json.loads(
+            (hub_mod.cache_dir("echo-agent") / ".cache-meta.json").read_text()
+        )
+        assert meta.get("ref") == "main"
+
+    def test_different_ref_does_not_reuse_cache(self, isolated_cache, monkeypatch):
+        calls = {"text": 0}
+
+        def counting_text(url, timeout=30):
+            calls["text"] += 1
+            return _make_fake_http_get_text()(url, timeout)
+
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=counting_text):
+            hub_mod.fetch_profile("echo-agent")
+            n_main = calls["text"]
+            # Same ref → cache hit, no extra fetches.
+            hub_mod.fetch_profile("echo-agent")
+            assert calls["text"] == n_main
+            # Different ref → cache miss, refetch.
+            monkeypatch.setenv("AGENTPROC_HUB_REF", "v1.2.3")
+            hub_mod.fetch_profile("echo-agent")
+            assert calls["text"] > n_main
+            meta = json.loads(
+                (hub_mod.cache_dir("echo-agent") / ".cache-meta.json").read_text()
+            )
+            assert meta.get("ref") == "v1.2.3"
+
+    def test_legacy_meta_without_ref_counts_as_main(self, isolated_cache):
+        # Old caches wrote no ref field; they must still hit under default ref.
+        with patch("agentproc.hub._http_get_json", side_effect=_make_fake_http_get_json()), \
+             patch("agentproc.hub._http_get_text", side_effect=_make_fake_http_get_text()):
+            hub_mod.fetch_profile("echo-agent")
+        marker = cache_dir("echo-agent") / ".cache-meta.json"
+        meta = json.loads(marker.read_text())
+        meta.pop("ref", None)
+        marker.write_text(json.dumps(meta))
+        assert _cache_age_secs("echo-agent") is not None

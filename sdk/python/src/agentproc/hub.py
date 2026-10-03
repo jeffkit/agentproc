@@ -46,8 +46,21 @@ from typing import Any, Callable, Dict, List, Optional
 from .yaml import parse_yaml
 
 HUB_REPO = "jeffkit/agentproc"
-HUB_REF = "main"
 HUB_CACHE_TTL_SECS = 24 * 60 * 60  # 24 hours
+
+
+def _hub_ref() -> str:
+    """Git ref to fetch hub profiles from.
+
+    Overridable via the AGENTPROC_HUB_REF env var (tag, branch or commit sha)
+    so a bridge can pin an exact upstream version. The cache invalidates per
+    ref (see _cache_meta_ref).
+    """
+    return os.environ.get("AGENTPROC_HUB_REF", "").strip() or "main"
+
+
+# Kept for backwards compatibility; reflects the default ref.
+HUB_REF = "main"
 
 # jsDelivr mirrors the GitHub repo on a global CDN (Fastly), reachable where
 # raw.githubusercontent.com / api.github.com are not. No token, no 60/hr limit.
@@ -113,7 +126,13 @@ def cache_dir(name: str) -> Path:
 
 
 def _cache_age_secs(name: str) -> Optional[float]:
-    """Seconds since the cache was last written. None if not cached."""
+    """Seconds since the cache was last written. None if not cached.
+
+    Also None when the cache was written for a different hub ref than the
+    currently effective one (AGENTPROC_HUB_REF) — treat as a miss so the
+    cache is refetched and rewritten. Legacy meta without a ``ref`` field
+    counts as ``main``.
+    """
     p = cache_dir(name)
     marker = p / ".cache-meta.json"
     if not marker.exists():
@@ -121,6 +140,9 @@ def _cache_age_secs(name: str) -> Optional[float]:
     try:
         meta = json.loads(marker.read_text(encoding="utf-8"))
         ts = meta.get("fetched_at", 0)
+        cached_ref = meta.get("ref", "main")
+        if cached_ref != _hub_ref():
+            return None
         return max(0, time.time() - ts)
     except Exception:
         return None
@@ -131,7 +153,7 @@ def _write_cache_meta(name: str) -> None:
     p = cache_dir(name)
     p.mkdir(parents=True, exist_ok=True)
     (p / ".cache-meta.json").write_text(
-        json.dumps({"fetched_at": time.time(), "ref": HUB_REF}),
+        json.dumps({"fetched_at": time.time(), "ref": _hub_ref()}),
         encoding="utf-8",
     )
 
@@ -257,7 +279,8 @@ def _get_tree() -> List[Dict[str, str]]:
         try:
             meta = json.loads(tp.read_text(encoding="utf-8"))
             age = max(0.0, time.time() - float(meta.get("fetched_at", 0)))
-            if age < HUB_CACHE_TTL_SECS and isinstance(meta.get("tree"), list):
+            if age < HUB_CACHE_TTL_SECS and isinstance(meta.get("tree"), list) \
+                    and meta.get("ref", "main") == _hub_ref():
                 _tree_cache = [
                     {"path": str(e.get("path", "")), "type": str(e.get("type", ""))}
                     for e in meta["tree"] if isinstance(e, dict)
@@ -266,7 +289,7 @@ def _get_tree() -> List[Dict[str, str]]:
         except (ValueError, OSError):
             pass  # corrupt cache file — refetch
 
-    url = JSDELIVR_DATA.format(repo=HUB_REPO, ref=HUB_REF)
+    url = JSDELIVR_DATA.format(repo=HUB_REPO, ref=_hub_ref())
     data = _http_get_json(url)
     if not isinstance(data, dict) or not isinstance(data.get("files"), list):
         raise RuntimeError(f"unexpected jsDelivr data API response: {type(data).__name__}")
@@ -276,7 +299,7 @@ def _get_tree() -> List[Dict[str, str]]:
         _cache_root().mkdir(parents=True, exist_ok=True)
         tp.write_text(
             json.dumps(
-                {"fetched_at": time.time(), "ref": HUB_REF, "tree": _tree_cache},
+                {"fetched_at": time.time(), "ref": _hub_ref(), "tree": _tree_cache},
             ),
             encoding="utf-8",
         )
@@ -443,7 +466,7 @@ def _ensure_shared_cached(*, refresh: bool, on_log) -> None:
     # Remote: fetch the candidate file set via jsDelivr raw URLs.
     _clear_dir(sdir)
     for fname in _SHARED_FILE_CANDIDATES:
-        url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/_shared/{fname}")
+        url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=_hub_ref(), path=f"hub/_shared/{fname}")
         text = _http_get_text_optional(url)
         if text is None:
             continue
@@ -500,7 +523,7 @@ def fetch_profile(
             on_log(f"fetching profile '{name}' from jsDelivr CDN...")
 
     # 2) Remote via jsDelivr. Probe profile.yaml first.
-    probe_url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/profile.yaml")
+    probe_url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=_hub_ref(), path=f"hub/{name}/profile.yaml")
     probe = _http_get_text_optional(probe_url)
     if probe is None:
         # profile.yaml 404 → wrong name. Produce a "did you mean" hint from
@@ -533,7 +556,7 @@ def fetch_profile(
     for fname in _PROFILE_FILE_CANDIDATES:
         if fname == "profile.yaml":
             continue
-        url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/{fname}")
+        url = JSDELIVR_RAW.format(repo=HUB_REPO, ref=_hub_ref(), path=f"hub/{name}/{fname}")
         text = _http_get_text_optional(url)
         if text is None:
             continue  # optional file not present for this profile
@@ -595,7 +618,7 @@ def list_profiles(
             continue
         try:
             yaml_url = JSDELIVR_RAW.format(
-                repo=HUB_REPO, ref=HUB_REF, path=f"hub/{name}/profile.yaml"
+                repo=HUB_REPO, ref=_hub_ref(), path=f"hub/{name}/profile.yaml"
             )
             yaml_text = _http_get_text(yaml_url)
             data = parse_yaml(yaml_text)

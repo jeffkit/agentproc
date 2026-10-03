@@ -42,6 +42,80 @@ const {
 const CLI_NAME = 'codex';
 const INSTALL_HINT = 'Install: npm install -g @openai/codex';
 const HOOK_SCRIPT = path.join(__dirname, 'permission_hook.py');
+const PERM_TMP_PREFIX = 'agentproc-codex-';
+// A leftover dir older than this is assumed abandoned (owner killed with
+// SIGKILL, so no handler could clean it) and swept at startup.
+const STALE_PERM_AGE_SECS = 3600;
+
+const pendingPermissionHomes = new Set();
+let cleanupHandlersRegistered = false;
+
+function isPidAlive(pid) {
+  if (pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) {
+    return e.code === 'EPERM';
+  }
+}
+
+function dirAgeSecs(p) {
+  try {
+    return Math.max(0, (Date.now() - fs.statSync(p).mtimeMs) / 1000);
+  } catch {
+    return Infinity;
+  }
+}
+
+/** rmtree leftover agentproc-codex-* temp CODEX_HOME dirs.
+ *
+ *  Permission mode copies ~/.codex/auth.json into a temp dir; if the bridge
+ *  is SIGKILLed no cleanup handler runs and the credential copy lingers.
+ *  Startup sweeping is the only way to cover that path. Dirs owned by a live
+ *  process (pid encoded in the name) or younger than STALE_PERM_AGE_SECS
+ *  are left alone — double protection against deleting a concurrent
+ *  instance's home. */
+function sweepStalePermissionHomes() {
+  let entries;
+  try {
+    entries = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(PERM_TMP_PREFIX));
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    const pidStr = name.slice(PERM_TMP_PREFIX.length).split('-', 1)[0];
+    const pid = Number.parseInt(pidStr, 10);
+    if (Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) continue;
+    const dir = path.join(os.tmpdir(), name);
+    if (dirAgeSecs(dir) < STALE_PERM_AGE_SECS) continue;
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+}
+
+function cleanupPendingPermissionHomes() {
+  for (const dir of pendingPermissionHomes) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+  }
+  pendingPermissionHomes.clear();
+}
+
+function registerPermissionCleanupHandlers() {
+  if (cleanupHandlersRegistered) return;
+  cleanupHandlersRegistered = true;
+  process.on('exit', cleanupPendingPermissionHomes);
+  for (const sig of ['SIGTERM', 'SIGINT']) {
+    process.on(sig, () => {
+      cleanupPendingPermissionHomes();
+      // No other listener → restore default and re-raise so exit code matches.
+      if (process.listenerCount(sig) <= 1) {
+        process.exit(sig === 'SIGTERM' ? 143 : 130);
+      }
+    });
+  }
+}
+
+function releasePermissionHome(tmp) {
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ }
+  pendingPermissionHomes.delete(tmp);
+}
 
 module.exports = {
   buildArgs,
@@ -57,7 +131,10 @@ function realCodexHome() {
 }
 
 function preparePermissionHome() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentproc-codex-'));
+  sweepStalePermissionHomes();
+  registerPermissionCleanupHandlers();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `${PERM_TMP_PREFIX}${process.pid}-`));
+  pendingPermissionHomes.add(tmp);
   const sockPath = path.join(tmp, 'perm.sock');
   const hooks = buildHooksJson(HOOK_SCRIPT);
   fs.writeFileSync(path.join(tmp, 'hooks.json'), JSON.stringify(hooks, null, 2));
@@ -207,7 +284,7 @@ async function runPermissionMode(turn, env) {
       });
     }
     try { server && server.close(); } catch { /* ignore */ }
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+    releasePermissionHome(tmp);
   }
 
   if (errorMessage) {

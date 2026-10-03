@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.2`
+**Document revision:** `1.3`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -115,6 +115,10 @@ Values in the profile `env` block may reference the bridge's own environment var
 > **Do not run profiles from untrusted sources.** `agentproc hub run <name>` fetches a profile from a GitHub repo and runs it. If you would not trust that repo's maintainer to *read* your shell environment through `${VAR}` references, do not run their profile. `env_allowlist` (below) shrinks what `${VAR}` may expand. The trust decision still rests with the user running the profile.
 
 Bridges expand `${VAR}` using POSIX-shell semantics: unknown variables expand to the empty string, not to the literal `${VAR}`.
+
+#### Pinning the hub ref — `AGENTPROC_HUB_REF`
+
+Hub fetches read from the repo's `main` branch by default. Setting the bridge-side environment variable `AGENTPROC_HUB_REF` to a tag, branch, or commit sha pins every hub fetch (profile files, `_shared/` helpers, repo tree listing) to that exact ref. This is a **fetch-and-exec trust knob, not a sandbox**: pinning a ref makes the fetched bytes reproducible, but the fetched profile is still executed with whatever trust you already grant it — the default (`main`) means "trust whatever the repo maintainers merged most recently". The profile cache is keyed by ref: changing the variable invalidates previous cache entries, so a pinned run never silently serves a `main` copy (and vice versa).
 
 ### `env_allowlist` — shrinking `${VAR}` expansion
 
@@ -793,6 +797,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.3** — Documented the bridge-side `AGENTPROC_HUB_REF` environment variable: pins hub profile fetches (and `_shared/`, tree listing) to a tag/branch/commit; the profile cache is keyed by ref, so switching the variable invalidates prior cache entries. Editorial — no wire change (`0.4`); SDK packages bumped to ship the ref-pinned hub client.
 - **wire 0.4 / doc 1.1** — Breaking stdout shape. Removes `{"type":"session"}` and `{"type":"text"}`. Session continuity is an optional `session_id` field on stdout events: bridge persists the first non-empty value; agents SHOULD attach it once known; early omit is allowed; a conflicting later value is a violation (keep first). Never mint an id the tool cannot resume with; never use `""` on output. Final success body is a single `{"type":"result","text":...}` (optional `usage`). Streaming body assembly: forwarded `partial`s win over a duplicate `result.text`. Hard cutover from 0.3 (see [Migration from 0.3](#migration-from-03)). Rationale for 0.3’s “last session event wins” is retired.
 - **wire 0.3 / doc 1.0** — NDJSON on both directions. Input: a single [turn object](#input--stdin-turn-object) on stdin replaces all `AGENT_*` environment variables; secrets/config stay in env; argv placeholders unchanged. Output: stdout is now NDJSON events (`partial` / `text` / `session` / `error` / `permission_request`) distinguished by a `type` field, replacing the `AGENT_*:` sentinel prefixes. `partial` gains an optional `role` (`output` | `thinking`). Attachments collapse to a single `attachments` array in the turn object (each element `{kind, url, ...}`), replacing the 0.2 `AGENT_IMAGE_URL` / `AGENT_FILE_URL` single-attachment convenience vars — there is no longer a dual single/multi representation. Session id is now an arbitrary JSON string on the wire (charset restriction moved to a storage-level concern). Profile changes: `command` is always argv[0] and never split (the `args`-absent whitespace-split shorthand is removed; `args` defaults to `[]`); the `stdin` field is removed (stdin always carries the turn); `streaming` becomes a bridge-side hint rather than a wire field; `env_inherit` is removed (child base env is always the infra set). Malformed stdout lines are logged and ignored rather than treated as reply body. The event vocabulary is declared closed to resist drift toward ACP-style richer events. This is a hard cutover from 0.2; the runner does not support both.
 - **wire 0.2 / doc 0.9** — Secure-by-default child environment inheritance. New profile field `env_inherit: minimal|all` (default `minimal`). Inheritance is decoupled from `env_allowlist`: the allowlist only gates `${VAR}` expansion; full `process.env` / `os.environ` inheritance requires explicit `env_inherit: all`. SDK packages bumped to 0.6.1; wire protocol stays `0.2`.
