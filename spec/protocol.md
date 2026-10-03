@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.5`
+**Document revision:** `1.6`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -85,6 +85,8 @@ env_allowlist: [MY_API_KEY]   # optional: restrict which ${VAR} the env block ma
 
 # Output control
 timeout_secs: 600             # per-turn wall-clock timeout (secs), default 1800
+budget_secs: 900              # optional: per-turn wall-clock time budget (secs); no default
+deadline: "2025-01-01T12:00:00+00:00" # optional: ISO-8601 absolute turn deadline
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
 
 # Streaming (bridge-side hint)
@@ -650,6 +652,27 @@ The agent SHOULD handle `SIGTERM` by flushing any buffered partial output and ex
 
 **Windows caveat.** `SIGTERM` and `SIGKILL` do not exist as deliverable signals on Windows. A bridge running on Windows MUST still honour the two-step intent — first a "polite" termination request (on Windows, `TerminateProcess` is the only available lever, so the grace period collapses to zero) and then, if the process is still alive after `kill_grace_secs`, a hard termination. POSIX bridges implement the full SIGTERM → grace → SIGKILL sequence. Agents that need to flush on shutdown cannot rely on receiving a signal on Windows and SHOULD use `atexit`-style hooks or explicit flush-before-exit discipline instead.
 
+### Time budget and absolute deadline (optional profile fields)
+
+Two optional profile fields complement `timeout_secs`:
+
+- `budget_secs` — a per-turn wall-clock time budget in seconds, measured by the bridge. Its expiry semantics are identical to `timeout_secs`: SIGTERM → `kill_grace_secs` → SIGKILL, exit code 124. When both `timeout_secs` and `budget_secs` are present, the effective limit is the **earliest** of the two.
+- `deadline` — an ISO-8601 timestamp with an explicit timezone offset (e.g. `"2025-01-01T12:00:00+00:00"`). The bridge converts it to an equivalent budget (`deadline − turn start time`) at the moment the turn starts. When combined with `timeout_secs` and/or `budget_secs`, the effective limit is the earliest expiry of the three. A `deadline` already in the past at turn start expires immediately. A value that is not a valid timezone-aware ISO-8601 timestamp is a profile validation error (bridges MUST NOT silently ignore it).
+
+All three fields are optional and independent; omitting them preserves the existing `timeout_secs`-only behaviour exactly. None of them appear in the wire format — they are bridge-side profile fields only.
+
+---
+
+## Event traceability (optional)
+
+These are bridge-side observability features. None of them change the bytes on stdin/stdout (wire stays `0.4`).
+
+**Event sequence numbers and bridge timestamps.** A bridge MAY attach metadata to each classified stdout event in its internal structures (not in the wire output forwarded to the messaging platform): a monotonically increasing `seq` (per-turn, starting at 1, no gaps or repeats) and a bridge-side `ts` (ISO-8601 UTC) recording when the bridge classified the line.
+
+**RunResult timing.** A bridge's run result MAY include `started_at` (ISO-8601 UTC, turn start) and `duration` (seconds, floating point, bridge-measured wall clock covering spawn-to-exit). These are bridge measurements and are distinct from the agent self-reported `usage.duration_ms`, which excludes spawn/IPC overhead.
+
+**Opt-in journal.** A bridge MAY offer a switch (e.g. a CLI flag) that appends an NDJSON event journal to a caller-specified file. When enabled, the journal records every classified event (with `seq`/`ts`) plus bridge-level decisions — timeout fired, SIGTERM sent, grace-period SIGKILL, exit code 124, and similar. The journal MUST be off by default, MUST NOT be written to stdout, and when disabled the bridge's stdout/stderr output MUST be byte-identical to a bridge without journal support.
+
 ---
 
 ## Design Principles
@@ -799,6 +822,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **wire 0.4 / doc 1.6** — Optional bridge-side profile fields `budget_secs` and `deadline` (earliest-expiry-wins with `timeout_secs`; identical SIGTERM → grace → SIGKILL semantics, exit 124). New "Event traceability (optional)" section: bridge-internal event `seq`/`ts` metadata, `RunResult` `started_at`/`duration` (bridge-measured, distinct from agent self-reported `usage.duration_ms`), and an opt-in NDJSON journal (off by default, file-only, never stdout; stdout/stderr byte-identical when disabled). No wire changes — the bytes on stdin/stdout are unchanged. SDK packages bumped to 0.17.0.
 - **doc 1.5** — Exit Codes: a bridge MUST normalise a signal death to `128 + signal number` on every platform, regardless of how the host OS reports the death (POSIX negative wait status, Windows) — SIGINT always surfaces as `130` and SIGTERM as `143`. No wire change.
 - **doc 1.4** — Clarified the UTF-8 contract on agent stdout: bridges that decode child stdout as text SHOULD pass an explicit `encoding="utf-8"` (with lossy `errors="replace"`) rather than relying on the process locale; decoding with the locale under non-UTF-8 environments (`LANG=C`, Chinese Windows) can raise `UnicodeDecodeError` inside a drain thread and silently kill a turn. No wire change.
 - **doc 1.3** — Documented the bridge-side `AGENTPROC_HUB_REF` environment variable: pins hub profile fetches (and `_shared/`, tree listing) to a tag/branch/commit; the profile cache is keyed by ref, so switching the variable invalidates prior cache entries. Editorial — no wire change (`0.4`); SDK packages bumped to ship the ref-pinned hub client.

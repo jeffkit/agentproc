@@ -3,12 +3,20 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.5`. Does not change the wire contract (except when paired with a wire bump).
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.6`. Does not change the wire contract (except when paired with a wire bump).
 - **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.2`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 
 ### Spec / SDK 0.17.0 — unreleased
+
+**Time budget, absolute deadline, event traceability, opt-in journal (issue #18; spec doc 1.6, wire stays 0.4)**
+
+- Spec: optional profile fields `budget_secs` (per-turn wall-clock budget) and `deadline` (timezone-aware ISO-8601 absolute instant). Earliest expiry of `timeout_secs`/`budget_secs`/`deadline` wins; expiry follows the identical SIGTERM → `kill_grace_secs` → SIGKILL sequence, exit 124. An invalid/naive `deadline` is a profile validation error, never silently ignored. New "Event traceability (optional)" section: bridge-internal event `seq`/`ts`, `RunResult.started_at`/`duration` (bridge-measured; distinct from agent self-reported `usage.duration_ms`), and an opt-in NDJSON journal (off by default, file-only, never stdout; stdout/stderr byte-identical when disabled). Mirrored in `protocol.zh.md`.
+- Python SDK: `RunResult.started_at`/`duration`; `RunOptions.on_journal` hook; `parse_deadline()`; per-event monotonic `seq` + ISO-8601 UTC `ts` on classified events and bridge decisions (`timeout`, `sigterm_process_group`, `sigkill_process_group`). CLI gains `--journal <path>`.
+- Node SDK: same observable behaviour — `startedAt`/`duration` on the result, `options.onJournal`, `parseDeadline()`, `seq`/`ts` journal entries (`timeout`, `sigterm_child`, `sigkill_child`). CLI gains `--journal <path>`.
+- Conformance: two new `scenarios.json` scenarios (budget-driven 124 timeout with optional trailing partial; no-budget regression), `sleep_secs` support in both scenario harnesses.
+- Rust crate not bumped: the new profile fields are optional and bridge-side only; existing Rust behaviour remains spec-conformant.
 
 **Python SDK (breaking, security): in-process executor path no longer inherits the host environment (#5)**
 

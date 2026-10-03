@@ -986,3 +986,103 @@ class TestExecutorPathProfileFields:
         )
         assert r.exit_code == 0, r.error
         assert str(wd2) in r.reply
+
+
+# ---------------------------------------------------------------------------
+# Time budget / deadline / event traceability (spec doc 1.3)
+# ---------------------------------------------------------------------------
+
+class TestTimeBudgetAndTraceability:
+    def test_budget_secs_times_out(self, agent_script):
+        agent = agent_script("#!/usr/bin/env bash\nsleep 30\necho unreachable\n")
+        r = run(
+            {"command": str(agent), "budget_secs": 1, "kill_grace_secs": 1},
+            RunOptions(message="hi"),
+        )
+        assert r.timed_out is True
+        assert r.exit_code == EXIT_TIMEOUT
+
+    def test_budget_secs_earliest_wins(self, agent_script):
+        # timeout_secs (30) > budget_secs (1): the budget must fire.
+        agent = agent_script("#!/usr/bin/env bash\nsleep 30\n")
+        r = run(
+            {"command": str(agent), "timeout_secs": 30, "budget_secs": 1, "kill_grace_secs": 1},
+            RunOptions(message="hi"),
+        )
+        assert r.timed_out is True
+        assert r.exit_code == EXIT_TIMEOUT
+
+    def test_deadline_in_past_expires_immediately(self, agent_script):
+        agent = agent_script("#!/usr/bin/env bash\nsleep 30\n")
+        r = run(
+            {
+                "command": str(agent),
+                "deadline": "2000-01-01T00:00:00+00:00",
+                "kill_grace_secs": 1,
+            },
+            RunOptions(message="hi"),
+        )
+        # sanity: run() must have parsed the deadline, not silently ignored it
+        assert r.timed_out is True
+        assert r.exit_code == EXIT_TIMEOUT
+
+    def test_deadline_naive_timestamp_rejected(self):
+        from agentproc.runner import parse_deadline
+        with pytest.raises(ValueError):
+            parse_deadline("2025-01-01T12:00:00")
+        with pytest.raises(ValueError):
+            parse_deadline("not-a-date")
+            parse_deadline("2025-01-01T12:00:00")
+        with pytest.raises(ValueError):
+            parse_deadline("not-a-date")
+
+    def test_started_at_and_duration_measured(self, agent_script):
+        agent = agent_script(
+            '#!/usr/bin/env bash\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ok\\"}"\n'
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.reply == "ok"
+        assert r.started_at, "started_at must be populated"
+        assert r.duration > 0.0
+        from datetime import datetime
+        dt = datetime.fromisoformat(r.started_at)
+        assert dt.tzinfo is not None
+
+    def test_journal_seq_and_decisions(self, agent_script):
+        agent = agent_script(
+            '#!/usr/bin/env bash\n'
+            'echo "{\\"type\\":\\"partial\\",\\"text\\":\\"a\\"}"\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"done\\"}"\n'
+        )
+        entries: List[dict] = []
+        r = run(
+            {"command": str(agent)},
+            RunOptions(message="hi", on_journal=entries.append),
+        )
+        assert r.reply == "done"
+        kinds = [e["kind"] for e in entries]
+        assert kinds == ["partial", "result"]
+        seqs = [e["seq"] for e in entries]
+        assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs) and seqs[0] == 1
+        assert all("ts" in e for e in entries)
+
+    def test_journal_records_timeout_decisions(self, agent_script):
+        agent = agent_script("#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n")
+        entries: List[dict] = []
+        run(
+            {"command": str(agent), "budget_secs": 1, "kill_grace_secs": 1},
+            RunOptions(message="hi", on_journal=entries.append),
+        )
+        decisions = [e["decision"] for e in entries if "decision" in e]
+        assert "timeout" in decisions
+        assert "sigterm_process_group" in decisions
+        assert "sigkill_process_group" in decisions
+
+    def test_no_journal_by_default(self, agent_script):
+        agent = agent_script(
+            '#!/usr/bin/env bash\n'
+            'echo "{\\"type\\":\\"result\\",\\"text\\":\\"ok\\"}"\n'
+        )
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.reply == "ok"  # no on_journal → no crash, wire output unchanged

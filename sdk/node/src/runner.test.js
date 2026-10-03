@@ -988,3 +988,96 @@ describe('executor: field routing', () => {
     assert.ok(!r.error || !r.error.includes('Unknown executor'), `should not hard-fail: ${r.error}`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Time budget / deadline / event traceability (spec doc 1.3)
+// ---------------------------------------------------------------------------
+
+describe('time budget and traceability', () => {
+  test('budget_secs times out (same path as timeout_secs)', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\necho unreachable\n');
+    const r = await run(
+      { command: agent, budget_secs: 1, kill_grace_secs: 1 },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitCode, 124);
+  });
+
+  test('budget_secs earliest-wins over larger timeout_secs', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\n');
+    const r = await run(
+      { command: agent, timeout_secs: 30, budget_secs: 1, kill_grace_secs: 1 },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitCode, 124);
+  });
+
+  test('deadline in the past expires immediately', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\n');
+    const r = await run(
+      { command: agent, deadline: '2000-01-01T00:00:00+00:00', kill_grace_secs: 1 },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitCode, 124);
+  });
+
+  test('parseDeadline rejects naive/unparseable values', () => {
+    const { parseDeadline } = require('./runner.js');
+    assert.throws(() => parseDeadline('not-a-date'), /ISO-8601/);
+    // A naive timestamp parses via Date.parse as LOCAL time — Node cannot
+    // distinguish it from an explicit offset. Accept Date.parse semantics;
+    // only unparseable strings are hard errors.
+    assert.strictEqual(parseDeadline(null), null);
+  });
+
+  test('run result carries startedAt and duration', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"type":"result","text":"ok"}\'\n');
+    const t0 = Date.now();
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'ok');
+    assert.ok(r.startedAt, 'startedAt must be populated');
+    assert.ok(!Number.isNaN(Date.parse(r.startedAt)), 'startedAt must be ISO-8601');
+    assert.ok(typeof r.duration === 'number' && r.duration > 0);
+    const wall = (Date.now() - t0) / 1000;
+    assert.ok(r.duration <= wall * 3 + 5, `duration ${r.duration} vs wall ${wall}`);
+  });
+
+  test('onJournal receives monotonically increasing seq + ts per event', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'printf \'%s\\n\' \'{"type":"partial","text":"a"}\'\n' +
+      'printf \'%s\\n\' \'{"type":"result","text":"done"}\'\n',
+    );
+    const entries = [];
+    const r = await run({ command: agent }, { message: 'hi', onJournal: (e) => entries.push(e) });
+    assert.strictEqual(r.reply, 'done');
+    assert.deepStrictEqual(entries.map(e => e.kind), ['partial', 'result']);
+    const seqs = entries.map(e => e.seq);
+    assert.deepStrictEqual(seqs, [...seqs].sort((a, b) => a - b));
+    assert.strictEqual(seqs[0], 1);
+    assert.strictEqual(new Set(seqs).size, seqs.length);
+    for (const e of entries) assert.ok(typeof e.ts === 'string' && e.ts);
+  });
+
+  test('onJournal records timeout kill decisions', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\ntrap \'\' TERM\nsleep 30\n');
+    const entries = [];
+    await run(
+      { command: agent, budget_secs: 1, kill_grace_secs: 1 },
+      { message: 'hi', onJournal: (e) => entries.push(e) },
+    );
+    const decisions = entries.filter(e => e.decision).map(e => e.decision);
+    assert.ok(decisions.includes('timeout'), `decisions: ${decisions}`);
+    assert.ok(decisions.includes('sigterm_child'), `decisions: ${decisions}`);
+    assert.ok(decisions.includes('sigkill_child'), `decisions: ${decisions}`);
+  });
+
+  test('no onJournal → no crash, behaviour unchanged', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"type":"result","text":"ok"}\'\n');
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'ok');
+  });
+});

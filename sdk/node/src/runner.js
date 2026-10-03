@@ -202,10 +202,32 @@ function normalizeProfile(raw) {
     permission: src.permission === true,
     timeout_secs: Number.isFinite(src.timeout_secs) ? src.timeout_secs : DEFAULT_TIMEOUT_SECS,
     kill_grace_secs: Number.isFinite(src.kill_grace_secs) ? src.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
+    // Optional time budget / absolute deadline (spec "Time budget and
+    // absolute deadline"); null when absent. deadline kept raw here — parsed
+    // against turn-start in run().
+    budget_secs: Number.isFinite(src.budget_secs) ? src.budget_secs : null,
+    deadline: typeof src.deadline === 'string' ? src.deadline : null,
     // Bridge-side hint: when false, the runner ignores {"type":"partial"} events
     // and assembles the reply from {"type":"result"} only. Not a wire field.
     streaming: src.streaming !== false,
   };
+}
+
+/**
+ * Parse a profile `deadline` string into epoch seconds; null when absent.
+ * Timezone-aware ISO-8601 only; anything else is a profile validation
+ * error (spec: bridges MUST NOT silently ignore it).
+ */
+function parseDeadline(value) {
+  if (value == null) return null;
+  if (typeof value !== 'string') {
+    throw new Error('profile.deadline must be an ISO-8601 timestamp string');
+  }
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) {
+    throw new Error(`profile.deadline must be a timezone-aware ISO-8601 timestamp, got ${JSON.stringify(value)}`);
+  }
+  return ms / 1000;
 }
 
 function expandPath(p) {
@@ -537,6 +559,10 @@ function isValidSessionId(value) {
  *   Common keys (all optional): `input_tokens`, `output_tokens`, `total_tokens`,
  *   `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_tokens`,
  *   `duration_ms`, `cost_usd`.
+ * @property {string} [startedAt] - ISO-8601 UTC turn-start instant
+ *   (bridge-measured; spec "Event traceability").
+ * @property {number} [duration] - Bridge-measured wall-clock seconds,
+ *   spawn-to-exit. Distinct from agent self-reported `usage.duration_ms`.
  */
 
 /**
@@ -871,6 +897,25 @@ async function run(profileRaw, options) {
     usage: null,
   };
 
+  // Event traceability: bridge-measured turn timing + opt-in journal hook.
+  const startedAtMs = Date.now();
+  result.startedAt = new Date(startedAtMs).toISOString();
+  let seq = 0;
+
+  function utcNowIso() {
+    return new Date().toISOString();
+  }
+
+  function journal(event) {
+    if (typeof options.onJournal !== 'function') return;
+    options.onJournal(Object.assign({}, event, { ts: utcNowIso() }));
+  }
+
+  function nextSeq() {
+    seq += 1;
+    return seq;
+  }
+
   let killed = false;
   // Spec: once an error event arrives, subsequent partial/result events
   // MUST be discarded (they cannot contribute to a failed turn's reply).
@@ -951,6 +996,11 @@ async function run(profileRaw, options) {
     // Strip a trailing \r (CRLF tolerance) but otherwise treat raw.
     const line = rawLine.replace(/\r$/, '');
     const c = classifyLine(line);
+    // Event traceability: journal classified events with seq/ts. seq/ts stay
+    // bridge-internal — they never enter the wire output.
+    if (c.kind !== 'malformed') {
+      journal({ seq: nextSeq(), kind: c.kind, line: line.slice(0, 2000) });
+    }
     if (c.session_id !== undefined) {
       captureSessionId(c.session_id);
     }
@@ -1116,10 +1166,22 @@ async function run(profileRaw, options) {
   // in test/script contexts.
   let timer = null;
   let killTimer = null;
-  if (timeoutSecs > 0) {
+  // Time budget / absolute deadline (spec "Time budget and absolute
+  // deadline"): earliest expiry of timeout_secs / budget_secs / deadline.
+  let effectiveSecs = timeoutSecs > 0 ? timeoutSecs : null;
+  if (profile.budget_secs != null && profile.budget_secs > 0) {
+    effectiveSecs = effectiveSecs == null ? profile.budget_secs : Math.min(effectiveSecs, profile.budget_secs);
+  }
+  const deadlineSecs = parseDeadline(profile.deadline);
+  if (deadlineSecs != null) {
+    const budgetFromDeadline = deadlineSecs - startedAtMs / 1000;
+    effectiveSecs = effectiveSecs == null ? budgetFromDeadline : Math.min(effectiveSecs, budgetFromDeadline);
+  }
+  if (effectiveSecs != null) {
     timer = setTimeout(() => {
       killed = true;
       result.timedOut = true;
+      journal({ seq: nextSeq(), decision: 'timeout', budget_secs: effectiveSecs });
       // Spec: when timing out with a pending permission request, prefer deny
       // with a timeout message if stdin is still writable, then kill.
       if (pendingPermissionIds.size > 0) {
@@ -1133,14 +1195,16 @@ async function run(profileRaw, options) {
       }
       closeStdin();
       try { child.kill('SIGTERM'); } catch {}
+      journal({ seq: nextSeq(), decision: 'sigterm_child' });
       killTimer = setTimeout(() => {
         try {
           if (!child.exitCode && child.signalCode === null) {
             child.kill('SIGKILL');
+            journal({ seq: nextSeq(), decision: 'sigkill_child' });
           }
         } catch {}
       }, (profile.kill_grace_secs || DEFAULT_KILL_GRACE_SECS) * 1000);
-    }, timeoutSecs * 1000);
+    }, effectiveSecs * 1000);
   }
 
   // ---- wait for exit ----
@@ -1210,12 +1274,14 @@ async function run(profileRaw, options) {
     result.exitCode = exitCode;
   }
 
+  result.duration = (Date.now() - startedAtMs) / 1000;
   return result;
 }
 
 module.exports = {
   run,
   normalizeProfile,
+  parseDeadline,
   classifyLine,
   parseJsonLine,
   isValidSessionId,

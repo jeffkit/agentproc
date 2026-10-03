@@ -96,6 +96,7 @@ function parseArgs(argv) {
         opts.env.push(next());
         break;
       case '--timeout': opts.timeout = parseInt(next(), 10); break;
+      case '--journal': opts.journal = next(); break;
       case '--no-stream': opts.noStream = true; break;
       case '--verbose': opts.verbose = true; break;
       case '--quiet': opts.verbose = false; break;
@@ -152,7 +153,7 @@ async function runHubSubcommand(args) {
       a === '--prompt' || a === '-p' ||
       a === '--session' || a === '--session-name' ||
       a === '--image-url' || a === '--file-url' ||
-      a === '--cwd' || a === '--env' || a === '--timeout';
+      a === '--cwd' || a === '--env' || a === '--timeout' || a === '--journal';
     if (takesValue) {
       runnerArgs.push(a === '-p' ? '--prompt' : a);
       if (i + 1 < rest.length) runnerArgs.push(rest[++i]);
@@ -273,6 +274,7 @@ Hub run options (same as the regular --profile runner):
   --image-url <url>            Image attachment URL (carried in the turn's attachments)
   --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
+  --journal <path>             Append an NDJSON event/decision journal to <path> (opt-in)
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
   --stdin                      Read prompt from stdin
@@ -397,6 +399,24 @@ async function runAgent(profilePath, opts) {
     });
   }
 
+  // Opt-in journal (spec "Event traceability"): NDJSON append to a file.
+  // Off by default; never touches stdout/stderr.
+  let onJournal;
+  if (opts.journal) {
+    let jf;
+    try {
+      jf = fs.openSync(opts.journal, 'a');
+    } catch (err) {
+      process.stderr.write(`error: cannot open journal file ${opts.journal}: ${err.message}\n`);
+      process.exit(2);
+    }
+    onJournal = (entry) => {
+      try {
+        fs.writeSync(jf, JSON.stringify(entry) + '\n');
+      } catch { /* best-effort */ }
+    };
+  }
+
   const r = await runner.run(profileRaw, {
     message: prompt,
     sessionId: opts.session || '',
@@ -407,6 +427,7 @@ async function runAgent(profilePath, opts) {
     extraEnv,
     attachments: buildAttachments(opts),
     timeoutSecs: opts.timeout,
+    onJournal,
     onPartial: (t, role) => { if (verbose) process.stderr.write(JSON.stringify({ type: 'partial', text: t, ...(role ? { role } : {}) }) + '\n'); },
     onSession: (id) => { if (verbose) process.stderr.write(JSON.stringify({ type: 'session', id }) + '\n'); },
     onError: (msg) => { if (verbose) process.stderr.write(JSON.stringify({ type: 'error', message: msg }) + '\n'); },

@@ -133,6 +133,22 @@
       "lines": ["{\"type\":\"result\",\"text\":\"0123456789ABCDEF\"}"],
       "streaming": false,
       "expect": {"reply": "0123456789ABCDEF", "session_id": "", "error": "", "exit_code": 0, "partials": []}
+    },
+    {
+      "name": "budget_secs times out a silent sleeping agent (same path as timeout_secs)",
+      "lines": [
+        "{\"type\":\"partial\",\"text\":\"started\"}"
+      ],
+      "sleep_secs": 30,
+      "profile_overrides": {"budget_secs": 1, "kill_grace_secs": 1, "streaming": false},
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 124, "partials_any_of": [[], ["started"]]}
+    },
+    {
+      "name": "timeout_secs unchanged when no budget/deadline (regression)",
+      "lines": [
+        "{\"type\":\"result\",\"text\":\"ok\"}"
+      ],
+      "expect": {"reply": "ok", "session_id": "", "error": "", "exit_code": 0, "partials": []}
     }
   ]
 }

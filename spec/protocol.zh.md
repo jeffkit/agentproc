@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.5`
+**文档修订：** `1.6`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -83,6 +83,8 @@ env_allowlist: [MY_API_KEY]   # 可选：限制 env 块可读取哪些 ${VAR}
 
 # 输出控制
 timeout_secs: 600             # 每轮挂钟超时（秒），默认 1800
+budget_secs: 900              # 可选：每轮挂钟时间预算（秒）；无默认值
+deadline: "2025-01-01T12:00:00+00:00" # 可选：ISO-8601 绝对轮次截止时刻
 kill_grace_secs: 5            # SIGTERM → SIGKILL 的宽限期，默认 5
 
 # 流式（bridge 侧提示）
@@ -646,6 +648,27 @@ agent **SHOULD** 通过刷新任何缓冲的 partial 输出并 promptly 退出�
 
 **Windows 注意事项。** `SIGTERM` 与 `SIGKILL` 在 Windows 上不作为可投递信号存在。Windows 上的 bridge **MUST** 仍尊重两步意图——先「礼貌」终止请求（Windows 上 `TerminateProcess` 是唯一可用杠杆，故宽限期坍缩为零），然后在 `kill_grace_secs` 后进程仍存活时硬终止。POSIX bridge 实现完整 SIGTERM → 宽限 → SIGKILL 序列。需要在关闭时刷新的 agent 无法在 Windows 上依赖收到信号，**SHOULD** 改用 `atexit` 式钩子或显式的退出前刷新纪律。
 
+### 时间预算与绝对截止时刻（可选 profile 字段）
+
+两个可选 profile 字段与 `timeout_secs` 互补：
+
+- `budget_secs` —— 每轮挂钟时间预算（秒），由 bridge 侧测量。到期语义与 `timeout_secs` 完全一致：SIGTERM → `kill_grace_secs` → SIGKILL，退出码 124。`timeout_secs` 与 `budget_secs` 同时存在时，有效限额取二者中**更早**到期者。
+- `deadline` —— 带显式时区偏移的 ISO-8601 时刻（如 `"2025-01-01T12:00:00+00:00"`）。bridge 在 turn 开始时刻将其换算为等价预算（`deadline − turn 开始时刻`）。与 `timeout_secs` 和/或 `budget_secs` 组合时，有效限额取三者中最早到期者。turn 开始时 `deadline` 已过期则立即到期。非合法的带时区 ISO-8601 时间戳属于 profile 校验错误（bridge **MUST NOT** 静默忽略）。
+
+三个字段均可选且相互独立；缺省时行为与仅有 `timeout_secs` 的现状完全一致。它们均不出现在线格式（wire）中——只是 bridge 侧 profile 字段。
+
+---
+
+## 事件可追溯性（可选）
+
+以下均为 bridge 侧可观测性能力，均不改变 stdin/stdout 上的字节（wire 保持 `0.4`）。
+
+**事件序号与 bridge 时间戳。** bridge **MAY** 在其内部结构中为每条分类后的 stdout 事件附带元数据（不进入转发到消息平台的线输出）：单调递增的 `seq`（每轮从 1 开始、不重不漏）与 bridge 侧 `ts`（ISO-8601 UTC，记录 bridge 分类该行的时刻）。
+
+**RunResult 计时。** bridge 的运行结果 **MAY** 包含 `started_at`（ISO-8601 UTC，turn 开始时刻）与 `duration`（秒，浮点，bridge 实测挂钟，覆盖 spawn 到退出）。它们是 bridge 侧测量，区别于 agent 自报的 `usage.duration_ms`（后者不含 spawn/IPC 开销）。
+
+**opt-in journal。** bridge **MAY** 提供开关（如 CLI flag），把 NDJSON 事件日志追加写入调用方指定的文件。开启时，journal 记录每条分类事件（含 `seq`/`ts`）及 bridge 级决策——超时触发、SIGTERM、宽限期 SIGKILL、退出码 124 等。journal **MUST** 默认关闭、**MUST NOT** 写入 stdout；关闭时 bridge 的 stdout/stderr 输出必须与不支持 journal 的 bridge 字节一致。
+
 ---
 
 ## 设计原则
@@ -795,6 +818,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
+- **wire 0.4 / doc 1.6** —— 可选 bridge 侧 profile 字段 `budget_secs` 与 `deadline`（与 `timeout_secs` 取最早到期；SIGTERM → 宽限 → SIGKILL 语义一致，退出码 124）。新增「事件可追溯性（可选）」小节：bridge 内部事件 `seq`/`ts` 元数据、`RunResult` 的 `started_at`/`duration`（bridge 实测，区别于 agent 自报 `usage.duration_ms`）、opt-in NDJSON journal（默认关闭、只写文件、绝不写 stdout；关闭时 stdout/stderr 字节一致）。无 wire 变更——stdin/stdout 上的字节不变。SDK 包 bump 至 0.17.0。
 - **doc 1.5** —— Exit Codes：agent 被信号杀死时，bridge **必须**在任何平台将退出码归一为 `128 + 信号编号`，无论宿主操作系统如何报告该死亡（POSIX 负数 wait 状态、Windows）——SIGINT 一律呈现为 `130`，SIGTERM 一律呈现为 `143`。无线协议变更。
 - **doc 1.4** —— 澄清 agent stdout 的 UTF-8 合约：以文本方式解码子进程 stdout 的 bridge **SHOULD** 显式传 `encoding="utf-8"`（并配 `errors="replace"` 容错），而非依赖进程 locale；在非 UTF-8 环境（`LANG=C`、中文 Windows）下按 locale 解码可能在 drain 线程内抛 `UnicodeDecodeError` 并静默杀死一轮对话。无线协议变更。
 - **doc 1.3** —— 文档化 bridge 侧环境变量 `AGENTPROC_HUB_REF`：将 hub profile 拉取（及 `_shared/`、仓库树列表）固定到 tag/分支/commit；profile 缓存按 ref 失效，切换该变量会使旧缓存失效。编辑性更新——wire 不变（`0.4`）；SDK 包版本 bump 以发布支持 ref 固定的 hub 客户端。
