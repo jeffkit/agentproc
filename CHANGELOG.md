@@ -4,7 +4,7 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.4`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.1`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 
@@ -21,6 +21,16 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - `hub/codex/bridge.py` / `bridge.js`: permission mode's one-shot `CODEX_HOME` (which copies `auth.json` for authentication) now uses an owner-identifiable temp dir (`agentproc-codex-<pid>-…`), sweeps stale leftover dirs at startup (deleting only dirs whose owner pid is dead **and** that are older than 1h — double protection for concurrent instances; the startup sweep is the only mechanism covering a SIGKILLed bridge), and registers atexit/SIGTERM/SIGINT handlers as a backstop. Normal-path cleanup is unchanged.
 - `hub/codex/README.md` documents the permission-mode trust boundary and the temp-home lifecycle.
 - Tests: new `sdk/python/tests/test_codex_perm_cleanup.py` drives both bridges as subprocesses (fake codex CLI on PATH, fake `~/.codex/auth.json`) asserting no residue after normal exit, startup sweep of a pre-planted stale dir, and SIGTERM cleanup — observable parity across the two bridges.
+
+### Rust SDK 0.12.1
+
+**`sdk/rust` — spec-alignment fixes (#11)**
+
+- **Permission stdin channel wired (spawn path)**: a `permission_request` event on the spawn path now invokes `on_permission`, awaits the decision, and writes the serialized `permission_response` NDJSON line back to the agent's still-open stdin (allow/deny, with `updated_input` on allow). Previously the event was only logged, leaving the agent blocked until timeout. With no `on_permission` callback the runner now writes an explicit `deny` response (spec MUST) plus a stderr warning. The runner also no longer leaks the turn line into the permission read: stdin is retained across the stdout loop instead of dropping through `child.stdin`.
+- **Two-step timeout termination**: on timeout the runner now sends SIGTERM to the child's process group (children spawn with `process_group(0)`), waits up to `kill_grace_secs` for a graceful exit (final partials are forwarded and kept in the reply), then SIGKILLs. Previously it went straight to SIGKILL and the grace setting was ignored. The stdout loop and the timeout race concurrently, so a stalled agent that never exits still hits `timeout_secs` (previously the unbounded stdout read could swallow the timeout entirely). Windows degrades to a direct kill, per the spec's caveat.
+- **Removed the default 8000-char reply truncation**: `max_reply_chars` / `truncation_suffix` are deleted from `Profile` (the live truncation used `profile.max_reply_chars` (default 8000) while the `ProcessOpts` copies were dead; both are now removed). Replies now arrive intact, matching the no-truncation rule. Breaking API change for the two dead pub fields; YAML keys are ignored via serde defaults.
+- **`session_id` validation**: ids containing `/`, `\`, control characters, or dot-only segments (`.`/`..`) are rejected (warned on stderr, never adopted into `RunResult.session_id`) on both the spawn and executor paths. `history::session_file_path` sanitises invalid ids to a non-colliding name and `append_history` refuses to write them, closing the path-traversal window into/out of the sessions directory.
+- New tests: `permission_channel` (allow + deny branches), `timeout_two_step_kill` (graceful SIGTERM partial flush, zero-grace SIGKILL), `no_truncation` (10k-char result intact), `session_id_validation` (adoption + traversal + history). `libc` added as a unix-only dependency; version bumped 0.12.0 → 0.12.1.
 
 ### Spec / SDK 0.16.0 — unreleased
 

@@ -49,8 +49,6 @@ pub struct Profile {
     pub env_allowlist: Option<Vec<String>>,
     pub timeout_secs: u64,
     pub kill_grace_secs: u64,
-    pub max_reply_chars: usize,
-    pub truncation_suffix: String,
     pub include_stderr_in_reply: bool,
     pub send_error_reply: bool,
     pub streaming: bool,
@@ -68,8 +66,6 @@ impl Default for Profile {
             env_allowlist: None,
             timeout_secs: DEFAULT_TIMEOUT_SECS,
             kill_grace_secs: DEFAULT_KILL_GRACE_SECS,
-            max_reply_chars: DEFAULT_MAX_REPLY_CHARS,
-            truncation_suffix: DEFAULT_TRUNCATION_SUFFIX.into(),
             include_stderr_in_reply: false,
             send_error_reply: true,
             streaming: true,
@@ -80,8 +76,6 @@ impl Default for Profile {
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 1800;
 pub const DEFAULT_KILL_GRACE_SECS: u64 = 5;
-pub const DEFAULT_MAX_REPLY_CHARS: usize = 8000;
-pub const DEFAULT_TRUNCATION_SUFFIX: &str = "\n\n…(truncated)";
 
 impl Profile {
     /// Load and parse a profile YAML file from disk.
@@ -132,12 +126,6 @@ impl Profile {
             kill_grace_secs: src
                 .kill_grace_secs
                 .unwrap_or(DEFAULT_KILL_GRACE_SECS),
-            max_reply_chars: src
-                .max_reply_chars
-                .unwrap_or(DEFAULT_MAX_REPLY_CHARS),
-            truncation_suffix: src
-                .truncation_suffix
-                .unwrap_or_else(|| DEFAULT_TRUNCATION_SUFFIX.into()),
             include_stderr_in_reply: src.include_stderr_in_reply.unwrap_or(false),
             send_error_reply: src.send_error_reply.unwrap_or(true),
             streaming: src.streaming.unwrap_or(true),
@@ -188,8 +176,6 @@ pub struct ProfileBlock {
     pub env_allowlist: Option<Vec<String>>,
     pub timeout_secs: Option<u64>,
     pub kill_grace_secs: Option<u64>,
-    pub max_reply_chars: Option<usize>,
-    pub truncation_suffix: Option<String>,
     pub include_stderr_in_reply: Option<bool>,
     pub send_error_reply: Option<bool>,
     pub streaming: Option<bool>,
@@ -252,7 +238,6 @@ agentproc:
         let p = Profile::from_yaml(yaml).unwrap();
         assert_eq!(p.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(p.kill_grace_secs, DEFAULT_KILL_GRACE_SECS);
-        assert_eq!(p.max_reply_chars, DEFAULT_MAX_REPLY_CHARS);
         assert!(p.streaming);
         assert!(p.send_error_reply);
         assert!(!p.permission);

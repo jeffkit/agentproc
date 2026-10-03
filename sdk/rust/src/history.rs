@@ -18,13 +18,20 @@ pub struct HistoryEntry {
     pub usage: Option<serde_json::Value>,
 }
 
-/// Resolve the JSONL file for a session id.
+/// Resolve the JSONL file for a session id. Invalid ids (path separators,
+/// control characters, dot-only segments) resolve to a path that will not
+/// collide with real session files; writes to them are refused by
+/// [`append_history`].
 pub fn session_file_path(session_id: &str, session_dir: Option<&Path>) -> PathBuf {
     let dir = session_dir
         .map(|p| p.to_path_buf())
         .or_else(default_session_dir)
         .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(format!("{session_id}.jsonl"))
+    if crate::runner::is_valid_session_id(session_id) {
+        dir.join(format!("{session_id}.jsonl"))
+    } else {
+        dir.join("_invalid_session_id_.jsonl")
+    }
 }
 
 fn default_session_dir() -> Option<PathBuf> {
@@ -62,6 +69,12 @@ pub fn append_history(
 ) -> std::io::Result<()> {
     if entries.is_empty() {
         return Ok(());
+    }
+    if !crate::runner::is_valid_session_id(session_id) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session id",
+        ));
     }
     let path = session_file_path(session_id, session_dir);
     if let Some(parent) = path.parent() {
