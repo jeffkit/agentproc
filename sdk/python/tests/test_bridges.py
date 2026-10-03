@@ -754,6 +754,92 @@ class TestKimiCodeBridge:
         assert parsed["error"] == ""
 
 
+class TestUtf8DecodingLocale:
+    """Issue #16: hub shared stream_utils must force UTF-8 decoding regardless
+    of the bridge process locale (protocol.md: UTF-8 on stdout)."""
+
+    def test_run_bridge_popen_forces_utf8_and_handles_chinese(self, monkeypatch, tmp_path):
+        import locale as _locale
+
+        if str(HUB_ROOT) not in sys.path:
+            sys.path.insert(0, str(HUB_ROOT))
+        import _shared.stream_utils as su
+
+        monkeypatch.setattr(
+            _locale, "getpreferredencoding",
+            lambda do_setlocale=True: "ascii", raising=False,
+        )
+
+        seen_kwargs: List[dict] = []
+        events = [
+            {"type": "result", "session_id": "cli-sess-1", "result": "你好，世界"},
+        ]
+        claude_mod = _load_bridge("claude-code")
+        fake_proc = _FakeProc(_events_to_ndjson(events))
+        captured: List[dict] = []
+        real_emit = su._emit_obj
+        real_popen = su.subprocess.Popen
+        saved_stdin = sys.stdin
+        su._emit_obj = lambda o: captured.append(o)
+        su.subprocess.Popen = lambda args, **kw: (seen_kwargs.append(kw), fake_proc)[1]
+        sys.stdin = io.StringIO(_make_turn(message="hi") + "\n")
+        try:
+            rc = su.run_bridge(
+                "test-cli", "hint",
+                lambda m, s, e: ["test-cli"],
+                claude_mod.parse_event,
+            )
+        finally:
+            su._emit_obj = real_emit
+            su.subprocess.Popen = real_popen
+            sys.stdin = saved_stdin
+        assert rc == 0
+        assert seen_kwargs and seen_kwargs[0].get("encoding") == "utf-8"
+        assert seen_kwargs[0].get("errors") == "replace"
+        parsed = _classify_output(captured)
+        assert parsed["body"] == ["你好，世界"]
+
+    def test_run_plain_cli_utf8_under_lang_c(self, monkeypatch, tmp_path):
+        """Real subprocess with LANG=C LC_ALL=C: the plain-CLI path must still
+        decode UTF-8 stdout correctly (protocol.md UTF-8 contract)."""
+        if str(HUB_ROOT) not in sys.path:
+            sys.path.insert(0, str(HUB_ROOT))
+        import _shared.stream_utils as su
+
+        fake_cli = tmp_path / "fake-cli.py"
+        fake_cli.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "sys.stdout.buffer.write('你好，世界\\n'.encode('utf-8'))\n",
+            encoding="utf-8",
+        )
+        fake_cli.chmod(0o755)
+
+        monkeypatch.setenv("LANG", "C")
+        monkeypatch.setenv("LC_ALL", "C")
+        monkeypatch.delenv("PYTHONIOENCODING", raising=False)
+
+        captured: List[dict] = []
+        real_emit = su._emit_obj
+        saved_stdin = sys.stdin
+        su._emit_obj = lambda o: captured.append(o)
+        sys.stdin = io.StringIO(_make_turn(message="hi") + "\n")
+        try:
+            rc = su.run_plain_cli(
+                "fake-cli",
+                "hint",
+                lambda msg: [sys.executable, str(fake_cli)],
+                timeout_env="TEST_TIMEOUT",
+                default_timeout=30,
+            )
+        finally:
+            su._emit_obj = real_emit
+            sys.stdin = saved_stdin
+        assert rc == 0
+        parsed = _classify_output(captured)
+        assert parsed["body"] == ["你好，世界"]
+
+
 # ---------------------------------------------------------------------------
 # Plain-text bridges: build_args tests (no subprocess mocking needed)
 # ---------------------------------------------------------------------------

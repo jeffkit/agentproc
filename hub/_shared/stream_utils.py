@@ -161,6 +161,8 @@ def run_bridge(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError:
         emit_error(f"{cli_name} CLI not found. {cli_install_hint}")
@@ -289,6 +291,8 @@ def run_plain_cli(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
     except FileNotFoundError:

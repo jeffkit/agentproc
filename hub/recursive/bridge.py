@@ -222,6 +222,8 @@ def main() -> int:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError:
         emit_error(f"{CLI_NAME} CLI not found. {INSTALL_HINT}", session_id=sid)
