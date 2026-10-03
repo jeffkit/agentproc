@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from . import run_lock as _run_lock
+from .concurrency import ConcurrencyLimitError, ConcurrencyGate, SessionSerializer
 
 # Imported lazily to avoid circular imports; only used by run_via_executor.
 from agentproc.executors import EXECUTORS, executor_names  # noqa: E402
@@ -146,6 +147,11 @@ class RunOptions:
     # 遗言锁键（通常=workspace 绝对路径）：设置后 spawn 写 / 收尾清
     # run-lock 文件，供 kill-before-start 孤儿清场定位进程组（run_lock 模块）。
     run_lock_key: Optional[str] = None
+    # 并发语义（spec「Concurrency」章节）：session_key 启用同 key 串行化；
+    # max_concurrent/on_saturated 配置全局并发闸（默认无限制 + queue）。
+    session_key: Optional[str] = None
+    max_concurrent: Optional[int] = None
+    on_saturated: str = "queue"
     timeout_secs: Optional[int] = None
     on_partial: Optional[Callable[[str], None]] = None
     on_session: Optional[Callable[[str], None]] = None
@@ -624,11 +630,14 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             options.on_error(result.error)
         return result
 
+    run_lock_generation = None
     if options.run_lock_key:
         # 遗言锁：worker 硬死时接管者据此定位并清理孤儿进程组。早退路径不
         # 统一清理是自愈安全的——能走到早退说明子进程已死（communicate 返回
         # 或已 killpg），残留锁下次 preflight 按 stale 清（run_lock docstring）。
-        _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
+        written = _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
+        if written is not None:
+            run_lock_generation = written[1]
 
     timed_out_plain = False
     try:
@@ -686,7 +695,7 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             print(f"[DEBUG plain] on_protocol_line falsy | stdout={stdout[:80]!r}",
                   file=_sys.stderr)
         if options.run_lock_key:
-            _run_lock.clear_run_lock(options.run_lock_key)
+            _run_lock.clear_run_lock(options.run_lock_key, run_lock_generation)
         return result
 
     # NDJSON path
@@ -745,7 +754,7 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
         return result
     result.exit_code = EXIT_SUCCESS
     if options.run_lock_key:
-        _run_lock.clear_run_lock(options.run_lock_key)
+        _run_lock.clear_run_lock(options.run_lock_key, run_lock_generation)
     return result
 
 
@@ -754,6 +763,40 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
 
 def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     """Run an agent process per the AgentProc spec."""
+    # 并发闸在 spawn 之前判定（spec Concurrency 章节）；reject 产协议 error
+    # 终态，文案含固定标记 agentproc: concurrency limit。
+    # serializer 为模块级：同 key 的锁必须跨 run() 调用共享才有效。
+    global _default_gate
+    serializer = _SESSION_SERIALIZER
+    if options.max_concurrent is None:
+        gate = _NO_GATE
+    else:
+        with _GATE_GUARD:
+            if _default_gate is None or (
+                _default_gate.max_concurrent != options.max_concurrent
+                or _default_gate.on_saturated != options.on_saturated
+            ):
+                _default_gate = ConcurrencyGate(options.max_concurrent, options.on_saturated)
+            gate = _default_gate
+    with serializer.serialize(options.session_key):
+        try:
+            with gate.slot():
+                return _run_inner(profile_raw, options)
+        except ConcurrencyLimitError as exc:
+            result = RunResult(exit_code=EXIT_ERROR)
+            result.error = str(exc)
+            if options.on_error:
+                options.on_error(result.error)
+            return result
+
+
+_SESSION_SERIALIZER = SessionSerializer()
+_NO_GATE = ConcurrencyGate(None)
+_GATE_GUARD = threading.Lock()
+_default_gate = None
+
+
+def _run_inner(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     profile = normalize_profile(profile_raw)
 
     # Executor path: skip the subprocess bridge entirely.
@@ -933,9 +976,12 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         result.exit_code = EXIT_ERROR
         return result
 
+    run_lock_generation = None
     if options.run_lock_key:
         # 遗言锁（同 in-process 路径）：早退不清理是自愈安全的，见 run_lock。
-        _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
+        written = _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
+        if written is not None:
+            run_lock_generation = written[1]
 
     def _write_permission_response(decision: Dict[str, Any]) -> bool:
         nonlocal stdin_closed
@@ -1224,5 +1270,5 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         result.exit_code = exit_code
 
     if options.run_lock_key:
-        _run_lock.clear_run_lock(options.run_lock_key)
+        _run_lock.clear_run_lock(options.run_lock_key, run_lock_generation)
     return result

@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.2`
+**Document revision:** `1.3`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -314,7 +314,7 @@ The agent process writes to stdout. The bridge reads it line by line in real tim
 
 The event set above is **closed**. The six `type` values — `turn` (stdin), `partial`, `result`, `error`, `permission_request`, and `permission_response` (stdin) — are the entire protocol vocabulary. AgentProc deliberately does **not** grow typed events for tool calls, file diffs, plan updates, reasoning blocks, or other richer semantics. An agent that needs those should wrap an IDE-oriented protocol (e.g. ACP) internally; an AgentProc bridge renders no diffs and owns no user files, so it has nothing to do with such events. Bridges MUST NOT expect additional event types, and agents MUST NOT invent them as a way to smuggle richer semantics through this protocol — that path leads to reimplementing ACP poorly. Unknown `type` values are handled per [Malformed lines](#malformed-lines).
 
-This protocol is scoped to **one turn**: one user message, one process, one reply. Long-lived sessions, mid-turn cancellation, concurrent requests, and client-provided callbacks (file system, terminal) are out of scope by design — they are what make ACP an IDE protocol rather than a chat-bridge protocol.
+This protocol is scoped to **one turn**: one user message, one process, one reply. Long-lived sessions, mid-turn cancellation, and client-provided callbacks (file system, terminal) are out of scope by design — they are what make ACP an IDE protocol rather than a chat-bridge protocol. Concurrent requests **are** in scope at the SDK runner level — see [Concurrency](#concurrency).
 
 ### `session_id` on events
 
@@ -494,6 +494,33 @@ Agent continues, then finishes:
 {"type":"partial","text":"Done.","session_id":"cli-sess-…"}
 {"type":"result","text":"","session_id":"cli-sess-…"}
 ```
+
+---
+
+## Concurrency
+
+The wire protocol itself stays one-turn-per-process, but SDK runners are frequently embedded in long-lived bridges (e.g. chat bots) where multiple turns arrive concurrently. The semantics below are **runner-side orchestration** and introduce **no new wire event types** — the closed vocabulary above is unchanged. A turn rejected under burst pressure terminates via the existing `error` channel.
+
+### Per-session serialization
+
+A runner that receives concurrent turns targeting the same `session_id` (or a bridge-provided equivalent key) MUST serialize them: the second turn does not start until the first has settled (`result`, `error`, or timeout). Two agent processes MUST NOT concurrently resume the same session — a concurrent `--resume` forks the CLI transcript and produces undefined behaviour. The default is **queued serialization**: later turns for the same key wait, in arrival order, for the earlier turn to finish.
+
+Serialization is opt-in: it applies only when the caller provides a session key (e.g. `session_key` / `sessionKey` in `RunOptions`). Runs without a key are unaffected.
+
+### Global concurrency limit
+
+Runners MAY expose a per-runner-instance global cap on the number of agent processes running concurrently (e.g. `max_concurrent` / `maxConcurrent`). The default is **unlimited**, preserving backward compatibility. Burst behaviour when the cap is reached is an explicit, configured choice:
+
+| `on_saturated` | Behaviour |
+|----------------|-----------|
+| `"queue"` (default) | The excess turn waits in FIFO order until a slot frees up, then proceeds normally. |
+| `"reject"` | The turn is immediately terminated with a protocol `error` whose message MUST contain the fixed marker `agentproc: concurrency limit`. |
+
+The gate is evaluated **before spawning** the agent process, so a rejected turn never launches a process. The fixed error marker lets bridges match rejection deterministically without parsing free-form text.
+
+### Run locks
+
+Where an SDK provides a run-lock (tombstone) mechanism keyed per session, concurrent writes for the same key MUST be mutually exclusive within the process, and each lock record MUST carry a monotonically increasing generation number. Clearing a lock MUST only clear the writer's own generation — an earlier finisher MUST NOT clear the lock of a still-running later writer.
 
 ---
 
@@ -793,6 +820,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.3 (wire 0.4 unchanged)** — New [Concurrency](#concurrency) section: concurrent requests moved out of the out-of-scope list. Defines per-session serialization (MUST for same-`session_id` turns, queued by default, opt-in via a session key), an optional per-runner global concurrency cap (`max_concurrent` / `maxConcurrent`, default unlimited) with explicit burst semantics (`on_saturated: "queue"` default or `"reject"` terminating via the existing `error` channel with the fixed marker `agentproc: concurrency limit`), and run-lock generation semantics (per-key in-process mutual exclusion; clear only your own generation). No new wire event types; the closed vocabulary is unchanged.
 - **wire 0.4 / doc 1.1** — Breaking stdout shape. Removes `{"type":"session"}` and `{"type":"text"}`. Session continuity is an optional `session_id` field on stdout events: bridge persists the first non-empty value; agents SHOULD attach it once known; early omit is allowed; a conflicting later value is a violation (keep first). Never mint an id the tool cannot resume with; never use `""` on output. Final success body is a single `{"type":"result","text":...}` (optional `usage`). Streaming body assembly: forwarded `partial`s win over a duplicate `result.text`. Hard cutover from 0.3 (see [Migration from 0.3](#migration-from-03)). Rationale for 0.3’s “last session event wins” is retired.
 - **wire 0.3 / doc 1.0** — NDJSON on both directions. Input: a single [turn object](#input--stdin-turn-object) on stdin replaces all `AGENT_*` environment variables; secrets/config stay in env; argv placeholders unchanged. Output: stdout is now NDJSON events (`partial` / `text` / `session` / `error` / `permission_request`) distinguished by a `type` field, replacing the `AGENT_*:` sentinel prefixes. `partial` gains an optional `role` (`output` | `thinking`). Attachments collapse to a single `attachments` array in the turn object (each element `{kind, url, ...}`), replacing the 0.2 `AGENT_IMAGE_URL` / `AGENT_FILE_URL` single-attachment convenience vars — there is no longer a dual single/multi representation. Session id is now an arbitrary JSON string on the wire (charset restriction moved to a storage-level concern). Profile changes: `command` is always argv[0] and never split (the `args`-absent whitespace-split shorthand is removed; `args` defaults to `[]`); the `stdin` field is removed (stdin always carries the turn); `streaming` becomes a bridge-side hint rather than a wire field; `env_inherit` is removed (child base env is always the infra set). Malformed stdout lines are logged and ignored rather than treated as reply body. The event vocabulary is declared closed to resist drift toward ACP-style richer events. This is a hard cutover from 0.2; the runner does not support both.
 - **wire 0.2 / doc 0.9** — Secure-by-default child environment inheritance. New profile field `env_inherit: minimal|all` (default `minimal`). Inheritance is decoupled from `env_allowlist`: the allowlist only gates `${VAR}` expansion; full `process.env` / `os.environ` inheritance requires explicit `env_inherit: all`. SDK packages bumped to 0.6.1; wire protocol stays `0.2`.

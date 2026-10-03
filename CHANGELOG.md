@@ -3,12 +3,22 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.3`. Does not change the wire contract (except when paired with a wire bump).
 - **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.16.0` (unreleased); the Rust crate is on its own track currently `0.12.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 
 ### Spec / SDK 0.16.0 — unreleased
+
+**Concurrency: per-session serialization, global concurrency gate, and run-lock race fix (issue #17)**
+
+- Spec: new explicit "Concurrency" section (`spec/protocol.md` + `spec/protocol.zh.md`); "concurrent requests" moved out of the out-of-scope list. Spec document revision `1.1` → `1.3`; wire protocol stays `0.4`. No new wire event types — the closed vocabulary is unchanged; burst rejection terminates via the existing `error` channel.
+- Per-session serialization: same-`session_id` (or bridge-provided equivalent key) concurrent turns run serialized — queued in arrival order; two agent processes never concurrently resume one session. Opt-in via `RunOptions.session_key` / `sessionKey`; runs without a key are unaffected. Implemented in all three SDKs (`sdk/python/src/agentproc/concurrency.py`, `sdk/node/src/concurrency.js`, `sdk/rust/src/concurrency.rs`).
+- Global concurrency limit: `RunOptions.max_concurrent` / `maxConcurrent` (per runner instance, default unlimited) with explicit burst semantics `on_saturated` / `onSaturated`: `"queue"` (default, FIFO) or `"reject"` — immediate terminal `error` containing the fixed marker `agentproc: concurrency limit`, evaluated before spawn. Python/Node/Rust at parity.
+- Run-lock race fix (Python): `run_lock.py` gains per-key in-process mutual exclusion and a monotonically increasing `generation` field; `write_run_lock` now returns `(path, generation)`; `clear_run_lock(key, generation)` only unlinks its own generation, so an earlier finisher can no longer clear a still-running later writer's lock. Old records without `generation` read as 0. All runner call sites pass the generation.
+- Node and Rust deliberately have no run-lock module: the tombstone is a Python orchestration-side opt-in mechanism, not a spec-observable behaviour, so observable-level parity is unaffected (AGENTS.md permits implementation differences); serialization and the concurrency gate are mirrored in both.
+- Tests: new `sdk/python/tests/test_concurrency.py` (absorbs the previously failing cases in `tests/test_wip_concurrent_run_lock.py`), concurrency cases in `sdk/node/src/runner.test.js`, and `sdk/rust/tests/concurrency.rs`. Docs: `docs/guide/concurrency.md` + `docs/zh/guide/concurrency.md`.
+- **Versions.** Python and Node stay `0.16.0` (change folds into the unreleased section). Rust crate `0.12.0` → `0.12.1`. Spec document revision `1.3`. Wire protocol stays `0.4`.
 
 **Python SDK: workspace run lock — kill-before-start orphan cleanup (`run_lock`)**
 

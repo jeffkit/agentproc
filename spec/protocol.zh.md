@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.2`
+**文档修订：** `1.3`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -310,7 +310,7 @@ agent process 写入 stdout。bridge 逐行实时读取。**每行都是一个 J
 
 上述事件集合是**封闭**的。六个 `type` 值——`turn`（stdin）、`partial`、`result`、`error`、`permission_request` 与 `permission_response`（stdin）——是整个协议的全部词汇。AgentProc 故意**不**为工具调用、文件 diff、计划更新、推理块等更丰富语义增长类型化事件。需要这些的 agent 应在内部封装一个面向 IDE 的协议（例如 ACP）；AgentProc bridge 不渲染 diff、不持有用户文件，因此与这类事件无关。bridge **MUST NOT** 期待额外事件类型，agent **MUST NOT** 发明新类型来向本协议走私更丰富的语义——那条路只会把 ACP 实现得很糟。未知 `type` 按[格式错误的行](#格式错误的行)处理。
 
-本协议范围限定为**一个 turn**：一条用户消息、一个进程、一条回复。长生命周期会话、turn 中取消、并发请求、客户端提供的回调（文件系统、终端）按设计不在范围内——正是这些让 ACP 成为 IDE 协议而非聊天桥接协议。
+本协议范围限定为**一个 turn**：一条用户消息、一个进程、一条回复。长生命周期会话、turn 中取消、客户端提供的回调（文件系统、终端）按设计不在范围内——正是这些让 ACP 成为 IDE 协议而非聊天桥接协议。并发请求在 SDK runner 层面**在范围内**——见[并发](#并发)。
 
 ### 事件上的 `session_id`
 
@@ -490,6 +490,33 @@ agent 继续，然后结束：
 {"type":"partial","text":"Done.","session_id":"cli-sess-…"}
 {"type":"result","text":"","session_id":"cli-sess-…"}
 ```
+
+---
+
+## 并发
+
+线协议本身保持每 turn 一进程，但 SDK runner 常嵌入长驻 bridge（例如聊天机器人），多条 turn 会并发到达。以下语义是 **runner 侧的编排**，**不新增任何线上事件类型**——上方封闭词汇表不变。因洪峰被拒绝的 turn 经既有的 `error` 通道终止。
+
+### Per-session 串行化
+
+runner 收到指向同一 `session_id`（或 bridge 提供的等价 key）的并发 turn 时 **MUST** 串行执行：第二条 turn 在第一条落定（`result`、`error` 或超时）之后才开始。绝不允许两个 agent 进程并发 resume 同一会话——并发 `--resume` 会让 CLI transcript 分叉，产生未定义行为。默认行为是**排队串行**：同 key 的后续 turn 按到达顺序等待前一条完成。
+
+串行化是可选启用的：仅当调用方提供会话 key（例如 `RunOptions` 的 `session_key` / `sessionKey`）时生效。不带 key 的 run 不受影响。
+
+### 全局并发上限
+
+runner **MAY** 暴露 per-runner-instance 的全局并发进程数上限（例如 `max_concurrent` / `maxConcurrent`）。默认**无限制**，保持向后兼容。达到上限时的洪峰行为是显式配置的二选一：
+
+| `on_saturated` | 行为 |
+|----------------|-----------|
+| `"queue"`（默认） | 超限 turn 按 FIFO 顺序等待空位释放，随后正常执行。 |
+| `"reject"` | 该 turn 立即以协议 `error` 终止，错误消息 **MUST** 含固定标记 `agentproc: concurrency limit`。 |
+
+并发闸在 **spawn 之前**判定，被拒绝的 turn 绝不启动进程。固定错误标记让 bridge 无需解析自由文本即可确定性匹配拒绝。
+
+### Run lock
+
+当 SDK 提供按会话 key 的 run-lock（tombstone）机制时，同 key 的并发写入 **MUST** 在进程内互斥，且每条锁记录 **MUST** 携带单调递增的世代号。清除锁 **MUST** 只清除写入者自己世代——先结束者 **MUST NOT** 清掉仍在运行的后来写入者的锁。
 
 ---
 
@@ -789,6 +816,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
+- **doc 1.3（wire 0.4 不变）** —— 新增[并发](#并发)章节：并发请求移出 out-of-scope 列表。定义 per-session 串行化（同 `session_id` turn **MUST** 串行，默认排队，经会话 key 可选启用）、可选的 per-runner 全局并发上限（`max_concurrent` / `maxConcurrent`，默认无限制）及显式洪峰语义（`on_saturated: "queue"` 默认，或 `"reject"` 经既有 `error` 通道终止并携带固定标记 `agentproc: concurrency limit`）、以及 run-lock 世代语义（同 key 进程内互斥；只清自己世代）。不新增线上事件类型；封闭词汇表不变。
 - **wire 0.4 / doc 1.1** —— 破坏性 stdout 形态变更。移除 `{"type":"session"}` 与 `{"type":"text"}`。会话连续性改为 stdout 事件上的可选 `session_id` 字段：bridge 持久化第一个非空值；agent 一旦已知 **SHOULD** 附着；早期省略允许；之后冲突值属违规（保留第一个）。永不铸造工具无法用来恢复的 id；输出上永不使用 `""`。最终成功正文为单条 `{"type":"result","text":...}`（可选 `usage`）。流式正文拼装：已转发的 `partial` 优先于重复的 `result.text`。相对 0.3 硬切换（见[从 0.3 迁移](#从-03-迁移)）。0.3 的「最后会话事件生效」理由废止。
 - **wire 0.3 / doc 1.0** —— 双向 NDJSON。输入：stdin 上单个 [turn 对象](#输入--stdin-turn-对象)取代所有 `AGENT_*` 环境变量；密钥/配置留在 env；argv 占位符不变。输出：stdout 现为按 `type` 字段区分的 NDJSON 事件（`partial` / `text` / `session` / `error` / `permission_request`），取代 `AGENT_*:` 哨兵前缀。`partial` 新增可选 `role`（`output` | `thinking`）。附件收并为 turn 对象中单个 `attachments` 数组（每个元素 `{kind, url, ...}`），取代 0.2 的 `AGENT_IMAGE_URL` / `AGENT_FILE_URL` 单附件便利变量——不再有单/多双重表示。会话 ID 线上改为任意 JSON 字符串（字符集限制移至存储级关注）。Profile 变更：`command` 始终是 argv[0] 且永不拆分（移除 `args` 缺省时按空格拆分的简写；`args` 默认 `[]`）；移除 `stdin` 字段（stdin 始终携带 turn）；`streaming` 变为 bridge 侧提示而非线上字段；移除 `env_inherit`（子进程基础 env 始终是 infra 集）。格式错误的 stdout 行被记日志并忽略，而非作为回复正文。事件词汇表声明为封闭，以抵御向 ACP 式更丰富事件的漂移。这是从 0.2 的硬切换；runner 不支持两者并存。
 - **wire 0.2 / doc 0.9** —— 安全默认的子进程环境继承。新增 profile 字段 `env_inherit: minimal|all`（默认 `minimal`）。继承与 `env_allowlist` 解耦：allowlist 仅 gate `${VAR}` 展开；完整 `process.env` / `os.environ` 继承需显式 `env_inherit: all`。SDK 包 bump 至 0.6.1；线协议保持 `0.2`。

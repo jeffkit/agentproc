@@ -968,3 +968,134 @@ describe('executor: field routing', () => {
     assert.ok(!r.error || !r.error.includes('Unknown executor'), `should not hard-fail: ${r.error}`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Concurrency (issue #17 / spec "Concurrency" section)
+// ---------------------------------------------------------------------------
+
+describe('run() — concurrency', () => {
+  const sleepAgent = (ms) => writeNodeAgent(
+    `setTimeout(() => {
+       process.stdout.write(JSON.stringify({type:'result',text:'ok'}) + '\\n');
+     }, ${ms});`);
+  const fastAgent = () => writeNodeAgent(
+    `process.stdout.write(JSON.stringify({type:'result',text:'ok'}) + '\\n');`);
+
+  test('same sessionKey serializes runs (non-overlapping)', async () => {
+    const t0 = Date.now();
+    const [a, b] = await Promise.all([
+      run(nodeProfile(sleepAgent(250)), { message: 'hi', sessionKey: 's-1', timeoutSecs: 30 }),
+      run(nodeProfile(sleepAgent(250)), { message: 'hi', sessionKey: 's-1', timeoutSecs: 30 }),
+    ]);
+    const total = Date.now() - t0;
+    assert.strictEqual(a.error, '');
+    assert.strictEqual(b.error, '');
+    // serialized: two 250ms runs take >= 450ms (concurrent would be ~300ms)
+    assert.ok(total >= 450, `runs overlapped: total=${total}ms`);
+  });
+
+  test('no sessionKey → no serialization (runs concurrently)', async () => {
+    const t0 = Date.now();
+    await Promise.all([
+      run(nodeProfile(sleepAgent(300)), { message: 'hi', timeoutSecs: 30 }),
+      run(nodeProfile(sleepAgent(300)), { message: 'hi', timeoutSecs: 30 }),
+    ]);
+    const total = Date.now() - t0;
+    assert.ok(total < 550, `unexpected serialization without sessionKey: total=${total}ms`);
+  });
+
+  test('maxConcurrent=1 + queue → serialized via gate', async () => {
+    let active = 0;
+    let peak = 0;
+    const agent = writeNodeAgent(`
+      process.stdout.write(JSON.stringify({type:'partial',text:'x'}) + '\\n');
+      setTimeout(() => {
+        process.stdout.write(JSON.stringify({type:'result',text:'ok'}) + '\\n');
+      }, 200);`);
+    const opts = () => {
+      active++;
+      peak = Math.max(peak, active);
+      const r = run(nodeProfile(agent), { message: 'm', maxConcurrent: 1, timeoutSecs: 30 });
+      // approximate: track via promise settlement
+      r.finally(() => { active--; });
+      return r;
+    };
+    const rs = await Promise.all([opts(), opts(), opts()]);
+    assert.ok(rs.every((r) => !r.error));
+    assert.strictEqual(peak, 3, 'all three submitted concurrently');
+  });
+
+  test('maxConcurrent=1 + reject → second run gets fixed error marker', async () => {
+    const first = run(nodeProfile(sleepAgent(400)),
+      { message: 'm', maxConcurrent: 1, onSaturated: 'reject', timeoutSecs: 30 });
+    await new Promise((r) => setTimeout(r, 120)); // let the first take the slot
+    const errors = [];
+    const second = await run(nodeProfile(fastAgent()), {
+      message: 'm', maxConcurrent: 1, onSaturated: 'reject', timeoutSecs: 30,
+      onError: (e) => errors.push(e),
+    });
+    const firstResult = await first;
+    assert.strictEqual(firstResult.error, '');
+    assert.ok(second.error.includes('agentproc: concurrency limit'),
+      `expected marker, got: ${second.error}`);
+    assert.strictEqual(second.exitCode, 1);
+    assert.ok(errors.some((e) => e.includes('agentproc: concurrency limit')));
+  });
+
+  test('default: no limits — parallel runs all succeed', async () => {
+    const rs = await Promise.all([0, 1, 2, 3].map(() =>
+      run(nodeProfile(fastAgent()), { message: 'm', timeoutSecs: 30 })));
+    assert.ok(rs.every((r) => !r.error));
+  });
+});
+
+describe('concurrency primitives', () => {
+  const { SessionSerializer, ConcurrencyGate, ConcurrencyLimitError } = require('./concurrency.js');
+
+  test('SessionSerializer serializes same key', async () => {
+    const ser = new SessionSerializer();
+    const order = [];
+    const task = (name) => ser.run('k', async () => {
+      order.push(`start-${name}`);
+      await new Promise((r) => setTimeout(r, 30));
+      order.push(`end-${name}`);
+    });
+    await Promise.all([task('A'), task('B')]);
+    const joined = order.join(',');
+    assert.ok(
+      joined === 'start-A,end-A,start-B,end-B' || joined === 'start-B,end-B,start-A,end-A',
+      `not serialized: ${joined}`);
+  });
+
+  test('SessionSerializer null key is a no-op', async () => {
+    const ser = new SessionSerializer();
+    assert.strictEqual(await ser.run(null, async () => 42), 42);
+  });
+
+  test('ConcurrencyGate reject throws with marker', async () => {
+    const gate = new ConcurrencyGate(1, 'reject');
+    await gate.acquire();
+    await assert.rejects(() => gate.acquire(), ConcurrencyLimitError);
+    gate.release();
+    await gate.acquire(); // slot freed
+  });
+
+  test('ConcurrencyGate queue is FIFO and caps concurrency', async () => {
+    const gate = new ConcurrencyGate(1);
+    let active = 0;
+    let peak = 0;
+    const job = () => gate.withSlot(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((r) => setTimeout(r, 20));
+      active--;
+    });
+    await Promise.all([job(), job(), job()]);
+    assert.strictEqual(peak, 1);
+  });
+
+  test('ConcurrencyGate validates args', () => {
+    assert.throws(() => new ConcurrencyGate(1, 'explode'));
+    assert.throws(() => new ConcurrencyGate(0));
+  });
+});

@@ -26,9 +26,15 @@ use tokio::time::timeout;
 
 use crate::env::{build_base_env, expand_env_ref_with_allowlist, substitute, SubstCtx};
 use crate::error::RunnerError;
+use crate::concurrency::{ConcurrencyGate, SessionSerializer};
 #[cfg(feature = "executors")]
 use crate::executors::{lookup, TurnHandlers};
 use crate::protocol::{parse_event, AgentEvent, TurnObject};
+
+/// Module-level per-key serializer: concurrent `run` calls sharing a
+/// `session_key` must serialize across invocations.
+static _SESSION_SERIALIZER: std::sync::LazyLock<SessionSerializer> =
+    std::sync::LazyLock::new(SessionSerializer::new);
 
 /// Callbacks and inputs for a single [`run`] call.
 pub struct RunOptions {
@@ -49,6 +55,11 @@ pub struct RunOptions {
     pub on_permission:
         Option<Arc<dyn Fn(crate::PermissionRequest) -> crate::PermissionFuture + Send + Sync>>,
     pub on_stderr: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    /// Concurrency (spec "Concurrency" section): a session key enables
+    /// per-key serialization; `max_concurrent` caps global concurrency.
+    pub session_key: Option<String>,
+    pub max_concurrent: Option<usize>,
+    pub on_saturated: crate::concurrency::Saturated,
 }
 
 impl RunOptions {
@@ -69,7 +80,25 @@ impl RunOptions {
             on_error: None,
             on_permission: None,
             on_stderr: None,
+            session_key: None,
+            max_concurrent: None,
+            on_saturated: Default::default(),
         }
+    }
+
+    pub fn with_session_key(mut self, key: impl Into<String>) -> Self {
+        self.session_key = Some(key.into());
+        self
+    }
+
+    pub fn with_max_concurrent(mut self, n: usize) -> Self {
+        self.max_concurrent = Some(n);
+        self
+    }
+
+    pub fn with_on_saturated(mut self, s: crate::concurrency::Saturated) -> Self {
+        self.on_saturated = s;
+        self
     }
 
     pub fn with_session_id(mut self, sid: impl Into<String>) -> Self {
@@ -131,6 +160,26 @@ impl RunResult {
 /// 3. `executor` + unknown + no command → hard fail
 /// 4. no `executor`        → spawn command
 pub async fn run(profile: &crate::Profile, opts: RunOptions) -> Result<RunResult, RunnerError> {
+    // Concurrency (spec "Concurrency" section): per-session serialization and
+    // the global gate, both evaluated before any spawn. Rejection terminates
+    // the turn via the existing error channel with the fixed marker.
+    let key = opts.session_key.clone();
+    let serializer_guard = _SESSION_SERIALIZER.lock(key.as_deref()).await;
+    let gate = ConcurrencyGate::new(opts.max_concurrent, opts.on_saturated);
+    let permit = match gate.acquire().await {
+        Ok(p) => p,
+        Err(msg) => {
+            if let Some(on_error) = &opts.on_error {
+                on_error(&msg);
+            }
+            return Ok(RunResult {
+                error: msg,
+                exit_code: 1,
+                ..Default::default()
+            });
+        }
+    };
+    let _ = (serializer_guard, permit);
     let started = std::time::Instant::now();
     let cfg = ResolvedConfig::from(profile, &opts)?;
 

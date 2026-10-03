@@ -39,6 +39,7 @@ pub mod history;
 mod protocol;
 mod profile;
 mod runner;
+mod concurrency;
 
 #[cfg(feature = "executors")]
 pub mod executors;
@@ -53,6 +54,7 @@ pub use protocol::{
 };
 pub use profile::Profile;
 pub use runner::{run, RunOptions, RunResult};
+pub use concurrency::{ConcurrencyGate, Saturated, SessionSerializer, CONCURRENCY_LIMIT_MARKER};
 
 #[cfg(feature = "executors")]
 pub use executors::{

@@ -43,6 +43,12 @@ const os = require('node:os');
 const readline = require('node:readline');
 
 const { EXECUTORS, executorNames } = require('./executors.js');
+const {
+  CONCURRENCY_LIMIT_MARKER,
+  ConcurrencyLimitError,
+  ConcurrencyGate,
+  SessionSerializer,
+} = require('./concurrency.js');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -716,6 +722,44 @@ async function run(profileRaw, options) {
     throw new Error('options.message is required');
   }
 
+  // Concurrency (spec "Concurrency" section): per-session serialization via
+  // options.sessionKey, and the global gate evaluated before any spawn.
+  // The gate is shared at module level (per runner instance) so concurrent
+  // run() calls contend on the same slots. Rejection terminates the turn via
+  // the existing error channel with the fixed marker `agentproc: concurrency limit`.
+  const gate = _gateFor(options.maxConcurrent, options.onSaturated);
+  return _SESSION_SERIALIZER.run(options.sessionKey ?? null, () =>
+    (gate ? gate.withSlot(() => runInner(profileRaw, options))
+          : runInner(profileRaw, options))
+      .catch((err) => {
+        if (err && err.name === 'ConcurrencyLimitError') {
+          const result = {
+            reply: '', sessionId: '', error: String(err.message),
+            exitCode: EXIT_ERROR, timedOut: false, usage: null,
+          };
+          if (options.onError) options.onError(result.error);
+          return result;
+        }
+        throw err;
+      }));
+}
+
+const _SESSION_SERIALIZER = new SessionSerializer();
+let _cachedGate = null;
+
+/** Module-level gate shared across run() calls with the same configuration. */
+function _gateFor(maxConcurrent, onSaturated) {
+  if (maxConcurrent == null) return null;
+  const mode = onSaturated || 'queue';
+  if (!_cachedGate ||
+      _cachedGate.maxConcurrent !== maxConcurrent ||
+      _cachedGate.onSaturated !== mode) {
+    _cachedGate = new ConcurrencyGate(maxConcurrent, mode);
+  }
+  return _cachedGate;
+}
+
+async function runInner(profileRaw, options) {
   const profile = normalizeProfile(profileRaw);
 
   // executor: field resolution — four cases per spec:
@@ -1187,6 +1231,10 @@ async function run(profileRaw, options) {
 module.exports = {
   run,
   normalizeProfile,
+  CONCURRENCY_LIMIT_MARKER,
+  ConcurrencyLimitError,
+  SessionSerializer,
+  ConcurrencyGate,
   classifyLine,
   parseJsonLine,
   isValidSessionId,

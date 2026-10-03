@@ -26,7 +26,7 @@ def _spawn_session_leader(secs=60):
 
 class TestWriteClear:
     def test_roundtrip(self, lock_dir):
-        path = run_lock.write_run_lock("/ws/a", 4242, ["/usr/bin/env", "recursive", "run"])
+        path, generation = run_lock.write_run_lock("/ws/a", 4242, ["/usr/bin/env", "recursive", "run"])
         assert path is not None and path.exists()
         record = json.loads(path.read_text())
         assert record["pid"] == 4242

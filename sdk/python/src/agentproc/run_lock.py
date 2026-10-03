@@ -36,12 +36,27 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 LOCK_DIR_ENV = "AGENTPROC_RUN_LOCK_DIR"
 _DEFAULT_LOCK_DIR = os.path.join("~", ".agentproc", "run-locks")
+
+# 同 key 进程内互斥（issue #17）：write/clear 全程持锁，防止多线程交错导致
+# 世代号回退或 clear 误删。仅覆盖本进程——跨进程仍靠文件 + pid 探测。
+_GUARD = threading.Lock()
+_KEY_MUTEX: Dict[str, threading.Lock] = {}
+
+
+def _key_mutex(key: str) -> threading.Lock:
+    with _GUARD:
+        lock = _KEY_MUTEX.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _KEY_MUTEX[key] = lock
+        return lock
 
 
 class RunLockBusy(RuntimeError):
@@ -57,37 +72,64 @@ def lock_path_for(key: str) -> Path:
     return _lock_dir() / f"{digest}.json"
 
 
-def write_run_lock(key: str, pid: int, argv: List[str]) -> Optional[Path]:
-    """Popen 成功后落遗言锁（best-effort：失败只损失孤儿可见性，不阻断运行）。"""
+def write_run_lock(key: str, pid: int, argv: List[str]) -> Optional[Tuple[Path, int]]:
+    """Popen 成功后落遗言锁（best-effort：失败只损失孤儿可见性，不阻断运行）。
+
+    返回 ``(path, generation)``；generation 为该 key 的单调递增世代号，
+    供 :func:`clear_run_lock` 只清自己世代——先结束者不得误清仍在跑者的锁。
+    """
+    mutex = _key_mutex(key)
     try:
-        path = lock_path_for(key)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "key": os.path.abspath(key),
-            "pid": int(pid),
-            "command": Path(argv[0]).name if argv else "",
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump(record, fh, ensure_ascii=False)
-            os.replace(tmp_name, path)
-        except BaseException:
+        with mutex:
+            path = lock_path_for(key)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            generation = 0
             try:
-                os.unlink(tmp_name)
-            except OSError:
+                prev = json.loads(path.read_text(encoding="utf-8"))
+                generation = int(prev.get("generation", 0))
+            except (OSError, ValueError, TypeError):
                 pass
-            raise
-        return path
+            generation += 1
+            record = {
+                "key": os.path.abspath(key),
+                "pid": int(pid),
+                "command": Path(argv[0]).name if argv else "",
+                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "generation": generation,
+            }
+            fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(record, fh, ensure_ascii=False)
+                os.replace(tmp_name, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+            return path, generation
     except OSError:
         return None
 
 
-def clear_run_lock(key: str) -> None:
-    """正常收尾清锁（best-effort）。"""
+def clear_run_lock(key: str, generation: Optional[int] = None) -> None:
+    """正常收尾清锁（best-effort）。带 ``generation`` 时只清自己世代——
+    锁文件已属更高世代（仍在跑的后来者）则不动。"""
+    mutex = _key_mutex(key)
     try:
-        lock_path_for(key).unlink(missing_ok=True)
+        with mutex:
+            path = lock_path_for(key)
+            if generation is None:
+                path.unlink(missing_ok=True)
+                return
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                current = int(record.get("generation", 0))
+            except (OSError, ValueError, TypeError):
+                return  # 文件不存在/损坏：无事可清
+            if current == generation:
+                path.unlink(missing_ok=True)
     except OSError:
         pass
 
