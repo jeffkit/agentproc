@@ -10,6 +10,16 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ### Spec / SDK 0.17.0 — unreleased
 
+**Python SDK (breaking, security): in-process executor path no longer inherits the host environment (#5)**
+
+- `run_via_executor` now receives the normalised profile from `run()` and composes the child environment through the same shared `_compose_env` (extracted from the spawn path) as the spawn path: infra set + profile `env` (`${VAR}` expansion, `env_allowlist` filtering) + `--env` extras. Previously it did `env = {**os.environ, **extra_env}` — every host variable (cloud credentials, DB URLs, internal tokens) leaked into the agent CLI subprocess and its whole `start_new_session` process group, and `env_allowlist` was a no-op on this path. This is the behaviour the spec already mandates ("in-process path MUST compose the child environment exactly as the spawn path does"); profiles that implicitly relied on ambient host variables must now declare them in the `env` block.
+- Profile-driven fields now apply on the executor path with spawn-path semantics: `timeout_secs` (bridge `--timeout` still overrides), `kill_grace_secs` (timeout escalation is now the spec's SIGTERM → grace → killpg SIGKILL three-stage instead of an immediate SIGKILL), `streaming` (`false` aggregates partials into the reply instead of forwarding each; `true` + forwarded partials leaves `reply` empty), `permission` (honoured end-to-end, `turn.permission` included), and `cwd` (relative paths resolved against the profile's directory, passed to the spawned CLI).
+- NDJSON executor event loop aligned with the spawn path: `error` events now suppress subsequent partials (first error wins, later ones ignored) instead of returning early mid-stream; the stray `[DEBUG plain]` stderr print is removed.
+- Node SDK parity: the env composition previously inlined in both `run` and `runViaExecutor` is extracted into an exported `composeEnv(profile, options, sourceEnv?)` — behaviour unchanged, single implementation shared by both paths.
+- Conformance: new `env_compose` entry type in `spec/conformance/cases.json` drives the three-layer env policy through Python `_compose_env` and Node `composeEnv` with a faked host env, asserting allowed expansion, allowlist blocking, extra-env override, and that unlisted host variables never appear.
+- Tests: `sdk/python/tests/test_executor_env.py` (the former `wip_test_executor_env_leak.py` repro, now passing) plus 7 new executor-path profile-field cases in `test_runner.py` (timeout override, kill-grace escalation, streaming both ways, cwd apply/override).
+- Spec: `spec/protocol.md` / `spec/protocol.zh.md` runner-contract item 5 now states the override/`cwd` resolution explicitly. Wire version stays `0.4`.
+
 **fix: normalise signal-death exit codes across the three SDKs (#10)**
 
 - Spec (revision `1.4` → `1.5`): Exit Codes section now states the bridge MUST normalise a signal death to `128 + signal number` on all platforms, regardless of how the host OS reports it — SIGINT always surfaces as `130`, SIGTERM as `143`.
@@ -44,6 +54,7 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - **Removed the default 8000-char reply truncation**: `max_reply_chars` / `truncation_suffix` are deleted from `Profile` (the live truncation used `profile.max_reply_chars` (default 8000) while the `ProcessOpts` copies were dead; both are now removed). Replies now arrive intact, matching the no-truncation rule. Breaking API change for the two dead pub fields; YAML keys are ignored via serde defaults.
 - **`session_id` validation**: ids containing `/`, `\`, control characters, or dot-only segments (`.`/`..`) are rejected (warned on stderr, never adopted into `RunResult.session_id`) on both the spawn and executor paths. `history::session_file_path` sanitises invalid ids to a non-colliding name and `append_history` refuses to write them, closing the path-traversal window into/out of the sessions directory.
 - New tests: `permission_channel` (allow + deny branches), `timeout_two_step_kill` (graceful SIGTERM partial flush, zero-grace SIGKILL), `no_truncation` (10k-char result intact), `session_id_validation` (adoption + traversal + history). `libc` added as a unix-only dependency; version bumped 0.12.0 → 0.12.1.
+
 ### Spec / SDK 0.16.0 — unreleased
 
 **Python SDK: runner long-lived-consumer leak fixes (issue #20; internal behaviour, no wire change)**

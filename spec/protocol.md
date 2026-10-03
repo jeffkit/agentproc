@@ -244,7 +244,7 @@ When the runner takes the in-process path (`executor:` present + recognised), it
 2. Resolve handlers via `makeHandlers()` if present, else use `buildArgs` / `parseEvent` directly.
 3. Call `buildArgs(message, sessionId, env)` once. An empty return is a hard error.
 4. Spawn the target CLI's argv directly (no bridge subprocess, no shell).
-5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path.
+5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path (a bridge-side `--timeout` / `--streaming` / `--cwd` option overrides the profile field when given), and resolve `cwd` the same way the spawn path does (relative paths resolved against the profile's own directory).
 6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}`, accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s.
 7. For `plain: true`: treat stdout as the body, apply truncation, emit a single `{"type":"result"}` at turn end.
 8. Emit a terminal `{"type":"result"}` (or `{"type":"error"}`) at turn end, carrying the first non-empty `sessionId` and any `usage` seen.
