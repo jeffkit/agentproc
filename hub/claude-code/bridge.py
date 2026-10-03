@@ -202,6 +202,15 @@ def run_permission_mode(turn: dict, env) -> int:
     assert proc.stdin is not None
     assert proc.stdout is not None
 
+    # Drain stderr on a daemon thread so a >pipe-buffer stderr flood can't
+    # block the child before it finishes writing stdout (issue #14).
+    stderr_buf: list[str] = []
+
+    def _drain_stderr() -> None:
+        stderr_buf.append(proc.stderr.read() or "")
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+
     # Pending Claude tool inputs keyed by request_id (for updatedInput default).
     pending_inputs: Dict[str, dict] = {}
     pending_lock = threading.Lock()
@@ -312,7 +321,7 @@ def run_permission_mode(turn: dict, env) -> int:
     except (BrokenPipeError, ValueError, OSError):
         pass
     proc.wait()
-    stderr_output = proc.stderr.read() if proc.stderr else ""
+    stderr_output = stderr_buf[0] if stderr_buf else ""
 
     if error_message:
         emit_error(error_message, session_id=found_session_id)
