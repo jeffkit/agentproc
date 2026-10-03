@@ -24,6 +24,13 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ### Spec / SDK 0.16.0 — unreleased
 
+**Python SDK: runner long-lived-consumer leak fixes (issue #20; internal behaviour, no wire change)**
+
+- Turn-epoch guard in the generic runner (`run`): once the subprocess has exited and the final drain phase begins, lines read by drain threads no longer fire `on_partial` / `on_session` / `on_error` / `on_protocol_line` — late events from a grandchild holding the pipe write-ends can no longer pollute a consumer's next turn.
+- After the 1s joins, drain threads still alive (grandchild inherited the pipe write-ends) get their pipe read-ends closed so the threads unblock and exit — no per-turn daemon-thread / pipe-fd accumulation in long-lived bridges (>100 turns). Drain loops swallow the resulting `ValueError`/`OSError`; both stdout and stderr now emit a structured warning (previously stderr-only, and never closed).
+- `_kill_process_group` reaps the child (`wait(timeout=1)`) when the `communicate(timeout=5)` backstop expires, and takes an optional `on_warning` for the unwaitable-child case; the spawn-path second-wait timeout now retries the reap and warns (`direct child pid=... unreaped after timeout kill`). No more abandoned zombies on kill paths.
+- New tests: `sdk/python/tests/test_runner_lifecycle_leaks.py` (thread/fd leak, late-callback drop, zombie reap, injected unwaitable-child warning). fd-count assertion runs on Linux CI (skipped on macOS).
+
 **fix(sdk/python,hub): force UTF-8 decoding in agent-facing `Popen`/`run` calls and surface drain-thread errors (#16)**
 
 - `sdk/python/src/agentproc/runner.py` (both spawn points) and `run_lock.py`, plus `hub/_shared/stream_utils.py` (`run_bridge`, `run_plain_cli`) and the per-profile bridges (`claude-code`, `codex`, `recursive`, `dsh`), now pass `encoding="utf-8", errors="replace"` instead of bare `text=True`. Previously child stdout was decoded with the process locale; under `LANG=C`/ASCII containers decoding UTF-8 agent output raised `UnicodeDecodeError` inside the stdout drain thread, killing the turn silently until the timeout misreported it. The spec promises UTF-8 on stdout, so decoding is now explicit and locale-independent; invalid bytes decode to U+FFFD instead of crashing.

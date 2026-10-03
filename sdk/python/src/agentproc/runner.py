@@ -543,7 +543,9 @@ def _signal_process_group(proc: subprocess.Popen, sig: int) -> None:
             pass
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
+def _kill_process_group(
+    proc: subprocess.Popen, on_warning: Optional[Callable[[str], None]] = None
+) -> None:
     """超时兜底：SIGKILL 整个进程组并回收。"""
     import time
     _signal_process_group(proc, signal.SIGKILL)
@@ -551,6 +553,15 @@ def _kill_process_group(proc: subprocess.Popen) -> None:
         proc.communicate(timeout=5)
     except (subprocess.TimeoutExpired, ValueError):
         time.sleep(0.1)
+        try:
+            proc.wait(timeout=1)
+        except (subprocess.TimeoutExpired, ValueError, OSError):
+            # unwaitable child — surface a structured warning if we can
+            if on_warning is not None:
+                on_warning(
+                    f"[agentproc runner] warning: child pid={proc.pid} "
+                    "not reaped after SIGKILL"
+                )
 
 
 def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult:
@@ -637,7 +648,7 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
         stdout, stderr = proc.communicate(input=(options.message or ""), timeout=timeout_secs)
     except subprocess.TimeoutExpired:
         timed_out_plain = True
-        _kill_process_group(proc)
+        _kill_process_group(proc, on_warning=options.on_stderr)
         stdout, stderr = "", ""
     if timed_out_plain:
         result.error = f"executor '{cli_name}' timed out after {timeout_secs}s"
@@ -856,6 +867,18 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     pending_permission_ids: set = set()
     stdin_lock = threading.Lock()
     stdin_closed = False
+    # Turn epoch guard: set once the subprocess has exited and the run is in
+    # its final drain phase. Drain threads check it to drop events arriving
+    # after run() has logically finished this turn (e.g. a grandchild holding
+    # the pipe write-end writes late lines).
+    turn_finished = False
+    # Set once the post-join backstop below force-closes the pipe read-ends.
+    # A read failure after that close (ValueError / OSError, incl. EBADF) is
+    # the forced unblock, not a real drain failure: on Linux closing a pipe
+    # being read by another thread raises instead of returning EOF cleanly,
+    # and a healthy turn whose pipes are held by a grandchild would otherwise
+    # be misreported as result.error + on_error.
+    pipes_closed = False
     # Bounded head capture (1 MB) used for post-mortem pattern diagnosis.
     # The diagnostic patterns target interpreter-startup errors (file/module
     # not found) which appear in the first bytes, so a head cap preserves
@@ -880,6 +903,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     def _note_session_id(sid: Any) -> None:
         """Persist the first non-empty valid session_id; warn on conflict/invalid."""
+        if turn_finished:
+            return
         if not isinstance(sid, str) or not sid:
             return
         if not is_valid_session_id(sid):
@@ -987,11 +1012,16 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         assert proc.stderr is not None
         try:
             for line in proc.stderr:
+                if turn_finished:
+                    return
                 _append_stderr(line)
                 line = line.rstrip("\r\n")
                 if options.on_stderr:
                     options.on_stderr(line)
         except Exception as exc:  # noqa: BLE001
+            if pipes_closed and isinstance(exc, (ValueError, OSError)):
+                # Forced close of the read end (post-join backstop): normal exit.
+                return
             drain_error.append(f"stderr reader failed: {exc!r}")
 
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
@@ -1002,6 +1032,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     def _handle_line(raw_line: str) -> None:
         nonlocal error_seen
         nonlocal result_text, result_seen, partials_forwarded
+        if turn_finished:
+            return
         line = raw_line.rstrip("\r")
         c = classify_line(line)
         kind = c["kind"]
@@ -1135,8 +1167,13 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         assert proc.stdout is not None
         try:
             for raw_line in proc.stdout:
+                if turn_finished:
+                    return
                 _handle_line(raw_line.rstrip("\n"))
         except Exception as exc:  # noqa: BLE001
+            if pipes_closed and isinstance(exc, (ValueError, OSError)):
+                # Forced close of the read end (post-join backstop): normal exit.
+                return
             drain_error.append(f"stdout reader failed: {exc!r}")
 
     stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
@@ -1188,6 +1225,16 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                             exit_code = proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
                             exit_code = EXIT_TIMEOUT
+                            # Reap attempt + structured warning if the direct
+                            # child is somehow unkillable/unwaitable.
+                            try:
+                                proc.wait(timeout=1)
+                            except (subprocess.TimeoutExpired, ValueError, OSError):
+                                if options.on_stderr:
+                                    options.on_stderr(
+                                        f"[agentproc runner] warning: direct child "
+                                        f"pid={proc.pid} unreaped after timeout kill"
+                                    )
                         break
         else:
             exit_code = proc.wait()
@@ -1206,6 +1253,10 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         exit_code = proc.wait()
 
     _close_stdin()
+    # Turn epoch starts here: the subprocess is gone; anything the drain
+    # threads still read belongs to stragglers (grandchildren) and must not
+    # fire consumer callbacks for this finished turn.
+    turn_finished = True
     # Process has exited. Drain threads should hit EOF on their pipes within
     # milliseconds and finish. The hard timeout here is a backstop for the
     # rare case a grandchild inherited the stderr fd and is still alive — it
@@ -1216,9 +1267,21 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     # first bytes of stderr anyway, well within the 1MB head capture.
     stdout_thread.join(timeout=1)
     stderr_thread.join(timeout=1)
-    if stderr_thread.is_alive():
-        if options.on_stderr:
-            options.on_stderr("[agentproc runner] warning: stderr drain timed out; diagnosis may be incomplete")
+    # Set before closing: a drain thread unblocked by the close must already
+    # observe the flag when it handles the resulting ValueError/OSError.
+    pipes_closed = True
+    for th, stream in ((stdout_thread, proc.stdout), (stderr_thread, proc.stderr)):
+        if th.is_alive():
+            if options.on_stderr:
+                options.on_stderr(
+                    f"[agentproc runner] warning: {th.name} still alive; "
+                    "closing pipe read end to unblock"
+                )
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
+            except OSError:
+                pass
 
     if drain_error:
         result.error = drain_error[0]
