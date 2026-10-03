@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -566,7 +567,7 @@ def _kill_process_group(
     import time
     _signal_process_group(proc, signal.SIGKILL)
     try:
-        proc.communicate(timeout=5)
+        proc.wait(timeout=5)
     except (subprocess.TimeoutExpired, ValueError):
         time.sleep(0.1)
         try:
@@ -717,24 +718,202 @@ def run_via_executor(
         # 或已 killpg），残留锁下次 preflight 按 stale 清（run_lock docstring）。
         _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
 
-    timed_out_plain = False
+    # Streaming IO model (mirrors Node runViaExecutor observable behavior):
+    # stdout is read line by line in real time (on_partial fires as each line
+    # arrives, not at EOF); stderr is drained by a daemon thread so the pipe
+    # can never fill and deadlock; on timeout we kill the process group and
+    # drain whatever lines were already produced (salvage), so output is
+    # never silently discarded.
+    # streaming 默认读 profile（#29 的 profile 管道），否则聚合/剥离语义不生效。
+    streaming = (
+        options.streaming if options.streaming is not None else profile["streaming"]
+    )
+
+    stderr_parts: List[str] = []
+
+    def _pump_stderr() -> None:
+        assert proc.stderr is not None
+        try:
+            for line in proc.stderr:
+                stderr_parts.append(line)
+        except (ValueError, OSError):
+            pass
+
+    stderr_thread = threading.Thread(target=_pump_stderr, daemon=True)
+    stderr_thread.start()
+
+    line_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+
+    def _pump_stdout() -> None:
+        assert proc.stdout is not None
+        try:
+            for line in proc.stdout:
+                line_queue.put(line)
+        except (ValueError, OSError):
+            pass
+        finally:
+            line_queue.put(None)  # EOF marker
+
+    stdout_thread = threading.Thread(target=_pump_stdout, daemon=True)
+    stdout_thread.start()
+
     try:
-        stdout, stderr = proc.communicate(input=(options.message or ""), timeout=timeout_secs)
-    except subprocess.TimeoutExpired:
-        timed_out_plain = True
-        # 与 spawn 路径一致的三段式：SIGTERM（polite）→ kill_grace_secs 宽限
-        # → killpg SIGKILL 清整个子树。SIGKILL 后仍未回收时经 on_warning 告警
-        # （issue #20：不可回收子进程不再静默变僵尸）。
-        _signal_process_group(proc, signal.SIGTERM)
+        assert proc.stdin is not None
+        proc.stdin.write((options.message or "") + "\n")
+        proc.stdin.flush()
+        proc.stdin.close()
+    except (BrokenPipeError, ValueError, OSError):
+        pass
+
+    # NDJSON state
+    parse_event_fn = None
+    if not plain:
+        parse_event_fn = (
+            handlers.get("parse_event") if isinstance(handlers, dict)
+            else getattr(handlers, "parse_event", None)
+        )
+        if not callable(parse_event_fn):
+            result.error = f"executor '{cli_name}' has no parse_event for NDJSON mode"
+            if options.on_error:
+                options.on_error(result.error)
+            return result
+
+    plain_lines: List[str] = []
+    reply_parts: List[str] = []
+    last_final_text: Optional[str] = None
+    partials_forwarded = False
+    error_message: Optional[str] = None
+    timed_out = False
+
+    def _handle_line(raw: str) -> None:
+        nonlocal last_final_text, partials_forwarded, error_message
+        line = raw.rstrip("\r\n")
+        if not line:
+            return
+        if plain:
+            plain_lines.append(line)
+            if options.on_protocol_line:
+                options.on_protocol_line(line)
+            return
+        if options.on_protocol_line:
+            options.on_protocol_line(line)
         try:
-            proc.communicate(timeout=kill_grace_secs)
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        parsed = parse_event_fn(event)
+        if not isinstance(parsed, dict):
+            return
+        sid = parsed.get("session_id")
+        if sid and is_valid_session_id(sid) and not result.session_id:
+            result.session_id = sid
+            if options.on_session:
+                options.on_session(sid)
+        if parsed.get("error"):
+            if error_message is None:
+                error_message = parsed["error"]
+            return
+        partial = parsed.get("partial_text")
+        if partial:
+            if error_message is None and streaming and options.on_partial:
+                options.on_partial(partial)
+                partials_forwarded = True
+            if not partials_forwarded:
+                reply_parts.append(partial)
+        final = parsed.get("final_text")
+        if final is not None and final != "" and error_message is None:
+            last_final_text = final
+            reply_parts.append(final)
+        usage = parsed.get("usage")
+        if isinstance(usage, dict) and result.usage is None:
+            result.usage = usage
+
+    deadline = (
+        time.monotonic() + timeout_secs
+        if timeout_secs and timeout_secs > 0 else None
+    )
+    eof = False
+    while not eof:
+        remaining = None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                # 与 spawn 路径一致的三段式：SIGTERM（polite）→ kill_grace_secs
+                # 宽限 → killpg SIGKILL 清整个子树。宽限内继续消费排队行；
+                # SIGKILL 后仍未回收时经 on_warning 告警（issue #20）。
+                _signal_process_group(proc, signal.SIGTERM)
+                grace_deadline = time.monotonic() + kill_grace_secs
+                while not eof and time.monotonic() < grace_deadline:
+                    try:
+                        item = line_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        continue
+                    if item is None:
+                        eof = True
+                        break
+                    _handle_line(item)
+                if not eof:
+                    _kill_process_group(proc, on_warning=options.on_stderr)
+                    # Salvage: drain lines the child already wrote (its pipe
+                    # buffer + anything the pump thread still holds).
+                    salvage_deadline = time.monotonic() + 2.0
+                    while time.monotonic() < salvage_deadline:
+                        try:
+                            item = line_queue.get(timeout=0.2)
+                        except queue.Empty:
+                            if not stdout_thread.is_alive():
+                                break
+                            continue
+                        if item is None:
+                            eof = True
+                            break
+                        _handle_line(item)
+                break
+        try:
+            item = line_queue.get(timeout=min(0.5, remaining) if remaining else 0.5)
+        except queue.Empty:
+            continue
+        if item is None:
+            eof = True
+            break
+        _handle_line(item)
+
+    exit_code: int
+    if timed_out:
+        try:
+            exit_code = _normalise_exit_code(proc.wait(timeout=5))
         except subprocess.TimeoutExpired:
-            _kill_process_group(proc, on_warning=options.on_stderr)
-        try:
-            stdout, stderr = proc.communicate(timeout=2)
-        except (subprocess.TimeoutExpired, ValueError):
-            stdout, stderr = "", ""
-    if timed_out_plain:
+            exit_code = EXIT_TIMEOUT
+    else:
+        exit_code = _normalise_exit_code(proc.wait())
+
+    # Reply assembly (spec protocol.md: result.text may be '' when the body
+    # was already delivered via partials — partials are never concatenated
+    # onto the final text). Mirrors the spawn path / Node runner.js:700-702:
+    # with partials forwarded the non-timeout reply stays ''; streaming=false
+    # aggregates partials + final because nothing was forwarded to callers.
+    if plain:
+        result.reply = "\n".join(plain_lines).strip()
+    elif timed_out:
+        # Timeout salvage: keep the half-turn text so the caller does not
+        # lose everything produced before the kill (acceptance: reply != '').
+        result.reply = last_final_text if last_final_text is not None else "".join(reply_parts)
+    elif streaming and partials_forwarded:
+        result.reply = ""
+    elif streaming:
+        result.reply = last_final_text or ""
+    else:
+        result.reply = "".join(reply_parts)
+
+    stderr_text = "".join(stderr_parts).strip()
+
+    if options.run_lock_key and not timed_out:
+        _run_lock.clear_run_lock(options.run_lock_key)
+
+    if timed_out:
         result.timed_out = True
         result.error = f"executor '{cli_name}' timed out after {timeout_secs}s"
         result.exit_code = EXIT_TIMEOUT
@@ -742,25 +921,30 @@ def run_via_executor(
             options.on_error(result.error)
         return result
 
-    if proc.returncode != 0:
+    if error_message is not None:
+        result.error = error_message
+        result.exit_code = exit_code if exit_code != 0 else EXIT_ERROR
+        if options.on_error:
+            options.on_error(result.error)
+        return result
+
+    if exit_code != 0:
         result.error = (
-            f"executor '{cli_name}' exited {proc.returncode}: "
-            + (stderr.strip() or "(no stderr)")
+            f"executor '{cli_name}' exited {exit_code}: "
+            + (stderr_text[:500] or "(no stderr)")
         )
-        result.exit_code = _normalise_exit_code(proc.returncode)
+        result.exit_code = exit_code
         if options.on_error:
             options.on_error(result.error)
         return result
 
     if plain:
-        text = stdout.strip()
-        if not text:
+        if not result.reply:
             result.error = f"{cli_name} returned empty output"
             result.exit_code = EXIT_ERROR
             if options.on_error:
                 options.on_error(result.error)
             return result
-        result.reply = text
         # Plain executors that manage a session id expose get_session_id() on
         # their handlers so the runner can surface it in RunResult.session_id.
         get_session_id_fn = (
@@ -774,87 +958,12 @@ def run_via_executor(
                 if options.on_session:
                     options.on_session(sid)
         result.exit_code = EXIT_SUCCESS
-        if options.on_protocol_line:
-            # 协议契约对齐 spawn 路径：每条 stdout 行都过 on_protocol_line
-            # （plain 的 reply 是整体，回调供观测/审计消费原始行）
-            for protocol_line in stdout.splitlines():
-                options.on_protocol_line(protocol_line)
-        if options.run_lock_key:
-            _run_lock.clear_run_lock(options.run_lock_key)
         return result
 
-    # NDJSON path
-    parse_event_fn = (
-        handlers.get("parse_event") if isinstance(handlers, dict)
-        else getattr(handlers, "parse_event", None)
-    )
-    if not callable(parse_event_fn):
-        result.error = f"executor '{cli_name}' has no parse_event for NDJSON mode"
-        if options.on_error:
-            options.on_error(result.error)
-        return result
-
-    reply_parts: List[str] = []
-    partials_forwarded = False
-    error_seen = False
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if options.on_protocol_line:
-            # 协议契约对齐 spawn 路径：每条 stdout 行都过 on_protocol_line
-            options.on_protocol_line(line)
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        parsed = parse_event_fn(event)
-        if parsed is None:
-            continue
-        if isinstance(parsed, dict):
-            if parsed.get("error"):
-                if not error_seen:
-                    error_seen = True
-                    result.error = parsed["error"]
-                    if options.on_error:
-                        options.on_error(result.error)
-                continue
-            sid = parsed.get("session_id")
-            if sid and is_valid_session_id(sid) and not result.session_id:
-                result.session_id = sid
-                if options.on_session:
-                    options.on_session(sid)
-            partial = parsed.get("partial_text")
-            if partial:
-                if not error_seen and streaming and options.on_partial:
-                    options.on_partial(partial)
-                    partials_forwarded = True
-                if not partials_forwarded:
-                    reply_parts.append(partial)
-            final = parsed.get("final_text")
-            if final:
-                reply_parts.append(final)
-
-    if error_seen:
-        if options.run_lock_key:
-            _run_lock.clear_run_lock(options.run_lock_key)
-        result.exit_code = EXIT_ERROR
-        return result
-    # streaming true 且已转发 partial → reply 置空（正文已流式送达，不重复）
-    if streaming and partials_forwarded:
-        result.reply = ""
-    else:
-        result.reply = "".join(reply_parts)
-    if not result.reply and not partials_forwarded:
-        result.error = f"{cli_name} returned no reply content"
-        if options.on_error:
-            options.on_error(result.error)
-        return result
+    # An NDJSON turn that exited 0 with nothing on stdout is a SUCCESS
+    # (spec protocol.md:396; scenarios.json "empty output → empty reply,
+    # success") — reply stays ''.
     result.exit_code = EXIT_SUCCESS
-    if options.run_lock_key:
-        _run_lock.clear_run_lock(options.run_lock_key)
     return result
 
 

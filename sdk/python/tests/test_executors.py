@@ -364,8 +364,9 @@ class TestRunViaExecutorNDJSON(unittest.TestCase):
         ex = self._make_ndjson_executor(lines)
         result = run_via_executor(ex, _make_opts())
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
-        self.assertIn("hello ", result.reply)
-        self.assertIn("world", result.reply)
+        # Dedup per spec: partials are never concatenated onto final_text;
+        # with no on_partial forwarded, reply is the final text alone.
+        self.assertEqual(result.reply, "world")
         self.assertEqual(result.session_id, "s1")
 
 
