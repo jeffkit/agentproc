@@ -268,7 +268,9 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    # Millisecond precision + "+00:00" offset (spec "Event traceability"): the
+    # journal `ts` and RunResult.started_at must be comparable across bridges.
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 def parse_deadline(value: Any) -> Optional[float]:
@@ -1140,7 +1142,12 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     if profile["permission"]:
         turn["permission"] = True
 
-    result = RunResult(started_at=_utc_now_iso())
+    # Same clock source as started_mono: started_at + duration must not drift.
+    result = RunResult(
+        started_at=datetime.fromtimestamp(started_wall, timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+    )
     result_text: Optional[str] = None
     result_seen = False
     # Spec: once an error event arrives, subsequent partial/result events
@@ -1238,6 +1245,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         if not result.error:
             result.error = tip or str(e)
         result.exit_code = EXIT_ERROR
+        result.duration = time.monotonic() - started_mono
         return result
     except PermissionError as e:
         if options.on_stderr:
@@ -1247,6 +1255,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         if not result.error:
             result.error = str(e)
         result.exit_code = EXIT_ERROR
+        result.duration = time.monotonic() - started_mono
         return result
 
     if options.run_lock_key:

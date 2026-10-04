@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.4` · **文档修订：** `1.5` · **状态：** 稳定
+**线协议：** `0.4` · **文档修订：** `1.6` · **状态：** 稳定
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -21,12 +21,16 @@ env:
 env_allowlist: [MY_API_KEY]           # 可选：限制 ${VAR} 展开
 
 timeout_secs: 600             # 每轮挂钟超时（秒），默认 1800
+budget_secs: 900              # 可选：每轮挂钟时间预算（秒）；无默认值
+deadline: "2025-01-01T12:00:00+00:00" # 可选：ISO-8601 绝对轮次截止时刻（须带显式时区偏移）
 kill_grace_secs: 5            # SIGTERM → SIGKILL 宽限期，默认 5
 
 streaming: true               # 实时转发 {"type":"partial"} 事件
 
 permission: false             # 可选工具授权（保持 stdin 打开；见完整规范）
 ```
+
+`timeout_secs` 是每轮默认的挂钟限额。另有两个可选字段可进一步收紧：`budget_secs`（由 bridge 测量的每轮时间预算）与 `deadline`（带显式时区偏移的 ISO-8601 绝对时刻——naive 值属 profile 校验错误）。三者中**最早**到期者生效，且到期遵循与普通超时相同的 kill 序列与退出码。三个字段都是 bridge 侧 profile 字段，均不出现在线格式中。通过 executor 在进程内运行 agent 的 bridge 不要求支持 `budget_secs` / `deadline`。
 
 占位符**不**经 shell 替换。argv 由两个字段构成：
 
@@ -172,13 +176,17 @@ stdin 保持打开规则、超时与字段定义见完整规范。
 
 ## 超时处理
 
-到达 `timeout_secs` 时：
+到达该轮的有效限额时——`timeout_secs`，或 `budget_secs` / `deadline` 中最早到期者：
 
 1. bridge 发送 `SIGTERM`。
 2. bridge 等待 `kill_grace_secs`（默认 5）让进程退出。
 3. 若仍在运行，bridge 发送 `SIGKILL`。
 
 已收到的 `partial` 事件仍会转发。agent SHOULD 在收到 `SIGTERM` 时冲刷缓冲的 partial 并尽快退出。
+
+### 可观测性
+
+bridge **MAY** 记录 bridge 侧计时与事件日志（opt-in、默认关闭、只写文件——绝不写 stdout；关闭时 stdout/stderr 字节一致）：每条事件的 `seq` + 毫秒精度 ISO-8601 UTC `ts`，以及运行结果携带 bridge 实测的 `started_at`/`duration`（区别于 agent 自报的 `usage.duration_ms`）。详见完整规范的「事件可追溯性（可选）」。
 
 ---
 

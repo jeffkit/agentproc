@@ -238,7 +238,8 @@ def _run_hub_subcommand(args: List[str]) -> int:
     positional: List[str] = []
     runner_args: List[str] = []
     takes_value = {"--prompt", "-p", "--session", "--session-name", "--from",
-                   "--image-url", "--file-url", "--cwd", "--env", "--timeout"}
+                   "--image-url", "--file-url", "--cwd", "--env", "--timeout",
+                   "--journal"}
     boolean_flags = {"--no-stream", "--verbose", "--quiet", "--raw", "--stdin"}
     i = 0
     while i < len(rest):
@@ -348,6 +349,7 @@ Hub run options (same as the regular --profile runner):
   --image-url <url>            Image attachment URL (carried in the turn's attachments)
   --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
+  --journal <path>             Append an NDJSON event/decision journal to <path> (opt-in)
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
   --stdin                      Read prompt from stdin

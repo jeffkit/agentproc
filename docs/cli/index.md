@@ -104,6 +104,7 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 | `--cwd <path>` | Override `profile.cwd`. Relative paths resolve against the profile's directory. In `hub run`, defaults to your current directory. |
 | `--env KEY=VALUE` | Extra env var (repeatable) |
 | `--timeout <secs>` | Override `profile.timeout_secs` |
+| `--journal <path>` | Append an NDJSON event/decision journal to `<path>` (opt-in; off by default, never written to stdout) |
 | `--no-stream` | Disable streaming (ignore `{"type":"partial"}` events) |
 
 ### Output
@@ -192,7 +193,7 @@ The CLI is a thin wrapper over the SDK's `run()` function in [`sdk/node/src/runn
 - **Turn input (stdin)**: writes one `{"type":"turn",...}` NDJSON line to the agent's stdin (`message`, `session_id`, `session_name`, `attachments`, `permission`, `protocol_version`), then EOF — unless `permission: true`, in which case stdin stays open for `{"type":"permission_response"}` frames. The per-turn request does **not** travel in env vars.
 - **Env injection**: the profile `env` block (with `${VAR}` expansion gated by `env_allowlist`) plus a fixed infra set (`PATH`/`HOME`/`TERM`/…). `--env KEY=VALUE` adds per-run extras.
 - **stdout classification**: each line is a JSON object dispatched on `type` — `{"type":"partial"}` (forwarded when `streaming: true`), `{"type":"result"}` (terminal reply body; optional `session_id` / `usage`), `{"type":"error"}` (fails the turn). `session_id` is a field on events (first non-empty persisted; early omit OK; SHOULD attach once known). Non-JSON / unknown `type` lines are logged and ignored.
-- **Timeout handling**: SIGTERM → `kill_grace_secs` (default 5s) → SIGKILL. Exit code 124.
+- **Timeout handling**: SIGTERM → `kill_grace_secs` (default 5s) → SIGKILL. Exit code 124. The limit itself is the earliest expiry of the profile's `timeout_secs`, `budget_secs`, and `deadline`.
 - **Exit codes**: 0 success · 1 error (including when `{"type":"error"}` was emitted) · 124 timeout.
 
 If you're writing your own bridge in another language, [`runner.js`](https://github.com/jeffkit/agentproc/blob/main/sdk/node/src/runner.js) is the spec in code form.

@@ -17,7 +17,9 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
   exercising interaction semantics that single-line cases can't: first
   non-empty `session_id`, error mid-stream, session-with-error, invalid-session
   handling, single-`result` body rules, partial-with-role, streaming vs
-  one-shot, and legacy `session`/`text` events treated as malformed.
+  one-shot, and legacy `session`/`text` events treated as malformed. Also
+  covers turn-level timing: a `budget_secs` expiry (exit code 124) and the
+  no-budget regression (see `sleep_secs` / `profile_overrides` below).
 - `sdk.json` — SDK entry-point (`createProfile` / `create_profile`) scenarios.
   Each scenario drives the SDK entry as a subprocess: the harness writes a
   `{"type":"turn",...}` object to its stdin and runs a handler of a named
@@ -92,6 +94,12 @@ across error, invalid-session handling, result-body assembly,
 streaming/one-shot differences), add a scenario to `scenarios.json` instead.
 Single-line cases can't catch these — the bug only shows up when several
 lines interact in one turn.
+
+Run-time-only semantics go to `scenarios.json` too: a per-turn time budget or
+deadline expiring, partial forwarding around a kill, exit code 124. These are
+observable in `run()`, not in any single line's classification — `cases.json`
+carries `classify_line` / `classifyLine` cases and nothing else, so the
+`budget_secs` / `deadline` feature deliberately adds no case there.
 
 ## Event classification rule
 
@@ -198,6 +206,23 @@ event). `expect` matches the runner's observable `RunResult` plus the
 `partials` collected via the `on_partial` / `onPartial` callback. `streaming`
 defaults to `true`; set `false` to exercise the one-shot path (where
 `{"type":"partial"}` events are ignored and `partials` should be `[]`).
+
+Two optional keys extend a scenario beyond "print these lines and exit":
+
+- `sleep_secs` — the generated agent sleeps this many seconds after printing
+  its lines (before exiting), so the harness can exercise a turn that outlives
+  its time limit. Both harnesses emit a `sleep <n>` line last.
+- `profile_overrides` — extra profile fields merged into the generated
+  profile. Used by the timing scenarios, e.g.
+  `{"budget_secs": 1, "kill_grace_secs": 1}` to make a per-turn budget expire
+  against a sleeping agent.
+
+`expect.partials_any_of` is the timing counterpart of `partials`: it lists
+candidate `partials` sequences and passes if the observed one matches any of
+them. Timing scenarios use it because whether the agent's first line reaches
+the bridge before the budget fires is a scheduling race —
+`[[], ["started"]]` accepts either but still pins that nothing else was
+forwarded. Scenario shape is otherwise unchanged.
 
 ### sdk.json format
 

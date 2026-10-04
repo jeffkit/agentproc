@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.4` · **Document revision:** `1.5` · **Status:** Stable
+**Wire protocol:** `0.4` · **Document revision:** `1.6` · **Status:** Stable
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -21,12 +21,16 @@ env:
 env_allowlist: [MY_API_KEY]           # optional: restrict ${VAR} expansion
 
 timeout_secs: 600             # per-turn wall-clock timeout (secs), default 1800
+budget_secs: 900              # optional: per-turn wall-clock budget (secs); no default
+deadline: "2025-01-01T12:00:00+00:00" # optional: absolute ISO-8601 turn deadline (explicit offset)
 kill_grace_secs: 5            # SIGTERM → SIGKILL grace period, default 5
 
 streaming: true               # forward {"type":"partial"} events in real time
 
 permission: false             # optional tool authorization (keep stdin open; see full spec)
 ```
+
+`timeout_secs` is the turn's default wall-clock limit. Two optional fields tighten it: `budget_secs` (a per-turn budget measured by the bridge) and `deadline` (an absolute ISO-8601 instant with an explicit timezone offset — naive values are a profile validation error). The **earliest** expiry of the three wins, and expiry follows the same kill sequence and exit code as a plain timeout. All three are bridge-side profile fields; none of them appear on the wire. A bridge that runs an agent in-process through an executor is not required to honour `budget_secs` / `deadline`.
 
 Placeholders are substituted **without** invoking a shell. The argv is built from two fields:
 
@@ -172,13 +176,17 @@ When the process exits non-zero without emitting an `error` event, bridges SHOUL
 
 ## Timeout Handling
 
-When `timeout_secs` is reached:
+When the turn's effective limit is reached — `timeout_secs`, or whichever of `budget_secs` / `deadline` expires first:
 
 1. Bridge sends `SIGTERM`.
 2. Bridge waits `kill_grace_secs` (default 5) for the process to exit.
 3. If still running, bridge sends `SIGKILL`.
 
 Already-received `partial` events are forwarded. The agent SHOULD handle `SIGTERM` by flushing buffered partials and exiting promptly.
+
+### Observability
+
+Bridges MAY record bridge-side timing and an event journal (opt-in, off by default, file-only — never stdout; stdout/stderr stay byte-identical when disabled): per-event `seq` + millisecond ISO-8601 UTC `ts`, and a run result carrying `started_at`/`duration` measured by the bridge (distinct from the agent's self-reported `usage.duration_ms`). See the full spec's "Event traceability (optional)".
 
 ---
 

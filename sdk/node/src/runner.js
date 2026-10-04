@@ -203,15 +203,32 @@ function normalizeProfile(raw) {
     timeout_secs: Number.isFinite(src.timeout_secs) ? src.timeout_secs : DEFAULT_TIMEOUT_SECS,
     kill_grace_secs: Number.isFinite(src.kill_grace_secs) ? src.kill_grace_secs : DEFAULT_KILL_GRACE_SECS,
     // Optional time budget / absolute deadline (spec "Time budget and
-    // absolute deadline"); null when absent. deadline kept raw here — parsed
-    // against turn-start in run().
-    budget_secs: Number.isFinite(src.budget_secs) ? src.budget_secs : null,
-    deadline: typeof src.deadline === 'string' ? src.deadline : null,
+    // absolute deadline"); null when absent. deadline kept raw here — a
+    // non-string value must reach parseDeadline() so it is rejected, not
+    // silently dropped (spec: bridges MUST NOT silently ignore it).
+    budget_secs: toFiniteNumber(src.budget_secs),
+    deadline: src.deadline ?? null,
     // Bridge-side hint: when false, the runner ignores {"type":"partial"} events
     // and assembles the reply from {"type":"result"} only. Not a wire field.
     streaming: src.streaming !== false,
   };
 }
+
+/** Coerce a profile number-or-numeric-string to a finite number; null otherwise. */
+function toFiniteNumber(value) {
+  if (typeof value === 'string') {
+    if (value.trim() === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return Number.isFinite(value) ? value : null;
+}
+
+// A timezone-aware ISO-8601 timestamp must end in `Z` or an explicit `±HH:MM`
+// offset. Date.parse() alone is too lenient: it accepts naive values and
+// date-only strings and reads them as local time, which silently disagrees
+// with the Python parser (and with the spec's "MUST NOT silently ignore").
+const ISO_TZ_OFFSET_RE = /(?:[zZ]|[+-]\d{2}:\d{2})$/;
 
 /**
  * Parse a profile `deadline` string into epoch seconds; null when absent.
@@ -223,11 +240,30 @@ function parseDeadline(value) {
   if (typeof value !== 'string') {
     throw new Error('profile.deadline must be an ISO-8601 timestamp string');
   }
-  const ms = Date.parse(value);
+  const text = value.trim();
+  if (!ISO_TZ_OFFSET_RE.test(text)) {
+    throw new Error(`profile.deadline must be a timezone-aware ISO-8601 timestamp, got ${JSON.stringify(value)}`);
+  }
+  const ms = Date.parse(text);
   if (Number.isNaN(ms)) {
     throw new Error(`profile.deadline must be a timezone-aware ISO-8601 timestamp, got ${JSON.stringify(value)}`);
   }
   return ms / 1000;
+}
+
+/**
+ * Signal the agent's whole process group on POSIX (the spawn path starts the
+ * child with `detached: true`, so it leads its own group); fall back to
+ * signalling the direct child on Windows, or when the group is already gone.
+ */
+function signalProcessGroup(child, signal) {
+  if (process.platform !== 'win32' && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch { /* group already gone — fall back to the direct child */ }
+  }
+  try { child.kill(signal); } catch { /* already dead */ }
 }
 
 function expandPath(p) {
@@ -861,10 +897,19 @@ async function run(profileRaw, options) {
   // on, we keep stdin open afterwards for permission_response traffic.
   const needStdinPipe = true;
 
-  // Spawn — no shell. Cwd optional.
+  // Validate profile.deadline before spawning. An invalid value is a profile
+  // error, and rejecting it here — rather than in the timeout block after the
+  // child is already running — is what keeps the error from leaking an
+  // orphaned agent process.
+  const deadlineSecs = parseDeadline(profile.deadline);
+
+  // Spawn — no shell. Cwd optional. POSIX: `detached` puts the child in its
+  // own process group so a timeout can signal the whole agent subtree, not
+  // just the direct child (mirrors Python's `start_new_session=True`).
   const child = spawn(argv[0], argv.slice(1), {
     cwd,
     env,
+    detached: process.platform !== 'win32',
     stdio: [
       needStdinPipe ? 'pipe' : 'ignore',
       'pipe',
@@ -899,11 +944,13 @@ async function run(profileRaw, options) {
 
   // Event traceability: bridge-measured turn timing + opt-in journal hook.
   const startedAtMs = Date.now();
-  result.startedAt = new Date(startedAtMs).toISOString();
+  result.startedAt = utcNowIso(startedAtMs);
   let seq = 0;
 
-  function utcNowIso() {
-    return new Date().toISOString();
+  // Millisecond-precision ISO-8601 UTC with an explicit `+00:00` offset, so
+  // journal `ts` and `startedAt` are byte-comparable with the Python SDK.
+  function utcNowIso(epochMs) {
+    return new Date(epochMs === undefined ? Date.now() : epochMs).toISOString().replace('Z', '+00:00');
   }
 
   function journal(event) {
@@ -1172,7 +1219,6 @@ async function run(profileRaw, options) {
   if (profile.budget_secs != null && profile.budget_secs > 0) {
     effectiveSecs = effectiveSecs == null ? profile.budget_secs : Math.min(effectiveSecs, profile.budget_secs);
   }
-  const deadlineSecs = parseDeadline(profile.deadline);
   if (deadlineSecs != null) {
     const budgetFromDeadline = deadlineSecs - startedAtMs / 1000;
     effectiveSecs = effectiveSecs == null ? budgetFromDeadline : Math.min(effectiveSecs, budgetFromDeadline);
@@ -1194,17 +1240,15 @@ async function run(profileRaw, options) {
         }
       }
       closeStdin();
-      try { child.kill('SIGTERM'); } catch {}
-      journal({ seq: nextSeq(), decision: 'sigterm_child' });
+      signalProcessGroup(child, 'SIGTERM');
+      journal({ seq: nextSeq(), decision: 'sigterm_process_group' });
       killTimer = setTimeout(() => {
-        try {
-          if (!child.exitCode && child.signalCode === null) {
-            child.kill('SIGKILL');
-            journal({ seq: nextSeq(), decision: 'sigkill_child' });
-          }
-        } catch {}
+        if (!child.exitCode && child.signalCode === null) {
+          signalProcessGroup(child, 'SIGKILL');
+          journal({ seq: nextSeq(), decision: 'sigkill_process_group' });
+        }
       }, (profile.kill_grace_secs || DEFAULT_KILL_GRACE_SECS) * 1000);
-    }, effectiveSecs * 1000);
+    }, Math.max(0, effectiveSecs * 1000));
   }
 
   // ---- wait for exit ----

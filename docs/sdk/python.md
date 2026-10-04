@@ -163,9 +163,15 @@ print(result.usage)      # {'input_tokens': 12, 'output_tokens': 34, ...} or Non
 | `error` | `str` | Error message from a `{"type":"error"}` event; `''` if none |
 | `exit_code` | `int` | Agent process exit code (124 = timeout) |
 | `timed_out` | `bool` | Whether the run was killed by timeout |
+| `started_at` | `str` | Bridge-measured turn start (ISO-8601 UTC, millisecond precision) |
+| `duration` | `float` | Bridge-measured wall clock from spawn to exit, in seconds |
 | `usage` | `dict \| None` | Token/cost stats from the terminal event; `None` when absent |
 
 Common `usage` keys (all optional): `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_tokens`, `duration_ms`, `cost_usd`.
+
+`started_at` / `duration` are bridge measurements — distinct from the agent self-reported `usage.duration_ms`, which excludes spawn/IPC overhead.
+
+For post-hoc turn attribution, `RunOptions.on_journal` takes a callback that receives every classified event and bridge decision, each stamped with a per-turn `seq` and a millisecond ISO-8601 UTC `ts`; `parse_deadline()` (from `agentproc.runner`) validates a profile `deadline`. The journal hook is opt-in and never adds bytes to stdout.
 
 ## Local testing
 

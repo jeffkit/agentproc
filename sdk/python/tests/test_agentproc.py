@@ -334,3 +334,42 @@ class TestProtocolErrorUsage:
             raise ProtocolError("something")
         except ProtocolError as e:
             assert str(e) == "something"
+
+
+# ---------------------------------------------------------------------------
+# CLI: opt-in --journal is file-only (spec "Event traceability")
+# ---------------------------------------------------------------------------
+
+class TestCliJournal:
+    def _run_cli(self, profile, cwd, journal=None):
+        argv = [sys.executable, "-m", "agentproc.cli",
+                "--profile", str(profile), "--prompt", "hi"]
+        if journal is not None:
+            argv += ["--journal", str(journal)]
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""),
+               "PYTHONPATH": str(SDK_SRC)}
+        return subprocess.run(argv, capture_output=True, cwd=str(cwd), env=env)
+
+    def test_journal_flag_leaves_stdout_and_stderr_bytes_identical(self, tmp_path):
+        agent = tmp_path / "agent.sh"
+        agent.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' \'{"type":"partial","text":"chunk"}\'\n'
+            'printf \'%s\\n\' \'{"type":"result","text":"done"}\'\n'
+        )
+        agent.chmod(0o755)
+        profile = tmp_path / "profile.yaml"
+        profile.write_text(f"command: {agent}\n")
+        journal = tmp_path / "journal.ndjson"
+
+        plain = self._run_cli(profile, tmp_path)
+        with_journal = self._run_cli(profile, tmp_path, journal=journal)
+
+        assert plain.returncode == 0, plain.stderr
+        assert with_journal.returncode == 0, with_journal.stderr
+        assert with_journal.stdout == plain.stdout
+        assert with_journal.stderr == plain.stderr
+
+        entries = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        assert [e["kind"] for e in entries] == ["partial", "result"]
+        assert [e["seq"] for e in entries] == [1, 2]

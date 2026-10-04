@@ -235,7 +235,7 @@ When `plain: true`, the runner does not decode stdout as NDJSON and does not cal
 
 - The entire stdout (UTF-8 decoded, trailing whitespace trimmed) becomes the reply body.
 - Session continuity is not supported (no `sessionId` can be extracted from plain text by the contract itself — a `plain` executor that needs session continuity MUST use a bespoke run loop outside this interface, as `recursive` and `echo-agent` do).
-- Timeouts (`timeout_secs` / `kill_grace_secs`) still apply.
+- Timeouts (`timeout_secs` / `kill_grace_secs`) still apply. The optional `budget_secs` / `deadline` fields constrain the subprocess spawn path only — this in-process path is not required to honour them (see [Time budget and absolute deadline](#time-budget-and-absolute-deadline-optional-profile-fields)).
 - `streaming: true` has no effect for `plain` executors (there are no `partial` events to forward).
 
 #### Runner contract
@@ -246,7 +246,7 @@ When the runner takes the in-process path (`executor:` present + recognised), it
 2. Resolve handlers via `makeHandlers()` if present, else use `buildArgs` / `parseEvent` directly.
 3. Call `buildArgs(message, sessionId, env)` once. An empty return is a hard error.
 4. Spawn the target CLI's argv directly (no bridge subprocess, no shell).
-5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path (a bridge-side `--timeout` / `--no-stream` / `--cwd` option overrides the profile field when given), and resolve `cwd` the same way the spawn path does (relative paths resolved against the profile's own directory).
+5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path (a bridge-side `--timeout` / `--no-stream` / `--cwd` option overrides the profile field when given; `budget_secs` / `deadline` constrain the spawn path only and are not required here), and resolve `cwd` the same way the spawn path does (relative paths resolved against the profile's own directory).
 6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}`, accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s.
 7. For `plain: true`: treat stdout as the body, apply truncation, emit a single `{"type":"result"}` at turn end.
 8. Emit a terminal `{"type":"result"}` (or `{"type":"error"}`) at turn end, carrying the first non-empty `sessionId` and any `usage` seen.
@@ -575,7 +575,7 @@ Optional:
 
 - The agent MAY emit multiple permission requests in one turn (sequentially or with other events interleaved). Each outstanding `request_id` needs its own response.
 - After emitting a `permission_request`, the agent (or wrapped CLI) typically **blocks** that tool call until a matching response arrives. The AgentProc bridge MUST NOT close stdin while a request is unanswered, except on turn timeout / process death.
-- **`timeout_secs` still applies to the whole turn.** If the user never approves in the messaging UI, the bridge's normal timeout fires (SIGTERM → grace → SIGKILL). Bridges SHOULD, when timing out with a pending permission request, prefer a deny response with a timeout `message` if stdin is still writable, then proceed with the normal kill sequence — but MUST NOT hang past `timeout_secs` waiting for the user.
+- **The turn's time limit still applies to the whole turn.** If the user never approves in the messaging UI, the bridge's normal timeout fires (SIGTERM → grace → SIGKILL). The effective limit is the earliest expiry of `timeout_secs`, `budget_secs`, and `deadline` (see [Time budget and absolute deadline](#time-budget-and-absolute-deadline-optional-profile-fields)). Bridges SHOULD, when timing out with a pending permission request, prefer a deny response with a timeout `message` if stdin is still writable, then proceed with the normal kill sequence — but MUST NOT hang past that limit waiting for the user.
 - Bridges MAY impose a shorter permission-specific wait; if they do, they MUST deny (or kill) rather than leave the agent blocked indefinitely.
 
 ### Interaction with other events
@@ -661,17 +661,28 @@ Two optional profile fields complement `timeout_secs`:
 
 All three fields are optional and independent; omitting them preserves the existing `timeout_secs`-only behaviour exactly. None of them appear in the wire format — they are bridge-side profile fields only.
 
+Their scope is the **subprocess spawn path**. A bridge that runs an agent in-process through an executor interface (a bridge-side extension, not P0) is not required to honour `budget_secs` / `deadline` on that path.
+
 ---
 
 ## Event traceability (optional)
 
 These are bridge-side observability features. None of them change the bytes on stdin/stdout (wire stays `0.4`).
 
-**Event sequence numbers and bridge timestamps.** A bridge MAY attach metadata to each classified stdout event in its internal structures (not in the wire output forwarded to the messaging platform): a monotonically increasing `seq` (per-turn, starting at 1, no gaps or repeats) and a bridge-side `ts` (ISO-8601 UTC) recording when the bridge classified the line.
+**Event sequence numbers and bridge timestamps.** A bridge MAY attach metadata to each classified stdout event in its internal structures (not in the wire output forwarded to the messaging platform):
 
-**RunResult timing.** A bridge's run result MAY include `started_at` (ISO-8601 UTC, turn start) and `duration` (seconds, floating point, bridge-measured wall clock covering spawn-to-exit). These are bridge measurements and are distinct from the agent self-reported `usage.duration_ms`, which excludes spawn/IPC overhead.
+- `seq` — assigned in line-arrival order to the classified events the bridge records, counting from 1 within the turn and incrementing by exactly 1 per recorded event: no gaps, no repeats. `malformed` lines are not events; a bridge MAY skip them entirely, in which case they consume no `seq`.
+- `ts` — millisecond-precision ISO-8601 UTC recording the moment the bridge classified that line (e.g. `2025-01-01T12:00:00.123+00:00`).
 
-**Opt-in journal.** A bridge MAY offer a switch (e.g. a CLI flag) that appends an NDJSON event journal to a caller-specified file. When enabled, the journal records every classified event (with `seq`/`ts`) plus bridge-level decisions — timeout fired, SIGTERM sent, grace-period SIGKILL, exit code 124, and similar. The journal MUST be off by default, MUST NOT be written to stdout, and when disabled the bridge's stdout/stderr output MUST be byte-identical to a bridge without journal support.
+**RunResult timing.** A bridge's run result MAY include `started_at` (ISO-8601 UTC, millisecond precision, turn start) and `duration` (seconds, floating point, bridge-measured wall clock covering spawn-to-exit). These are bridge measurements and are distinct from the agent self-reported `usage.duration_ms`, which excludes spawn/IPC overhead.
+
+**Opt-in journal.** A bridge MAY offer a switch (e.g. a CLI flag) that appends an NDJSON event journal to a caller-specified file. When enabled, the journal records every classified event it keeps (with `seq`/`ts`) plus bridge-level decisions. A bridge-level decision entry carries a `decision` field drawn from this vocabulary:
+
+- `timeout` — the effective time limit fired.
+- `sigterm_process_group` — SIGTERM sent to the agent's process group.
+- `sigkill_process_group` — SIGKILL sent to the process group after the grace period.
+
+The journal MUST be off by default, MUST NOT be written to stdout, and when disabled the bridge's stdout/stderr output MUST be byte-identical to a bridge without journal support.
 
 ---
 
@@ -826,6 +837,7 @@ Document revisions are tracked here. Wire-protocol bumps are called out explicit
 - **doc 1.5** — Exit Codes: a bridge MUST normalise a signal death to `128 + signal number` on every platform, regardless of how the host OS reports the death (POSIX negative wait status, Windows) — SIGINT always surfaces as `130` and SIGTERM as `143`. No wire change.
 - **doc 1.4** — Clarified the UTF-8 contract on agent stdout: bridges that decode child stdout as text SHOULD pass an explicit `encoding="utf-8"` (with lossy `errors="replace"`) rather than relying on the process locale; decoding with the locale under non-UTF-8 environments (`LANG=C`, Chinese Windows) can raise `UnicodeDecodeError` inside a drain thread and silently kill a turn. No wire change.
 - **doc 1.3** — Documented the bridge-side `AGENTPROC_HUB_REF` environment variable: pins hub profile fetches (and `_shared/`, tree listing) to a tag/branch/commit; the profile cache is keyed by ref, so switching the variable invalidates prior cache entries. Editorial — no wire change (`0.4`); SDK packages bumped to ship the ref-pinned hub client.
+- **wire 0.4 / doc 1.2** — Clarified the session contract for plain-CLI executors (SDK extension): such an executor cannot surface a `session_id` on stdout events, so session continuity is handled entirely in its argument-building step — pass the inbound `session_id` through a conversation flag when the CLI has one and return the id in `RunResult.sessionId`, otherwise return `""` and leave persistence to the host. Editorial — no wire change.
 - **wire 0.4 / doc 1.1** — Breaking stdout shape. Removes `{"type":"session"}` and `{"type":"text"}`. Session continuity is an optional `session_id` field on stdout events: bridge persists the first non-empty value; agents SHOULD attach it once known; early omit is allowed; a conflicting later value is a violation (keep first). Never mint an id the tool cannot resume with; never use `""` on output. Final success body is a single `{"type":"result","text":...}` (optional `usage`). Streaming body assembly: forwarded `partial`s win over a duplicate `result.text`. Hard cutover from 0.3 (see [Migration from 0.3](#migration-from-03)). Rationale for 0.3’s “last session event wins” is retired.
 - **wire 0.3 / doc 1.0** — NDJSON on both directions. Input: a single [turn object](#input--stdin-turn-object) on stdin replaces all `AGENT_*` environment variables; secrets/config stay in env; argv placeholders unchanged. Output: stdout is now NDJSON events (`partial` / `text` / `session` / `error` / `permission_request`) distinguished by a `type` field, replacing the `AGENT_*:` sentinel prefixes. `partial` gains an optional `role` (`output` | `thinking`). Attachments collapse to a single `attachments` array in the turn object (each element `{kind, url, ...}`), replacing the 0.2 `AGENT_IMAGE_URL` / `AGENT_FILE_URL` single-attachment convenience vars — there is no longer a dual single/multi representation. Session id is now an arbitrary JSON string on the wire (charset restriction moved to a storage-level concern). Profile changes: `command` is always argv[0] and never split (the `args`-absent whitespace-split shorthand is removed; `args` defaults to `[]`); the `stdin` field is removed (stdin always carries the turn); `streaming` becomes a bridge-side hint rather than a wire field; `env_inherit` is removed (child base env is always the infra set). Malformed stdout lines are logged and ignored rather than treated as reply body. The event vocabulary is declared closed to resist drift toward ACP-style richer events. This is a hard cutover from 0.2; the runner does not support both.
 - **wire 0.2 / doc 0.9** — Secure-by-default child environment inheritance. New profile field `env_inherit: minimal|all` (default `minimal`). Inheritance is decoupled from `env_allowlist`: the allowlist only gates `${VAR}` expansion; full `process.env` / `os.environ` inheritance requires explicit `env_inherit: all`. SDK packages bumped to 0.6.1; wire protocol stays `0.2`.

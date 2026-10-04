@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 import textwrap
@@ -1031,10 +1032,26 @@ class TestTimeBudgetAndTraceability:
         with pytest.raises(ValueError):
             parse_deadline("2025-01-01T12:00:00")
         with pytest.raises(ValueError):
-            parse_deadline("not-a-date")
-            parse_deadline("2025-01-01T12:00:00")
+            parse_deadline("2025-01-01")
         with pytest.raises(ValueError):
             parse_deadline("not-a-date")
+        with pytest.raises(ValueError):
+            parse_deadline(12345)
+        assert parse_deadline(None) is None
+
+    def test_budget_secs_accepts_numeric_string(self):
+        # "1" must mean 1 second, not be silently dropped (which would fall
+        # back to the 1800 s default and hang the turn).
+        assert normalize_profile({"command": "x", "budget_secs": "1"})["budget_secs"] == 1.0
+
+    def test_spawn_failure_still_reports_duration(self, tmp_path):
+        r = run(
+            {"command": str(tmp_path / "no-such-agent-binary")},
+            RunOptions(message="hi"),
+        )
+        assert r.exit_code == 1
+        assert r.error
+        assert r.duration is not None and r.duration >= 0.0
 
     def test_started_at_and_duration_measured(self, agent_script):
         agent = agent_script(
@@ -1045,6 +1062,8 @@ class TestTimeBudgetAndTraceability:
         assert r.reply == "ok"
         assert r.started_at, "started_at must be populated"
         assert r.duration > 0.0
+        # Millisecond precision + explicit UTC offset, cross-bridge comparable.
+        assert re.search(r"\.\d{3}\+00:00$", r.started_at), r.started_at
         from datetime import datetime
         dt = datetime.fromisoformat(r.started_at)
         assert dt.tzinfo is not None
@@ -1066,6 +1085,7 @@ class TestTimeBudgetAndTraceability:
         seqs = [e["seq"] for e in entries]
         assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs) and seqs[0] == 1
         assert all("ts" in e for e in entries)
+        assert all(re.search(r"\.\d{3}\+00:00$", e["ts"]) for e in entries), entries
 
     def test_journal_records_timeout_decisions(self, agent_script):
         agent = agent_script("#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n")

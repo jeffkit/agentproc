@@ -174,9 +174,15 @@ const { executorNames } = require('agentproc');
 | `error` | `string` | Error message from a `{"type":"error"}` event; `''` if none |
 | `exitCode` | `number` | Agent process exit code (124 = timeout) |
 | `timedOut` | `boolean` | Whether the run was killed by timeout |
+| `startedAt` | `string` | Bridge-measured turn start (ISO-8601 UTC, millisecond precision) |
+| `duration` | `number` | Bridge-measured wall clock from spawn to exit, in seconds |
 | `usage` | `object\|null` | Token/cost stats from the terminal event; `null` when absent |
 
 Common `usage` keys (all optional): `input_tokens`, `output_tokens`, `total_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`, `reasoning_tokens`, `duration_ms`, `cost_usd`.
+
+`startedAt` / `duration` are bridge measurements — distinct from the agent self-reported `usage.duration_ms`, which excludes spawn/IPC overhead.
+
+For post-hoc turn attribution, `options.onJournal` takes a callback that receives every classified event and bridge decision, each stamped with a per-turn `seq` and a millisecond ISO-8601 UTC `ts`; `parseDeadline()` (from `agentproc/src/runner`) validates a profile `deadline`. The journal hook is opt-in and never adds bytes to stdout.
 
 ## Local testing
 
