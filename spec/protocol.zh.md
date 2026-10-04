@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.6`
+**文档修订：** `1.7`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -118,6 +118,15 @@ bridge 按 POSIX shell 语义展开 `${VAR}`：未知变量展开为空字符串
 
 hub 拉取默认读取仓库的 `main` 分支。将 bridge 侧环境变量 `AGENTPROC_HUB_REF` 设为 tag、分支或 commit sha，可把所有 hub 拉取（profile 文件、`_shared/` 辅助脚本、仓库树列表）固定到该 ref。这是一个**「拉取即执行」的信任旋钮，不是沙箱**：固定 ref 让拉取的字节可复现，但拉取到的 profile 仍以你已授予它的信任被执行——默认（`main`）意味着「信任仓库维护者最近合并的内容」。profile 缓存按 ref 失效：改变该变量会使此前的缓存条目失效，因此固定 ref 的运行不会悄悄用上 `main` 的副本（反之亦然）。
 
+#### 拒绝自动批准 argv —— `AGENTPROC_AUTO_APPROVE`
+
+大多数 CLI 在 in-process executor 路径上没有审批通道，因此未设置 `permission: true` 的 profile 会带上 executor 硬编码的自动批准 flag 运行（`--dangerously-skip-permissions`、`--yolo` 等）。把 bridge 侧环境变量 `AGENTPROC_AUTO_APPROVE` 设为 `0` 或 `false`（大小写不敏感，忽略首尾空白）后，runner 会**拒绝** spawn argv 中含有这些 token 的 CLI，改为让本轮失败（`error` 事件 + 非零退出码）。其他取值（包括变量未设置）保持现有行为。
+
+- **作用范围。** 该变量从 runner/bridge 自身进程环境读取——与 `AGENTPROC_HUB_REF` 一样，它是进程侧旋钮，不是 profile 字段，也不属于 [turn 对象](#输入--stdin-turn-对象)。
+- **被拒绝的 token。** `--dangerously-skip-permissions`、`--yolo`、`--always-approve`、`--yes-always`、`--approve`、`--auto`（`spec/conformance/cases.json` 中的 `auto_approve_flags` 是单一事实源）。
+- **不受影响。** 为 `permission: true` 生成的审批 argv（例如 `--permission-prompt-tool stdio`）不含自动批准 token，因此仍被放行。
+- **spawn 路径。** 语义不变——那里的 argv 由 profile 作者书写，bridge 不改写。
+
 ### `env_allowlist` —— 收窄 `${VAR}` 展开
 
 默认情况下，`env` 块中的每个 `${VAR}` 都针对 bridge 的完整环境展开（这样 profile 作者能拉取他们声明的凭据）。`env_allowlist` 让 profile 把展开范围精确收窄到它需要的变量：
@@ -190,6 +199,10 @@ args: []
 
 `permission` 是**可选启用**。没有 turn 中批准通道的 profile 和 CLI 保持不变。
 
+**无审批通道的 executor。** `permission: true` 是请求审批通道，而非授权回落到自动批准。当宿主 SDK 的 in-process executor 没有 turn 中审批通道（`supportsPermission: false`，见 [Executor 接口](#executor-接口)）而 profile 设置 `permission: true` 时，runner **MUST** 让本轮失败——发 `{"type":"error"}` 事件 + 非零退出码——且 **MUST NOT** 以自动批准 flag（`--dangerously-skip-permissions`、`--yolo` 或任何等价形式）spawn CLI。profile 作者的修复方式是移除 `permission: true`，或改用声明了该能力的 executor。
+
+该规则只作用于 in-process executor 路径。spawn 路径（`command` / `args`）的 argv 由 profile 作者书写，bridge 不改写。
+
 ### In-process executor
 
 `executor:` 字段（见 [Profile YAML](#profile-yaml)）选择一个 **in-process executor**——一个由 SDK 注册、实现了协议 bridge 侧的命名实现。当 runner 识别该名称时，**在 runner 自身进程内**直接调用 executor，直接 spawn 目标 CLI，而不再先 fork 一个 bridge 子进程。这样省去了 bridge 进程的 fork 开销，同时复用独立 bridge 脚本所承载的同一套 CLI 适配逻辑。
@@ -205,7 +218,8 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 | `cliName` | string | CLI 二进制名，用于错误信息（例如 `"claude"`、`"codex"`）。 |
 | `installHint` | string | 人类可读的安装指引，追加到「CLI 未找到」错误后。 |
 | `plain` | boolean | `true` = CLI 在 stdout 输出纯文本（非 NDJSON）；runner 把整个 stdout 当作回复正文，**不**调用 `parseEvent`。`false`（默认）= CLI 输出 NDJSON，每行一个 JSON 对象，经 `parseEvent` 解码。 |
-| `buildArgs` | `(message, sessionId, env) -> string[]` | 构建目标 CLI 的 argv。`message` 是本轮用户消息；`sessionId` 是上一轮的会话 id（空串 = 新会话）；`env` 是组合后的子进程环境（infra 集 + profile `env` 经 `${VAR}` 展开和 `env_allowlist` 过滤后的结果）。返回的 argv **不**经 shell 直接传给 `execve`。返回空数组是硬错误。 |
+| `buildArgs` | `(message, sessionId, env, ctx) -> string[]` | 构建目标 CLI 的 argv。`message` 是本轮用户消息；`sessionId` 是上一轮的会话 id（空串 = 新会话）；`env` 是组合后的子进程环境（infra 集 + profile `env` 经 `${VAR}` 展开和 `env_allowlist` 过滤后的结果）；`ctx` 为 `{ "permission": bool }`，即本 turn 的 profile `permission` 值。返回的 argv **不**经 shell 直接传给 `execve`。返回空数组是硬错误。 |
+| `supportsPermission` | boolean | `true` = 该 executor 具有 turn 中审批通道，能够兑现 `permission: true`。缺省 `false`。由 runner 在 spawn **之前**读取（见 [Runner 契约](#runner-契约)），`buildArgs` 本身不读它。 |
 | `parseEvent` | `(event) -> ParseResult \| null` | 将 CLI stdout 的一行解码后的 JSON 对象翻译为 `ParseResult`。对不识别的事件返回 `null`（runner 记日志并忽略该行）。`plain: true` 时省略 / 不使用。 |
 | `makeHandlers` | `() -> { buildArgs, parseEvent }` | 可选工厂，用于**有状态** executor——需要在 `buildArgs` 和 `parseEvent` 之间共享 per-turn 状态（例如 `buildArgs` 生成的会话 id 在 `parseEvent` 中返回）。存在时，runner **每 turn 调用一次** `makeHandlers()`，仅在该 turn 使用返回的 pair。缺省时，runner 直接使用 `buildArgs` / `parseEvent`，且它们**必须**无状态、可重入。 |
 
@@ -240,12 +254,16 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 
 1. 按 spawn 路径完全相同的方式组合子进程环境（infra 集 + profile `env` 展开后 + CLI `--env` 附加），并作为 `env` 参数传给 `buildArgs`。
 2. 若 `makeHandlers` 存在则通过它解析 handlers，否则直接使用 `buildArgs` / `parseEvent`。
-3. 调用一次 `buildArgs(message, sessionId, env)`。返回空是硬错误。
+3. 调用一次 `buildArgs(message, sessionId, env, ctx)`，其中 `ctx = { "permission": <profile 的 permission 值> }`。返回空是硬错误。
 4. 直接 spawn 目标 CLI 的 argv（无 bridge 子进程、无 shell）。
-5. 以与 spawn 路径相同的语义应用 `timeout_secs` / `kill_grace_secs` / `streaming` / `permission`（bridge 侧的 `--timeout` / `--no-stream` / `--cwd` 选项给出时覆盖 profile 字段；`budget_secs` / `deadline` 只约束 spawn 路径，此处不要求支持），并按 spawn 路径相同的方式解析 `cwd`（相对路径按 profile 自身目录解析）。
+5. 以与 spawn 路径相同的语义应用 `timeout_secs` / `kill_grace_secs` / `streaming` / `permission`（bridge 侧的 `--timeout` / `--no-stream` / `--cwd` 选项给出时覆盖 profile 字段；`budget_secs` / `deadline` 只约束 spawn 路径，此处不要求支持），并按 spawn 路径相同的方式解析 `cwd`（相对路径按 profile 自身目录解析）。permission 通过 `ctx` 传给 executor；runner 不在 `buildArgs` 返回后改写 argv。
 6. 对 `plain: false`：逐行解码 stdout，每行调用 `parseEvent`，把 `partialText` 作为 `{"type":"partial"}` 转发，累加 `finalText`，持久化第一个非空 `sessionId`，遇到 `error` 时发 `{"type":"error"}` 并抑制后续 `partial`。
 7. 对 `plain: true`：把 stdout 当作正文，应用截断，在 turn 结束时发单个 `{"type":"result"}`。
 8. 在 turn 结束时发终态 `{"type":"result"}`（或 `{"type":"error"}`），携带第一个非空 `sessionId` 和见过的任何 `usage`。
+9. 在 `buildArgs` 之后、spawn 之前判定 permission posture，遇到不一致时拒绝 spawn：
+   - (a) profile 设置 `permission: true` 而 executor 未声明 `supportsPermission` → 拒绝；
+   - (b) `AGENTPROC_AUTO_APPROVE` 被设为 `0` / `false` 且 argv 含有其拒绝的 token 之一 → 拒绝。
+   拒绝即发 `{"type":"error"}` 事件 + 非零退出码，且**不** spawn CLI。
 
 对同一 CLI + turn，in-process 路径与 spawn 路径**必须**产出 observable 等价的 NDJSON。这由共享的 conformance 套件验证。
 
@@ -829,6 +847,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
+- **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。无 wire 变更；spawn 路径语义不变。
 - **wire 0.4 / doc 1.6** —— 可选 bridge 侧 profile 字段 `budget_secs` 与 `deadline`（与 `timeout_secs` 取最早到期；SIGTERM → 宽限 → SIGKILL 语义一致，退出码 124）。新增「事件可追溯性（可选）」小节：bridge 内部事件 `seq`/`ts` 元数据、`RunResult` 的 `started_at`/`duration`（bridge 实测，区别于 agent 自报 `usage.duration_ms`）、opt-in NDJSON journal（默认关闭、只写文件、绝不写 stdout；关闭时 stdout/stderr 字节一致）。无 wire 变更——stdin/stdout 上的字节不变。SDK 包 bump 至 0.17.0。
 - **doc 1.5** —— Exit Codes：agent 被信号杀死时，bridge **必须**在任何平台将退出码归一为 `128 + 信号编号`，无论宿主操作系统如何报告该死亡（POSIX 负数 wait 状态、Windows）——SIGINT 一律呈现为 `130`，SIGTERM 一律呈现为 `143`。无线协议变更。
 - **doc 1.4** —— 澄清 agent stdout 的 UTF-8 合约：以文本方式解码子进程 stdout 的 bridge **SHOULD** 显式传 `encoding="utf-8"`（并配 `errors="replace"` 容错），而非依赖进程 locale；在非 UTF-8 环境（`LANG=C`、中文 Windows）下按 locale 解码可能在 drain 线程内抛 `UnicodeDecodeError` 并静默杀死一轮对话。无线协议变更。
