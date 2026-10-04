@@ -50,6 +50,8 @@ def main():
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
     found_session_id = None

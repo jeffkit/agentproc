@@ -614,6 +614,8 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             start_new_session=True,
             env=env,
         )
@@ -908,6 +910,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             start_new_session=True,  # 独立进程组：超时 killpg 清整个子树
         )
@@ -974,13 +978,21 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     if not profile["permission"]:
         _close_stdin()
 
+    # Shared drain-failure slot: a reader-thread exception must reach the
+    # main loop (which owns on_error / kill) instead of dying silently and
+    # leaving the turn to be misreported as a timeout.
+    drain_error: List[str] = []
+
     def _drain_stderr() -> None:
         assert proc.stderr is not None
-        for line in proc.stderr:
-            _append_stderr(line)
-            line = line.rstrip("\r\n")
-            if options.on_stderr:
-                options.on_stderr(line)
+        try:
+            for line in proc.stderr:
+                _append_stderr(line)
+                line = line.rstrip("\r\n")
+                if options.on_stderr:
+                    options.on_stderr(line)
+        except Exception as exc:  # noqa: BLE001
+            drain_error.append(f"stderr reader failed: {exc!r}")
 
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
     stderr_thread.start()
@@ -1121,8 +1133,11 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     def _drain_stdout() -> None:
         assert proc.stdout is not None
-        for raw_line in proc.stdout:
-            _handle_line(raw_line.rstrip("\n"))
+        try:
+            for raw_line in proc.stdout:
+                _handle_line(raw_line.rstrip("\n"))
+        except Exception as exc:  # noqa: BLE001
+            drain_error.append(f"stdout reader failed: {exc!r}")
 
     stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
     stdout_thread.start()
@@ -1137,6 +1152,20 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                     exit_code = proc.wait(timeout=0.5)
                     break
                 except subprocess.TimeoutExpired:
+                    if drain_error:
+                        # Drain-thread failure: surface it, kill the group,
+                        # and end the turn with EXIT_ERROR (not a timeout).
+                        _close_stdin()
+                        _signal_process_group(proc, signal.SIGTERM)
+                        try:
+                            proc.wait(timeout=profile["kill_grace_secs"])
+                        except subprocess.TimeoutExpired:
+                            _signal_process_group(proc, signal.SIGKILL)
+                        try:
+                            exit_code = proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            exit_code = EXIT_ERROR
+                        break
                     if time.monotonic() >= deadline:
                         timed_out = True
                         # Spec: prefer deny with timeout message for pending
@@ -1190,6 +1219,11 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     if stderr_thread.is_alive():
         if options.on_stderr:
             options.on_stderr("[agentproc runner] warning: stderr drain timed out; diagnosis may be incomplete")
+
+    if drain_error:
+        result.error = drain_error[0]
+        if options.on_error:
+            options.on_error(result.error)
 
     # Reply body assembly (wire 0.4):
     # - streaming true + any partial forwarded → reply stays empty (body via

@@ -41,7 +41,8 @@ args = ["claude", "--output-format", "stream-json",
 if session_id:
     args += ["--resume", session_id]
 
-proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, encoding="utf-8", errors="replace")
 
 found_session_id = None
 last_final = None

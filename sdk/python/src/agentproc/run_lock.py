@@ -115,7 +115,8 @@ def _pid_gone(pid: int, grace_secs: float) -> bool:
         try:
             out = subprocess.run(
                 ["ps", "-o", "stat=", "-p", str(pid)],
-                capture_output=True, text=True, timeout=5)
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=5)
         except (OSError, subprocess.SubprocessError):
             return False  # 拿不到状态：保守视作仍存活
         if (out.stdout or "").strip().startswith("Z"):
@@ -129,7 +130,8 @@ def _ps_fields(pid: int) -> Optional[Tuple[str, str]]:
     try:
         proc = subprocess.run(
             ["ps", "-o", "pgid=,command=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None

@@ -3,7 +3,7 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.3`. Does not change the wire contract (except when paired with a wire bump).
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.4`. Does not change the wire contract (except when paired with a wire bump).
 - **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
@@ -23,6 +23,11 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - Tests: new `sdk/python/tests/test_codex_perm_cleanup.py` drives both bridges as subprocesses (fake codex CLI on PATH, fake `~/.codex/auth.json`) asserting no residue after normal exit, startup sweep of a pre-planted stale dir, and SIGTERM cleanup — observable parity across the two bridges.
 
 ### Spec / SDK 0.16.0 — unreleased
+
+**fix(sdk/python,hub): force UTF-8 decoding in agent-facing `Popen`/`run` calls and surface drain-thread errors (#16)**
+
+- `sdk/python/src/agentproc/runner.py` (both spawn points) and `run_lock.py`, plus `hub/_shared/stream_utils.py` (`run_bridge`, `run_plain_cli`) and the per-profile bridges (`claude-code`, `codex`, `recursive`, `dsh`), now pass `encoding="utf-8", errors="replace"` instead of bare `text=True`. Previously child stdout was decoded with the process locale; under `LANG=C`/ASCII containers decoding UTF-8 agent output raised `UnicodeDecodeError` inside the stdout drain thread, killing the turn silently until the timeout misreported it. The spec promises UTF-8 on stdout, so decoding is now explicit and locale-independent; invalid bytes decode to U+FFFD instead of crashing.
+- Drain threads (`_drain_stdout` / `_drain_stderr`) no longer let exceptions die silently: a reader failure is captured, forwarded through `on_error`, and ends the turn with `EXIT_ERROR` (the main wait loop breaks early and kills the process group) — instead of a hung turn later misreported as a timeout.
 
 **Hub: fix stderr pipe-buffer deadlock in shared bridge runners (#14)**
 

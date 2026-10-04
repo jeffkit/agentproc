@@ -360,6 +360,8 @@ def _run_permission_mode(turn: dict, env) -> int:
             stderr=subprocess.PIPE,
             env=child_env,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         )
     except FileNotFoundError:

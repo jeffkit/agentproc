@@ -187,7 +187,8 @@ def probe_support() -> dict:
         try:
             r = subprocess.run(
                 [CLI_NAME, "--profile", "headless", "--help"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
             )
             _support_cache = detect_support((r.stdout or "") + (r.stderr or ""))
         except Exception:
@@ -365,6 +366,8 @@ def main() -> int:
             stderr=subprocess.PIPE,
             env=child_env(),
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except FileNotFoundError:
         emit_error(f"{CLI_NAME} CLI not found. {INSTALL_HINT}")
