@@ -3,12 +3,19 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.4`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.1`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.5`. Does not change the wire contract (except when paired with a wire bump).
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.2`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
 
 ### Spec / SDK 0.17.0 — unreleased
+
+**fix: normalise signal-death exit codes across the three SDKs (#10)**
+
+- Spec (revision `1.4` → `1.5`): Exit Codes section now states the bridge MUST normalise a signal death to `128 + signal number` on all platforms, regardless of how the host OS reports it — SIGINT always surfaces as `130`, SIGTERM as `143`.
+- Node runner: new `normaliseExit(code, signal)` wired into all three `child.on('close')` wait points (spawn path, executor NDJSON path, plain path); a POSIX signal-number table avoids `os.constants` differences across Node versions. Runner-own timeout kills are unaffected — the `killed`/`timedOut` branches still override with `124`.
+- Python runner: new `_normalise_exit_code()` (negative returncode → `128 + (-code)`, `None` → `EXIT_ERROR`) applied at the spawn-path waits (main polling loop, no-timeout wait, KeyboardInterrupt forwarding — so an agent that honours SIGINT after Ctrl-C forwarding reports `130`) and the plain-executor exit path. Windows returncodes are never negative, so it is a no-op there; timeout stays `124`.
+- Tests: previously red `[wip]` cases greened in `sdk/node/src/runner.test.js` and `sdk/python/tests/test_runner.py` (SIGTERM→143, SIGINT→130 each); the Rust equivalents are noted under Rust SDK 0.12.2.
 
 **Hub client: `AGENTPROC_HUB_REF` — pin hub fetches to an exact upstream ref (#15)**
 
@@ -22,6 +29,12 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - `hub/codex/README.md` documents the permission-mode trust boundary and the temp-home lifecycle.
 - Tests: new `sdk/python/tests/test_codex_perm_cleanup.py` drives both bridges as subprocesses (fake codex CLI on PATH, fake `~/.codex/auth.json`) asserting no residue after normal exit, startup sweep of a pre-planted stale dir, and SIGTERM cleanup — observable parity across the two bridges.
 
+### Rust SDK 0.12.2
+
+**`sdk/rust`: signal-death exit codes normalised to 128+signo (#10)**
+
+- Both spawn-exit match arms now check `ExitStatus::signal()` first and report `128 + signo` (was `code().unwrap_or(0)`, which mis-reported a signal death as success); the unix-only `signal()` is cfg-gated with a `code()` fallback so non-unix (Windows) targets compile; timeout stays `124`. Test: previously red `[wip]` cases greened in `sdk/rust/tests/spawn_path.rs` (SIGTERM → 143, SIGINT → 130). Version bumped 0.12.1 → 0.12.2.
+
 ### Rust SDK 0.12.1
 
 **`sdk/rust` — spec-alignment fixes (#11)**
@@ -31,7 +44,6 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - **Removed the default 8000-char reply truncation**: `max_reply_chars` / `truncation_suffix` are deleted from `Profile` (the live truncation used `profile.max_reply_chars` (default 8000) while the `ProcessOpts` copies were dead; both are now removed). Replies now arrive intact, matching the no-truncation rule. Breaking API change for the two dead pub fields; YAML keys are ignored via serde defaults.
 - **`session_id` validation**: ids containing `/`, `\`, control characters, or dot-only segments (`.`/`..`) are rejected (warned on stderr, never adopted into `RunResult.session_id`) on both the spawn and executor paths. `history::session_file_path` sanitises invalid ids to a non-colliding name and `append_history` refuses to write them, closing the path-traversal window into/out of the sessions directory.
 - New tests: `permission_channel` (allow + deny branches), `timeout_two_step_kill` (graceful SIGTERM partial flush, zero-grace SIGKILL), `no_truncation` (10k-char result intact), `session_id_validation` (adoption + traversal + history). `libc` added as a unix-only dependency; version bumped 0.12.0 → 0.12.1.
-
 ### Spec / SDK 0.16.0 — unreleased
 
 **Python SDK: runner long-lived-consumer leak fixes (issue #20; internal behaviour, no wire change)**

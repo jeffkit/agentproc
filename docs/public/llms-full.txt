@@ -28,7 +28,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.4`
+**Document revision:** `1.5`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -640,6 +640,8 @@ The agent MUST NOT block on stdin after reading the turn line when `permission` 
 | `130` | Interrupted by SIGINT (Ctrl-C) |
 | `143` | Terminated by SIGTERM |
 
+When the agent process dies from a signal, the bridge MUST normalise the exit code to `128 + signal number` on all platforms, regardless of how the host OS reports the death (POSIX negative wait status, Windows, etc.) — so SIGINT always surfaces as `130` and SIGTERM as `143`.
+
 Other non-zero codes are treated as generic errors. Bridges SHOULD send a generic error message to the user when the process exits non-zero without having emitted an `error` event.
 
 ### Precedence when multiple failure signals arrive
@@ -824,6 +826,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.5** — Exit Codes: a bridge MUST normalise a signal death to `128 + signal number` on every platform, regardless of how the host OS reports the death (POSIX negative wait status, Windows) — SIGINT always surfaces as `130` and SIGTERM as `143`. No wire change.
 - **doc 1.4** — Clarified the UTF-8 contract on agent stdout: bridges that decode child stdout as text SHOULD pass an explicit `encoding="utf-8"` (with lossy `errors="replace"`) rather than relying on the process locale; decoding with the locale under non-UTF-8 environments (`LANG=C`, Chinese Windows) can raise `UnicodeDecodeError` inside a drain thread and silently kill a turn. No wire change.
 - **doc 1.3** — Documented the bridge-side `AGENTPROC_HUB_REF` environment variable: pins hub profile fetches (and `_shared/`, tree listing) to a tag/branch/commit; the profile cache is keyed by ref, so switching the variable invalidates prior cache entries. Editorial — no wire change (`0.4`); SDK packages bumped to ship the ref-pinned hub client.
 - **wire 0.4 / doc 1.1** — Breaking stdout shape. Removes `{"type":"session"}` and `{"type":"text"}`. Session continuity is an optional `session_id` field on stdout events: bridge persists the first non-empty value; agents SHOULD attach it once known; early omit is allowed; a conflicting later value is a violation (keep first). Never mint an id the tool cannot resume with; never use `""` on output. Final success body is a single `{"type":"result","text":...}` (optional `usage`). Streaming body assembly: forwarded `partial`s win over a duplicate `result.text`. Hard cutover from 0.3 (see [Migration from 0.3](#migration-from-03)). Rationale for 0.3’s “last session event wins” is retired.

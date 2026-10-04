@@ -89,6 +89,21 @@ EXIT_SIGINT = 130
 EXIT_SIGTERM = 143
 
 
+def _normalise_exit_code(code):
+    """Normalise a child exit status to a spec exit code.
+
+    POSIX wait() reports signal deaths as a negative returncode (-15 for
+    SIGTERM); normalise to 128 + signo (SIGINT → 130, SIGTERM → 143, matching
+    EXIT_SIGINT/EXIT_SIGTERM). None (no status) → EXIT_ERROR. Windows
+    returncodes are never negative, so the mapping is a no-op there.
+    """
+    if code is None:
+        return EXIT_ERROR
+    if code < 0:
+        return 128 + (-code)
+    return code
+
+
 # ---------------------------------------------------------------------------
 # Environment composition policy (wire 0.3)
 # ---------------------------------------------------------------------------
@@ -662,7 +677,7 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             f"executor '{cli_name}' exited {proc.returncode}: "
             + (stderr.strip() or "(no stderr)")
         )
-        result.exit_code = proc.returncode
+        result.exit_code = _normalise_exit_code(proc.returncode)
         if options.on_error:
             options.on_error(result.error)
         return result
@@ -1186,7 +1201,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             deadline = time.monotonic() + timeout_secs
             while True:
                 try:
-                    exit_code = proc.wait(timeout=0.5)
+                    exit_code = _normalise_exit_code(proc.wait(timeout=0.5))
                     break
                 except subprocess.TimeoutExpired:
                     if drain_error:
@@ -1237,7 +1252,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                                     )
                         break
         else:
-            exit_code = proc.wait()
+            exit_code = _normalise_exit_code(proc.wait())
     except KeyboardInterrupt:
         # SIGINT only exists on POSIX. On Windows we fall back to terminate().
         if hasattr(signal, "SIGINT"):
@@ -1250,7 +1265,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                 proc.terminate()
             except (ProcessLookupError, PermissionError):
                 pass
-        exit_code = proc.wait()
+        exit_code = _normalise_exit_code(proc.wait())
 
     _close_stdin()
     # Turn epoch starts here: the subprocess is gone; anything the drain
