@@ -30,12 +30,13 @@ const SCENARIOS = data.scenarios;
  * Uses printf with single-quoted args so AGENT_PARTIAL:"..." lines (which
  * contain JSON double-quotes) pass through without bash interpretation.
  */
-function bashScriptFor(lines) {
+function bashScriptFor(lines, sleepSecs) {
   let body = '#!/usr/bin/env bash\n';
   for (const line of lines) {
     const quoted = "'" + String(line).replace(/'/g, "'\\''") + "'";
     body += `printf '%s\\n' ${quoted}\n`;
   }
+  if (sleepSecs) body += `sleep ${sleepSecs}\n`;
   return body;
 }
 
@@ -49,7 +50,7 @@ function writeScript(content) {
 describe('scenario conformance (scenarios.json)', () => {
   for (const scenario of SCENARIOS) {
     test(scenario.name, async () => {
-      const agent = writeScript(bashScriptFor(scenario.lines));
+      const agent = writeScript(bashScriptFor(scenario.lines, scenario.sleep_secs));
       const exp = scenario.expect;
       const profile = Object.assign({ command: agent }, scenario.profile_overrides || {});
       const partials = [];

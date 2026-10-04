@@ -31,7 +31,7 @@ def _load_scenarios():
     return [pytest.param(s, id=s["name"]) for s in data["scenarios"]]
 
 
-def _write_bash_agent(tmp_path: Path, lines: List[str]) -> Path:
+def _write_bash_agent(tmp_path: Path, lines: List[str], sleep_secs: float = 0) -> Path:
     """Write a bash script that prints each line to stdout verbatim, then exits 0.
 
     Uses printf with single-quoted args so AGENT_PARTIAL:"..." style lines
@@ -43,6 +43,8 @@ def _write_bash_agent(tmp_path: Path, lines: List[str]) -> Path:
         # Single-quote the whole line; embedded single quotes via '\'' .
         quoted = "'" + line.replace("'", "'\\''") + "'"
         body += f"printf '%s\\n' {quoted}\n"
+    if sleep_secs:
+        body += f"sleep {sleep_secs}\n"
     script.write_text(body)
     script.chmod(script.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return script
@@ -50,7 +52,7 @@ def _write_bash_agent(tmp_path: Path, lines: List[str]) -> Path:
 
 @pytest.mark.parametrize("scenario", _load_scenarios())
 def test_scenario_conformance(scenario: dict, tmp_path: Path) -> None:
-    agent = _write_bash_agent(tmp_path, scenario["lines"])
+    agent = _write_bash_agent(tmp_path, scenario["lines"], scenario.get("sleep_secs", 0))
     expect = scenario["expect"]
     profile = {"command": str(agent), **scenario.get("profile_overrides", {})}
     partials: List[str] = []

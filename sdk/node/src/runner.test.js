@@ -988,3 +988,173 @@ describe('executor: field routing', () => {
     assert.ok(!r.error || !r.error.includes('Unknown executor'), `should not hard-fail: ${r.error}`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Time budget / deadline / event traceability (spec doc 1.6)
+// ---------------------------------------------------------------------------
+
+describe('time budget and traceability', () => {
+  test('budget_secs times out (same path as timeout_secs)', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\necho unreachable\n');
+    const r = await run(
+      { command: agent, budget_secs: 1, kill_grace_secs: 1 },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitCode, 124);
+  });
+
+  test('budget_secs earliest-wins over larger timeout_secs', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\n');
+    const r = await run(
+      { command: agent, timeout_secs: 30, budget_secs: 1, kill_grace_secs: 1 },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitCode, 124);
+  });
+
+  test('deadline in the past expires immediately', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\n');
+    const r = await run(
+      { command: agent, deadline: '2000-01-01T00:00:00+00:00', kill_grace_secs: 1 },
+      { message: 'hi' },
+    );
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitCode, 124);
+  });
+
+  test('parseDeadline rejects naive/date-only/non-string values', () => {
+    const { parseDeadline } = require('./runner.js');
+    assert.throws(() => parseDeadline('not-a-date'), /ISO-8601/);
+    // No explicit offset ⇒ Date.parse reads the value as LOCAL time, which
+    // silently disagrees with the Python parser. Reject both shapes.
+    assert.throws(() => parseDeadline('2025-01-01T12:00:00'), /timezone-aware ISO-8601/);
+    assert.throws(() => parseDeadline('2025-01-01'), /timezone-aware ISO-8601/);
+    assert.throws(() => parseDeadline(12345), /ISO-8601 timestamp string/);
+    assert.strictEqual(parseDeadline(null), null);
+    assert.strictEqual(parseDeadline('2025-01-01T12:00:00Z'), Date.parse('2025-01-01T12:00:00Z') / 1000);
+    assert.strictEqual(parseDeadline('2025-01-01T12:00:00+00:00'), Date.parse('2025-01-01T12:00:00Z') / 1000);
+  });
+
+  test('invalid deadline fails before spawning — agent never runs', async () => {
+    // Marker-file probe instead of `pgrep -fl <script path>`: on Linux the
+    // `sh -c` wrapper of the pgrep probe itself carries the script path on its
+    // command line, so -f matches the probe and can never report "no orphan".
+    // The fake agent records its first execution by creating the marker file.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-runner-'));
+    const marker = path.join(dir, 'spawned.marker');
+    const agent = path.join(dir, 'agent.sh');
+    fs.writeFileSync(
+      agent,
+      `#!/usr/bin/env bash\ntouch ${JSON.stringify(marker)}\nsleep 30\n`,
+      { mode: 0o755 },
+    );
+    await assert.rejects(
+      () => run({ command: agent, deadline: 'not-a-date' }, { message: 'hi' }),
+      /profile\.deadline/,
+    );
+    // The child must never have been spawned. Wait long enough that a spawn
+    // would have happened, then assert the agent process never executed.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.strictEqual(
+      fs.existsSync(marker), false,
+      `agent was spawned despite the invalid deadline (marker exists: ${marker})`,
+    );
+  });
+
+  test('budget_secs accepts a numeric string', () => {
+    assert.strictEqual(normalizeProfile({ command: 'x', budget_secs: '1' }).budget_secs, 1);
+    assert.strictEqual(normalizeProfile({ command: 'x', budget_secs: '2.5' }).budget_secs, 2.5);
+    assert.strictEqual(normalizeProfile({ command: 'x', budget_secs: 'nope' }).budget_secs, null);
+  });
+
+  test('run result carries startedAt and duration', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"type":"result","text":"ok"}\'\n');
+    const t0 = Date.now();
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'ok');
+    assert.ok(r.startedAt, 'startedAt must be populated');
+    assert.ok(/\.\d{3}\+00:00$/.test(r.startedAt), `startedAt: ${r.startedAt}`);
+    assert.ok(typeof r.duration === 'number' && r.duration > 0);
+    const wall = (Date.now() - t0) / 1000;
+    assert.ok(r.duration <= wall * 3 + 5, `duration ${r.duration} vs wall ${wall}`);
+  });
+
+  test('onJournal receives monotonically increasing seq + ts per event', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'printf \'%s\\n\' \'{"type":"partial","text":"a"}\'\n' +
+      'printf \'%s\\n\' \'{"type":"result","text":"done"}\'\n',
+    );
+    const entries = [];
+    const r = await run({ command: agent }, { message: 'hi', onJournal: (e) => entries.push(e) });
+    assert.strictEqual(r.reply, 'done');
+    assert.deepStrictEqual(entries.map(e => e.kind), ['partial', 'result']);
+    const seqs = entries.map(e => e.seq);
+    assert.deepStrictEqual(seqs, [...seqs].sort((a, b) => a - b));
+    assert.strictEqual(seqs[0], 1);
+    assert.strictEqual(new Set(seqs).size, seqs.length);
+    for (const e of entries) assert.ok(typeof e.ts === 'string' && e.ts);
+  });
+
+  test('onJournal records timeout kill decisions', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\ntrap \'\' TERM\nsleep 30\n');
+    const entries = [];
+    const t0 = Date.now();
+    await run(
+      { command: agent, budget_secs: 1, kill_grace_secs: 1 },
+      { message: 'hi', onJournal: (e) => entries.push(e) },
+    );
+    const elapsed = (Date.now() - t0) / 1000;
+    const decisions = entries.filter(e => e.decision).map(e => e.decision);
+    assert.ok(decisions.includes('timeout'), `decisions: ${decisions}`);
+    assert.ok(decisions.includes('sigterm_process_group'), `decisions: ${decisions}`);
+    assert.ok(decisions.includes('sigkill_process_group'), `decisions: ${decisions}`);
+    // Killing the process group reaps the TERM-trapping agent within the grace
+    // period instead of waiting out its 30 s sleep (the old child-only signal).
+    assert.ok(elapsed < 10, `turn took ${elapsed}s — process group not signalled`);
+    const seqs = entries.map(e => e.seq);
+    for (let i = 1; i < seqs.length; i += 1) {
+      assert.ok(seqs[i] > seqs[i - 1], `seq not strictly increasing: ${seqs}`);
+    }
+  });
+
+  test('CLI --journal leaves stdout and stderr bytes identical', () => {
+    const { spawnSync } = require('node:child_process');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-cli-journal-'));
+    const agent = path.join(dir, 'agent.sh');
+    fs.writeFileSync(
+      agent,
+      '#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"type":"partial","text":"chunk"}\'\nprintf \'%s\\n\' \'{"type":"result","text":"done"}\'\n',
+      { mode: 0o755 },
+    );
+    const profile = path.join(dir, 'profile.yaml');
+    fs.writeFileSync(profile, `command: ${agent}\n`);
+    const journal = path.join(dir, 'journal.ndjson');
+    const cli = path.join(__dirname, 'cli.js');
+
+    const runCli = (extra) => spawnSync(
+      process.execPath,
+      [cli, '--profile', profile, '--prompt', 'hi', ...extra],
+      { encoding: 'utf8' },
+    );
+
+    const plain = runCli([]);
+    const withJournal = runCli(['--journal', journal]);
+    assert.strictEqual(plain.status, 0, plain.stderr);
+    assert.strictEqual(withJournal.status, 0, withJournal.stderr);
+    assert.strictEqual(withJournal.stdout, plain.stdout);
+    assert.strictEqual(withJournal.stderr, plain.stderr);
+
+    const entries = fs.readFileSync(journal, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    assert.deepStrictEqual(entries.map(e => e.kind), ['partial', 'result']);
+    assert.deepStrictEqual(entries.map(e => e.seq), [1, 2]);
+  });
+
+  test('no onJournal → no crash, behaviour unchanged', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"type":"result","text":"ok"}\'\n');
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.reply, 'ok');
+  });
+});

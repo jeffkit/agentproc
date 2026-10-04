@@ -118,6 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cwd")
     p.add_argument("--env", action="append", default=[])
     p.add_argument("--timeout", type=int)
+    p.add_argument("--journal")
     p.add_argument("--no-stream", action="store_true")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--quiet", action="store_true")
@@ -177,6 +178,7 @@ Output:
   --quiet                   Suppress protocol lines on stderr
   --raw                     Quiet mode: only print the final reply body (no live events)
   --stdin                   Read prompt from stdin instead of --prompt
+  --journal <path>          Append an NDJSON event/decision journal to <path> (opt-in)
 
 Other:
   --version                 Print version and exit
@@ -236,7 +238,8 @@ def _run_hub_subcommand(args: List[str]) -> int:
     positional: List[str] = []
     runner_args: List[str] = []
     takes_value = {"--prompt", "-p", "--session", "--session-name", "--from",
-                   "--image-url", "--file-url", "--cwd", "--env", "--timeout"}
+                   "--image-url", "--file-url", "--cwd", "--env", "--timeout",
+                   "--journal"}
     boolean_flags = {"--no-stream", "--verbose", "--quiet", "--raw", "--stdin"}
     i = 0
     while i < len(rest):
@@ -346,6 +349,7 @@ Hub run options (same as the regular --profile runner):
   --image-url <url>            Image attachment URL (carried in the turn's attachments)
   --file-url <url>             File attachment URL (carried in the turn's attachments)
   --timeout <secs>             Override profile.timeout_secs
+  --journal <path>             Append an NDJSON event/decision journal to <path> (opt-in)
   --no-stream                  Disable streaming
   --verbose / --quiet          Protocol line visibility (default: verbose)
   --stdin                      Read prompt from stdin
@@ -430,6 +434,22 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
         if verbose:
             sys.stderr.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
+    # Opt-in journal (spec "Event traceability"): NDJSON append to a file.
+    # Off by default; never touches stdout/stderr.
+    journal_path = getattr(opts, "journal", None)
+    journal_fp = None
+    on_journal = None
+    if journal_path:
+        try:
+            journal_fp = open(journal_path, "a", encoding="utf-8")
+        except OSError as e:
+            sys.stderr.write(f"error: cannot open journal file {journal_path}: {e}\n")
+            return 2
+
+        def on_journal(entry: Dict[str, object]) -> None:
+            journal_fp.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            journal_fp.flush()
+
     r = run(
         profile_raw,
         RunOptions(
@@ -442,6 +462,7 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
             extra_env=extra_env,
             attachments=_build_attachments(opts),
             timeout_secs=opts.timeout,
+            on_journal=on_journal,
             on_partial=lambda t: _emit({"type": "partial", "text": t}),
             on_session=lambda sid: _emit({"type": "session", "id": sid}),
             on_error=lambda msg: _emit({"type": "error", "message": msg}),
@@ -458,6 +479,8 @@ def _run_agent_with_profile(profile_path: str, opts) -> int:
         sys.stderr.write(f"agentproc:session:{r.session_id}\n")
     if r.error:
         sys.stderr.write(f"agentproc:error:{r.error}\n")
+    if journal_fp is not None:
+        journal_fp.close()
     return 0 if r.exit_code == 0 else 1
 
 

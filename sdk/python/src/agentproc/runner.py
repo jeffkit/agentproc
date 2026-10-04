@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
@@ -65,6 +66,7 @@ __all__ = [
     "run",
     "run_via_executor",
     "normalize_profile",
+    "parse_deadline",
     "classify_line",
     "parse_json_line",
     "is_valid_session_id",
@@ -146,6 +148,11 @@ class RunResult:
     exit_code: int = 0
     timed_out: bool = False
     usage: Optional[Dict[str, Any]] = None
+    # Bridge-measured timing (spec "Event traceability"): started_at is the
+    # ISO-8601 UTC turn-start instant; duration is bridge wall-clock seconds
+    # covering spawn-to-exit. Distinct from agent self-reported usage.duration_ms.
+    started_at: str = ""
+    duration: float = 0.0
 
 
 @dataclass
@@ -164,6 +171,9 @@ class RunOptions:
     # run-lock 文件，供 kill-before-start 孤儿清场定位进程组（run_lock 模块）。
     run_lock_key: Optional[str] = None
     timeout_secs: Optional[int] = None
+    # Journal hook (spec "Event traceability", opt-in): called with a dict
+    # per classified event / bridge-level decision. None ⇒ no journaling.
+    on_journal: Optional[Callable[[Dict[str, Any]], None]] = None
     on_partial: Optional[Callable[[str], None]] = None
     on_session: Optional[Callable[[str], None]] = None
     on_error: Optional[Callable[[str], None]] = None
@@ -243,10 +253,51 @@ def normalize_profile(raw: Dict[str, Any]) -> Dict[str, Any]:
             int(src["kill_grace_secs"]) if _is_int_like(src.get("kill_grace_secs"))
             else DEFAULT_KILL_GRACE_SECS
         ),
+        # Optional time budget / absolute deadline (spec "Time budget and
+        # absolute deadline"); None when absent. deadline kept as raw string
+        # here — parsed against turn-start at run() time.
+        "budget_secs": (
+            float(src["budget_secs"]) if _is_num_like(src.get("budget_secs"))
+            else None
+        ),
+        "deadline": src.get("deadline"),
         # Bridge-side hint: when False, the runner ignores {"type":"partial"}
         # events and assembles the reply from {"type":"text"} events only.
         "streaming": src.get("streaming", True) is not False,
     }
+
+
+def _utc_now_iso() -> str:
+    # Millisecond precision + "+00:00" offset (spec "Event traceability"): the
+    # journal `ts` and RunResult.started_at must be comparable across bridges.
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def parse_deadline(value: Any) -> Optional[float]:
+    """Parse a profile `deadline` into epoch seconds; None when absent.
+
+    Timezone-aware ISO-8601 only; a naive timestamp or unparseable value is a
+    profile validation error (spec: bridges MUST NOT silently ignore it).
+    Python 3.9's fromisoformat rejects the 'Z' suffix, so normalize it first.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("profile.deadline must be an ISO-8601 timestamp string")
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        raise ValueError(
+            f"profile.deadline must be a timezone-aware ISO-8601 timestamp, got {value!r}"
+        ) from None
+    if dt.tzinfo is None:
+        raise ValueError(
+            f"profile.deadline must include a timezone offset, got {value!r}"
+        )
+    return dt.timestamp()
 
 
 def _is_int_like(v: Any) -> bool:
@@ -256,6 +307,20 @@ def _is_int_like(v: Any) -> bool:
         return True
     if isinstance(v, str) and v.strip().lstrip("-").isdigit():
         return True
+    return False
+
+
+def _is_num_like(v: Any) -> bool:
+    if isinstance(v, bool) or v is None:
+        return False
+    if isinstance(v, (int, float)):
+        return True
+    if isinstance(v, str):
+        try:
+            float(v)
+            return True
+        except ValueError:
+            return False
     return False
 
 
@@ -1007,6 +1072,40 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     timeout_secs = (
         options.timeout_secs if options.timeout_secs is not None else profile["timeout_secs"]
     )
+
+    # Event traceability: bridge-measured turn timing + opt-in journal hook.
+    started_wall = time.time()
+    started_mono = time.monotonic()
+    seq = 0
+    seq_lock = threading.Lock()
+
+    def _journal(event: Dict[str, Any]) -> None:
+        if options.on_journal is None:
+            return
+        options.on_journal(dict(event, ts=_utc_now_iso()))
+
+    def _next_seq() -> int:
+        nonlocal seq
+        with seq_lock:
+            seq += 1
+            return seq
+
+    # Time budget / absolute deadline (spec "Time budget and absolute
+    # deadline"): earliest expiry of timeout_secs / budget_secs / deadline.
+    effective_secs: Optional[float] = (
+        float(timeout_secs) if timeout_secs and timeout_secs > 0 else None
+    )
+    budget = profile.get("budget_secs")
+    if budget is not None and budget > 0:
+        effective_secs = budget if effective_secs is None else min(effective_secs, budget)
+    deadline_epoch = parse_deadline(profile.get("deadline"))
+    if deadline_epoch is not None:
+        budget_from_deadline = deadline_epoch - started_wall
+        effective_secs = (
+            budget_from_deadline
+            if effective_secs is None
+            else min(effective_secs, budget_from_deadline)
+        )
     cwd = options.cwd or profile["cwd"]
     # Resolve relative cwd against the profile's own directory (if known),
     # so profiles written as `cwd: .` work no matter where the user invokes
@@ -1043,7 +1142,12 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     if profile["permission"]:
         turn["permission"] = True
 
-    result = RunResult()
+    # Same clock source as started_mono: started_at + duration must not drift.
+    result = RunResult(
+        started_at=datetime.fromtimestamp(started_wall, timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+    )
     result_text: Optional[str] = None
     result_seen = False
     # Spec: once an error event arrives, subsequent partial/result events
@@ -1141,6 +1245,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         if not result.error:
             result.error = tip or str(e)
         result.exit_code = EXIT_ERROR
+        result.duration = time.monotonic() - started_mono
         return result
     except PermissionError as e:
         if options.on_stderr:
@@ -1150,6 +1255,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         if not result.error:
             result.error = str(e)
         result.exit_code = EXIT_ERROR
+        result.duration = time.monotonic() - started_mono
         return result
 
     if options.run_lock_key:
@@ -1227,6 +1333,10 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         line = raw_line.rstrip("\r")
         c = classify_line(line)
         kind = c["kind"]
+        # Event traceability: journal classified events with seq/ts. seq/ts
+        # stay bridge-internal — they never enter the wire output.
+        if kind != "malformed" and options.on_journal is not None:
+            _journal({"seq": _next_seq(), "kind": kind, "line": line[:2000]})
         if kind == "partial":
             _note_session_id(c.get("session_id"))
             # Spec: post-error partials are discarded (not forwarded).
@@ -1372,8 +1482,8 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     exit_code: int
     timed_out = False
     try:
-        if timeout_secs and timeout_secs > 0:
-            deadline = time.monotonic() + timeout_secs
+        if effective_secs is not None:
+            deadline = started_mono + effective_secs
             while True:
                 try:
                     exit_code = _normalise_exit_code(proc.wait(timeout=0.5))
@@ -1395,6 +1505,11 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                         break
                     if time.monotonic() >= deadline:
                         timed_out = True
+                        _journal({
+                            "seq": _next_seq(),
+                            "decision": "timeout",
+                            "budget_secs": effective_secs,
+                        })
                         # Spec: prefer deny with timeout message for pending
                         # permission requests, then kill.
                         for rid in list(pending_permission_ids):
@@ -1407,10 +1522,18 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                         # 先对进程组 SIGTERM（polite shutdown），宽限后 killpg SIGKILL——
                         # 只 terminate 直接子进程会漏掉 agent 的子树（2026-09-27 事故）。
                         _signal_process_group(proc, signal.SIGTERM)
+                        _journal({
+                            "seq": _next_seq(),
+                            "decision": "sigterm_process_group",
+                        })
                         try:
                             proc.wait(timeout=profile["kill_grace_secs"])
                         except subprocess.TimeoutExpired:
                             _signal_process_group(proc, signal.SIGKILL)
+                            _journal({
+                                "seq": _next_seq(),
+                                "decision": "sigkill_process_group",
+                            })
                         try:
                             exit_code = proc.wait(timeout=2)
                         except subprocess.TimeoutExpired:
@@ -1510,6 +1633,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     else:
         result.exit_code = exit_code
 
+    result.duration = time.monotonic() - started_mono
     if options.run_lock_key:
         _run_lock.clear_run_lock(options.run_lock_key)
     return result
