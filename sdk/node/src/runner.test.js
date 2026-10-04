@@ -1037,18 +1037,30 @@ describe('time budget and traceability', () => {
     assert.strictEqual(parseDeadline('2025-01-01T12:00:00+00:00'), Date.parse('2025-01-01T12:00:00Z') / 1000);
   });
 
-  test('invalid deadline fails before spawning — no orphan process', async () => {
-    const agent = writeScript('#!/usr/bin/env bash\nsleep 30\n');
+  test('invalid deadline fails before spawning — agent never runs', async () => {
+    // Marker-file probe instead of `pgrep -fl <script path>`: on Linux the
+    // `sh -c` wrapper of the pgrep probe itself carries the script path on its
+    // command line, so -f matches the probe and can never report "no orphan".
+    // The fake agent records its first execution by creating the marker file.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-runner-'));
+    const marker = path.join(dir, 'spawned.marker');
+    const agent = path.join(dir, 'agent.sh');
+    fs.writeFileSync(
+      agent,
+      `#!/usr/bin/env bash\ntouch ${JSON.stringify(marker)}\nsleep 30\n`,
+      { mode: 0o755 },
+    );
     await assert.rejects(
       () => run({ command: agent, deadline: 'not-a-date' }, { message: 'hi' }),
       /profile\.deadline/,
     );
     // The child must never have been spawned. Wait long enough that a spawn
-    // would have happened, then assert nothing is left running this script.
+    // would have happened, then assert the agent process never executed.
     await new Promise((resolve) => setTimeout(resolve, 300));
-    const { execSync } = require('node:child_process');
-    const out = execSync(`pgrep -fl ${JSON.stringify(agent)} || true`).toString().trim();
-    assert.strictEqual(out, '', `orphan process left behind: ${out}`);
+    assert.strictEqual(
+      fs.existsSync(marker), false,
+      `agent was spawned despite the invalid deadline (marker exists: ${marker})`,
+    );
   });
 
   test('budget_secs accepts a numeric string', () => {

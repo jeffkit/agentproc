@@ -62,7 +62,7 @@ The English and Chinese sites should mirror each other. Sidebar config is in `do
 Three version tracks are maintained independently (see `CHANGELOG.md` for details):
 
 - **Wire protocol** — currently `"0.4"` (the string in the `protocol_version` field). Changes only when the bytes on stdin/stdout change.
-- **Spec document revision** — currently `1.3`. Tracks editorial changes to `spec/protocol.md`.
+- **Spec document revision** — currently `1.6`. Tracks editorial changes to `spec/protocol.md`.
 - **SDK package version** — currently `0.10.1`. Both Python and Node packages share the same version.
 
 To cut a release:
