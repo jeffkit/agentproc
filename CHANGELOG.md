@@ -59,6 +59,18 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ### Spec / SDK 0.16.0 — unreleased
 
+**Python SDK: `run_via_executor` streams line-by-line, salvages on timeout, dedupes partial/final (#6)**
+
+- The executor path previously used `communicate()`, buffering stdout to EOF: the first `on_partial` fired only after the whole turn finished (zero visible progress on hour-long agent turns), a timeout discarded ALL output produced so far, and partial text was concatenated onto the final text in `result.reply` (duplicated body).
+- Rewritten to the Node `runViaExecutor` IO model: `Popen` with daemon threads pumping stdout (through a queue) and stderr; each stdout line is parsed and `on_partial` fires in real time. On timeout the process group is killed and already-produced lines are drained (salvaged) before returning `error="executor '...' timed out after Ns"` / `EXIT_TIMEOUT` — forwarded partials, the parsed session_id and the last `final_text` are preserved, so a timed-out turn that had already produced a result keeps it in `result.reply` instead of returning an empty one.
+- Reply assembly now dedupes per spec (`protocol.md`: result.text may be `''` when the body was already delivered via partials): partials are never concatenated onto `final_text`; if partials were forwarded the reply stays `''` (Node `runner.js:700-702` parity); an NDJSON turn that emits nothing and exits 0 is a success (spec `protocol.md:396`). NDJSON error events no longer early-return discarding already-forwarded partials; a first-error-wins message is recorded instead. The stray `[DEBUG plain]` stderr print on the plain path is removed. `sdk/rust/tests/official_hub_profiles.rs` synced in the same pass (`dsh` moved out of the executor expectation list / into the no-executor list), so the Rust suite is green again.
+- Tests: new `sdk/python/tests/test_issue6_executor_parity.py` pins the two reply-assembly cases on the executor path against `spec/conformance/scenarios.json` ("partials forwarded → `reply == ''`", "empty output + exit 0 → success"); the same two cases were added to `sdk/node/src/executors.test.js` (Node already behaved this way — the cases are regression guards, not a behaviour change), and `test_issue6_streaming.py` was tightened for the timeout-salvage reply.
+- **Versions.** Python SDK `0.16.0` (unreleased track; no separate bump needed). Wire protocol stays `0.4`; Node/Rust already behave this way, so no change there.
+
+**Hub: `dsh` profile declaration corrected — run via the bundled bridge, not the plain `dsh` executor (#6)**
+
+- `hub/dsh/profile.yaml` dropped `executor: dsh`. The built-in executor is plain/stateless and made the profile's `command: node {{PROFILE_DIR}}/bridge.js` unreachable (runner case-2 preference), so the bridge's already-implemented `--json` streaming and `--session-id` session resume never ran: every turn cold-started with an empty session_id despite the profile advertising streaming. With the executor line removed the bridge actually runs, restoring session continuity and partial streaming (feature-detected from `dsh --profile headless --help`; older builds degrade to a single final event). `streaming:` comment and notes updated to describe the bridge-mediated behavior.
+
 **Python SDK: runner long-lived-consumer leak fixes (issue #20; internal behaviour, no wire change)**
 
 - Turn-epoch guard in the generic runner (`run`): once the subprocess has exited and the final drain phase begins, lines read by drain threads no longer fire `on_partial` / `on_session` / `on_error` / `on_protocol_line` — late events from a grandchild holding the pipe write-ends can no longer pollute a consumer's next turn.

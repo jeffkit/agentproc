@@ -486,4 +486,52 @@ describe('runViaExecutor — NDJSON executor', () => {
     assert.strictEqual(r1.reply, 'ok-1');
     assert.strictEqual(r2.reply, 'ok-2');
   });
+
+  test('partials forwarded + result.text → reply stays empty (issue #6 parity)', async () => {
+    const cli = tmpScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"chunk","text":"abc"}\'\n' +
+      'echo \'{"type":"result","text":"abcdef"}\'\n',
+    );
+    const partials = [];
+    const executor = {
+      cliName: 'mock-ndjson',
+      installHint: '',
+      plain: false,
+      buildArgs: () => [cli],
+      parseEvent(event) {
+        if (event.type === 'chunk') return { partialText: event.text };
+        if (event.type === 'result') return { finalText: event.text };
+        return null;
+      },
+    };
+    const profile = mockProfile();
+    const r = await runViaExecutor(
+      profile,
+      { message: 'hi', onPartial: (t) => partials.push(t) },
+      executor,
+    );
+    assert.deepStrictEqual(partials, ['abc']);
+    assert.strictEqual(r.reply, '');
+    assert.strictEqual(r.error, '');
+    assert.strictEqual(r.exitCode, 0);
+  });
+
+  test('empty output + exit 0 → success with empty reply (issue #6 parity)', async () => {
+    const cli = tmpScript('#!/usr/bin/env bash\n');
+    const executor = {
+      cliName: 'mock-ndjson',
+      installHint: '',
+      plain: false,
+      buildArgs: () => [cli],
+      parseEvent() {
+        return null;
+      },
+    };
+    const profile = mockProfile();
+    const r = await runViaExecutor(profile, { message: 'hi' }, executor);
+    assert.strictEqual(r.reply, '');
+    assert.strictEqual(r.error, '');
+    assert.strictEqual(r.exitCode, 0);
+  });
 });

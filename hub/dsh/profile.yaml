@@ -12,13 +12,17 @@ cli_install: |
 agentproc:
   command: node
   args: ["{{PROFILE_DIR}}/bridge.js"]
-  executor: dsh
+  # Runs via the bundled bridge.js/bridge.py (not the built-in `dsh`
+  # executor, which is plain/stateless). The bridge feature-detects
+  # `--json` / `--session-id` from `dsh --profile headless --help`.
   # cwd is intentionally left unset. `agentproc hub run` defaults it to your
   # current directory, so the agent works on whatever project you are in.
   timeout_secs: 1800        # headless runs a full agent turn (tools, bash);
                             # give it room — override per-run if needed
-  streaming: true           # --json text frames forward as partial events
-                            # (commit-point granularity, not per-token)
+  streaming: true           # bridge streams --json text frames as partial
+                            # events when the dsh build supports --json
+                            # (commit-point granularity, not per-token);
+                            # older builds fall back to a single final event
   env:
     DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY}"
     # Unattended posture is bridge-enforced: the bridge defaults
@@ -32,7 +36,8 @@ tested: community
 maintainer: kong
 tags: [coding, ai, deepseek, agent, harness]
 notes: |
-  Runs `dsh --profile headless --json "<task>"` (the DeepSeek Harness one-shot
+  Runs via the bundled bridge (bridge.js on Node, bridge.py on Python), which
+  invokes `dsh --profile headless --json "<task>"` (the DeepSeek Harness one-shot
   bundle: coding persona, bash/fs/search tools, sandbox, persisted session
   log). Verified end-to-end against dsh 0.1.7-rc.2.
 
@@ -40,8 +45,9 @@ notes: |
   `--json` (>= 0.1.6-alpha.1) stream partials from committed text frames and
   report usage; builds also advertising `--session-id` (>= 0.1.6-alpha.1)
   stamp session_id from the opening frame and resume the persisted Session on
-  later turns (true multi-turn for IM/email bridges). Older builds fall back
-  to plain one-shot text and stay stateless on the wire.
+  later turns (true multi-turn for IM/email bridges; session resume requires
+  the `--session-id` capability and a stable bridge cwd). Older builds fall
+  back to plain one-shot text and stay stateless on the wire.
 
   Session adoption is strict upstream: the Session must exist, run in the
   same cwd, and not belong to a subagent/fork or an agent preset — mismatches

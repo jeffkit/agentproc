@@ -21,6 +21,9 @@ fn hub_dir() -> PathBuf {
 fn every_hub_executor_profile_resolves_to_known_rust_executor() {
     let hub = hub_dir();
     // Profiles expected to declare a known executor (mirror executors.js registry).
+    // `dsh` deliberately does NOT declare one: it ships a bundled bridge and
+    // stays on the spawn path, like `echo-agent` and `recursive` (see
+    // `profiles_that_stay_on_the_spawn_path_have_no_executor`).
     let expected = [
         "codex",
         "claude-code",
@@ -33,7 +36,6 @@ fn every_hub_executor_profile_resolves_to_known_rust_executor() {
         "agy",
         "aider",
         "deepseek",
-        "dsh",
         "pi",
     ];
 
@@ -51,15 +53,15 @@ fn every_hub_executor_profile_resolves_to_known_rust_executor() {
 }
 
 #[test]
-fn echo_agent_and_recursive_have_no_executor() {
-    // These two intentionally stay on the spawn path (no in-process executor).
+fn profiles_that_stay_on_the_spawn_path_have_no_executor() {
+    // These intentionally stay on the spawn path (no in-process executor).
     let hub = hub_dir();
-    for name in ["echo-agent", "recursive"] {
+    for name in ["echo-agent", "recursive", "dsh"] {
         let path = hub.join(name).join("profile.yaml");
         let profile = Profile::from_path(&path).expect("parse");
         assert!(
             profile.executor.is_none(),
-            "`{name}` should not declare executor (it has a bespoke run loop)"
+            "`{name}` should not declare executor (it runs via its bundled bridge)"
         );
     }
 }
