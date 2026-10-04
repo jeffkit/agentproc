@@ -35,6 +35,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -165,6 +166,15 @@ def run_bridge(
         emit_error(f"{cli_name} CLI not found. {cli_install_hint}")
         return 1
 
+    # Drain stderr on a daemon thread so a >pipe-buffer stderr flood can't
+    # block the child before it finishes writing stdout (issue #14).
+    stderr_buf: list[str] = []
+
+    def _drain_stderr() -> None:
+        stderr_buf.append(proc.stderr.read() or "")
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+
     found_session_id: Optional[str] = None
     last_final_text: Optional[str] = None
     last_partial_text: Optional[str] = None
@@ -202,7 +212,7 @@ def run_bridge(
             last_final_text = result.final_text
 
     proc.wait()
-    stderr_output = proc.stderr.read() if proc.stderr else ""
+    stderr_output = stderr_buf[0] if stderr_buf else ""
 
     if error_message:
         # Persist the session on the error event — the error terminates this

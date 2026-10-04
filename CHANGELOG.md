@@ -10,6 +10,11 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ### Spec / SDK 0.16.0 — unreleased
 
+**Hub: fix stderr pipe-buffer deadlock in shared bridge runners (#14)**
+
+- `hub/_shared/stream_utils.py` (`run_bridge`) and `hub/claude-code/bridge.py` (`run_permission_mode`) previously read stderr only after `proc.wait()`, so a CLI writing more than the OS pipe buffer (~64KB) to stderr before finishing stdout stalled until an external timeout. Both now drain stderr on a daemon thread while reading stdout (same pattern as `hub/dsh/bridge.py`'s `run_json`). The 500-char stderr summary on error paths is unchanged. Non-protocol change — no version bump.
+- Tests: `hub/_shared/test_stderr_drain.py` (Python: >64KB stderr flood with a result event; exit≠0 flood keeps the stderr summary, both time-bounded) and `hub/_shared/stream_utils.test.js` (Node mirror — Node never had the bug; the test locks the behavior for parity). `run_plain_cli` bridges (aider/pi/deepseek/agy) use `subprocess.run`/`communicate` and are unaffected.
+
 **Python SDK: workspace run lock — kill-before-start orphan cleanup (`run_lock`)**
 
 - New `agentproc/run_lock.py` + opt-in `RunOptions.run_lock_key`: after a successful spawn the runner records `{pid, command, started_at}` into `~/.agentproc/run-locks/<sha256(workspace)>.json` (a plain tombstone file, deliberately not flock — kernel locks die with the killed holder and say nothing about surviving orphans) and clears it on normal completion. Wired into both spawn points (in-process executor and the generic subprocess runner). Early-exit paths intentionally skip clearing: any early return implies the child is already dead, so a leaked lock self-heals — the next probe sees a dead pid and treats it as stale; the rare leak with a live pid is by definition a true orphan, which is exactly what cleanup should kill.
