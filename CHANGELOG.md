@@ -3,10 +3,24 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.1`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.16.0` (unreleased); the Rust crate is on its own track currently `0.12.0`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.3`. Does not change the wire contract (except when paired with a wire bump).
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.12.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
+
+### Spec / SDK 0.17.0 — unreleased
+
+**Hub client: `AGENTPROC_HUB_REF` — pin hub fetches to an exact upstream ref (#15)**
+
+- Both SDK hub clients (`sdk/python/src/agentproc/hub.py`, `sdk/node/src/hub.js`) read `AGENTPROC_HUB_REF` (tag / branch / commit sha; default `main`) and use it for every fetch URL — profile files, `_shared/` helpers, and the jsDelivr repo-tree listing. Cache metadata (`.cache-meta.json`, `tree.json`) records the ref actually used; a cache entry written for a different ref is a miss (legacy meta without `ref` counts as `main`), so a pinned run never silently serves a `main` copy.
+- Spec: new "Pinning the hub ref" subsection under the `${VAR}` trust-boundary discussion (`spec/protocol.md` + `spec/protocol.zh.md`, doc revision 1.3) framing the variable as a fetch-and-exec reproducibility knob, not a sandbox; CLI docs updated in both languages.
+- Tests: `sdk/python/tests/test_hub.py::TestHubRefOverride` and matching `hub.test.js` describe block cover URL construction, meta recording, cross-ref cache invalidation, and the default. WIP repro tests (`test_wip_issue15_hub_ref.py`, `wip-issue15-hub-ref.test.js`) merged in and deleted.
+
+**Hub: codex permission mode no longer leaks a temp copy of `~/.codex/auth.json` (#15)**
+
+- `hub/codex/bridge.py` / `bridge.js`: permission mode's one-shot `CODEX_HOME` (which copies `auth.json` for authentication) now uses an owner-identifiable temp dir (`agentproc-codex-<pid>-…`), sweeps stale leftover dirs at startup (deleting only dirs whose owner pid is dead **and** that are older than 1h — double protection for concurrent instances; the startup sweep is the only mechanism covering a SIGKILLed bridge), and registers atexit/SIGTERM/SIGINT handlers as a backstop. Normal-path cleanup is unchanged.
+- `hub/codex/README.md` documents the permission-mode trust boundary and the temp-home lifecycle.
+- Tests: new `sdk/python/tests/test_codex_perm_cleanup.py` drives both bridges as subprocesses (fake codex CLI on PATH, fake `~/.codex/auth.json`) asserting no residue after normal exit, startup sweep of a pre-planted stale dir, and SIGTERM cleanup — observable parity across the two bridges.
 
 ### Spec / SDK 0.16.0 — unreleased
 

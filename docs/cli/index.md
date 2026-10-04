@@ -70,6 +70,8 @@ If you'd rather skip the network entirely, use `agentproc --profile ./hub/<name>
 
 Add `--refresh` to any hub command to force re-fetch from GitHub.
 
+Set the `AGENTPROC_HUB_REF` environment variable to pin fetches to a specific tag, branch, or commit sha (default `main`). The profile cache is keyed by ref — switching the variable re-fetches rather than serving a cached copy from another ref.
+
 ## Usage
 
 ```

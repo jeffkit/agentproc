@@ -39,6 +39,8 @@ The CLI sends `Authorization: Bearer <token>` when `GITHUB_TOKEN` (or `GH_TOKEN`
 
 Add `--refresh` to force re-fetch from GitHub.
 
+Set the `AGENTPROC_HUB_REF` environment variable to pin fetches to a specific tag, branch, or commit sha (default `main`). The profile cache is keyed by ref — switching the variable re-fetches rather than serving a cached copy from another ref.
+
 ## Available profiles
 
 | Profile | CLI | Tested | Languages |
@@ -144,6 +146,7 @@ agentproc --profile ./claude-code/profile.yaml -p "hi" --cwd ./claude-code
 - Cache location: `~/.agentproc/cache/hub/<name>/`
 - TTL: 24 hours (after fetch, cached copy used without network)
 - Force refresh: pass `--refresh` to any hub command
+- Cache entries record the hub ref they were fetched for (`AGENTPROC_HUB_REF`, default `main`); entries from a different ref are treated as a miss
 - Each profile is a flat directory containing `profile.yaml`, `bridge.py`, `bridge.js`, and `README.md`
 
 The CLI uses GitHub's git-tree API (1 request lists everything) and raw.githubusercontent.com (no rate limit) so the experience stays fast even for unauthenticated users.

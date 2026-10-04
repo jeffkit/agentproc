@@ -15,14 +15,17 @@ Permission mode (turn.permission is true / profile permission: true):
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -115,8 +118,101 @@ def _real_codex_home() -> Path:
     return Path.home() / ".codex"
 
 
+_PERM_TMP_PREFIX = "agentproc-codex-"
+# A leftover dir older than this is assumed abandoned (owner killed with
+# SIGKILL, so no handler could clean it) and swept at startup.
+_STALE_PERM_AGE_SECS = 3600
+
+
+def _is_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _dir_age_secs(p: Path) -> float:
+    try:
+        return max(0.0, time.time() - p.stat().st_mtime)
+    except OSError:
+        return float("inf")
+
+
+def _sweep_stale_permission_homes() -> None:
+    """rmtree leftover agentproc-codex-* temp CODEX_HOME dirs.
+
+    Permission-mode copies ~/.codex/auth.json into a temp dir; if the bridge
+    is SIGKILLed no cleanup handler runs and the credential copy lingers.
+    Startup sweeping is the only way to cover that path. Dirs owned by a
+    live process (pid encoded in the name) or younger than
+    _STALE_PERM_AGE_SECS are left alone — double protection against deleting
+    a concurrent instance's home.
+    """
+    root = Path(tempfile.gettempdir())
+    try:
+        entries = list(root.glob(_PERM_TMP_PREFIX + "*"))
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name[len(_PERM_TMP_PREFIX):]
+        pid_str = name.split("-", 1)[0]
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            pid = -1
+        if pid > 0 and _is_pid_alive(pid):
+            continue
+        if _dir_age_secs(entry) < _STALE_PERM_AGE_SECS:
+            continue
+        shutil.rmtree(entry, ignore_errors=True)
+
+
+# Paths of permission homes created by this process, cleaned on exit and on
+# SIGTERM/SIGINT (best effort — SIGKILL is covered by the startup sweep).
+_pending_permission_homes: set[str] = set()
+_cleanup_handlers_registered = False
+_cleanup_lock = threading.Lock()
+
+
+def _register_permission_cleanup_handlers() -> None:
+    global _cleanup_handlers_registered
+    with _cleanup_lock:
+        if _cleanup_handlers_registered:
+            return
+        _cleanup_handlers_registered = True
+    atexit.register(_cleanup_pending_permission_homes)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            prev = signal.getsignal(sig)
+
+            def handler(signum, frame, _prev=prev):  # noqa: ANN001
+                _cleanup_pending_permission_homes()
+                if callable(_prev):
+                    _prev(signum, frame)
+                else:
+                    signal.signal(signum, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+            signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass  # non-main thread or unsupported platform
+
+
+def _cleanup_pending_permission_homes() -> None:
+    with _cleanup_lock:
+        pending = list(_pending_permission_homes)
+        _pending_permission_homes.clear()
+    for p in pending:
+        shutil.rmtree(p, ignore_errors=True)
+
+
 def _prepare_permission_home() -> tuple[str, str]:
-    tmp = tempfile.mkdtemp(prefix="agentproc-codex-")
+    _sweep_stale_permission_homes()
+    _register_permission_cleanup_handlers()
+    tmp = tempfile.mkdtemp(prefix=f"{_PERM_TMP_PREFIX}{os.getpid()}-")
+    with _cleanup_lock:
+        _pending_permission_homes.add(tmp)
     sock_path = os.path.join(tmp, "perm.sock")
     hooks_path = os.path.join(tmp, "hooks.json")
     with open(hooks_path, "w", encoding="utf-8") as fh:
@@ -130,6 +226,12 @@ def _prepare_permission_home() -> tuple[str, str]:
             except OSError:
                 pass
     return tmp, sock_path
+
+
+def _release_permission_home(tmp: str) -> None:
+    shutil.rmtree(tmp, ignore_errors=True)
+    with _cleanup_lock:
+        _pending_permission_homes.discard(tmp)
 
 
 def _run_permission_mode(turn: dict, env) -> int:
@@ -262,7 +364,7 @@ def _run_permission_mode(turn: dict, env) -> int:
         )
     except FileNotFoundError:
         stop_server.set()
-        shutil.rmtree(tmp, ignore_errors=True)
+        _release_permission_home(tmp)
         emit_error(f"{CLI_NAME} CLI not found. {INSTALL_HINT}")
         return 1
 
@@ -317,7 +419,7 @@ def _run_permission_mode(turn: dict, env) -> int:
             "message": "no permission response (process ending)",
         }
         box["event"].set()
-    shutil.rmtree(tmp, ignore_errors=True)
+    _release_permission_home(tmp)
 
     if error_message:
         emit_error(error_message, session_id=found_session_id)

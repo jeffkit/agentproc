@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.2`
+**文档修订：** `1.3`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -111,6 +111,10 @@ profile `env` 块中的值可用 `${VAR}` 语法引用 bridge 自身的环境变
 > **不要运行来自不受信任来源的 profile。** `agentproc hub run <name>` 会从 GitHub 仓库拉取 profile 并运行。如果你不信任该仓库维护者通过 `${VAR}` 引用*读取*你的 shell 环境，就不要运行他们的 profile。`env_allowlist`（见下）缩小了 `${VAR}` 可展开的范围。信任决策仍由运行 profile 的用户承担。
 
 bridge 按 POSIX shell 语义展开 `${VAR}`：未知变量展开为空字符串，而非字面量 `${VAR}`。
+
+#### 固定 hub ref —— `AGENTPROC_HUB_REF`
+
+hub 拉取默认读取仓库的 `main` 分支。将 bridge 侧环境变量 `AGENTPROC_HUB_REF` 设为 tag、分支或 commit sha，可把所有 hub 拉取（profile 文件、`_shared/` 辅助脚本、仓库树列表）固定到该 ref。这是一个**「拉取即执行」的信任旋钮，不是沙箱**：固定 ref 让拉取的字节可复现，但拉取到的 profile 仍以你已授予它的信任被执行——默认（`main`）意味着「信任仓库维护者最近合并的内容」。profile 缓存按 ref 失效：改变该变量会使此前的缓存条目失效，因此固定 ref 的运行不会悄悄用上 `main` 的副本（反之亦然）。
 
 ### `env_allowlist` —— 收窄 `${VAR}` 展开
 
@@ -789,6 +793,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
+- **doc 1.3** —— 文档化 bridge 侧环境变量 `AGENTPROC_HUB_REF`：将 hub profile 拉取（及 `_shared/`、仓库树列表）固定到 tag/分支/commit；profile 缓存按 ref 失效，切换该变量会使旧缓存失效。编辑性更新——wire 不变（`0.4`）；SDK 包版本 bump 以发布支持 ref 固定的 hub 客户端。
 - **wire 0.4 / doc 1.1** —— 破坏性 stdout 形态变更。移除 `{"type":"session"}` 与 `{"type":"text"}`。会话连续性改为 stdout 事件上的可选 `session_id` 字段：bridge 持久化第一个非空值；agent 一旦已知 **SHOULD** 附着；早期省略允许；之后冲突值属违规（保留第一个）。永不铸造工具无法用来恢复的 id；输出上永不使用 `""`。最终成功正文为单条 `{"type":"result","text":...}`（可选 `usage`）。流式正文拼装：已转发的 `partial` 优先于重复的 `result.text`。相对 0.3 硬切换（见[从 0.3 迁移](#从-03-迁移)）。0.3 的「最后会话事件生效」理由废止。
 - **wire 0.3 / doc 1.0** —— 双向 NDJSON。输入：stdin 上单个 [turn 对象](#输入--stdin-turn-对象)取代所有 `AGENT_*` 环境变量；密钥/配置留在 env；argv 占位符不变。输出：stdout 现为按 `type` 字段区分的 NDJSON 事件（`partial` / `text` / `session` / `error` / `permission_request`），取代 `AGENT_*:` 哨兵前缀。`partial` 新增可选 `role`（`output` | `thinking`）。附件收并为 turn 对象中单个 `attachments` 数组（每个元素 `{kind, url, ...}`），取代 0.2 的 `AGENT_IMAGE_URL` / `AGENT_FILE_URL` 单附件便利变量——不再有单/多双重表示。会话 ID 线上改为任意 JSON 字符串（字符集限制移至存储级关注）。Profile 变更：`command` 始终是 argv[0] 且永不拆分（移除 `args` 缺省时按空格拆分的简写；`args` 默认 `[]`）；移除 `stdin` 字段（stdin 始终携带 turn）；`streaming` 变为 bridge 侧提示而非线上字段；移除 `env_inherit`（子进程基础 env 始终是 infra 集）。格式错误的 stdout 行被记日志并忽略，而非作为回复正文。事件词汇表声明为封闭，以抵御向 ACP 式更丰富事件的漂移。这是从 0.2 的硬切换；runner 不支持两者并存。
 - **wire 0.2 / doc 0.9** —— 安全默认的子进程环境继承。新增 profile 字段 `env_inherit: minimal|all`（默认 `minimal`）。继承与 `env_allowlist` 解耦：allowlist 仅 gate `${VAR}` 展开；完整 `process.env` / `os.environ` 继承需显式 `env_inherit: all`。SDK 包 bump 至 0.6.1；线协议保持 `0.2`。

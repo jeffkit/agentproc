@@ -70,6 +70,8 @@ export GITHUB_TOKEN=$(gh auth token)   # 或任意 personal access token
 
 任何 hub 命令都可以加 `--refresh` 强制从 GitHub 重新拉取。
 
+设置环境变量 `AGENTPROC_HUB_REF` 可将拉取固定到某个 tag、分支或 commit sha（默认 `main`）。profile 缓存按 ref 区分——切换该变量会重新拉取，而不会误用其他 ref 的缓存副本。
+
 ## 用法
 
 ```

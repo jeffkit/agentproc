@@ -122,6 +122,18 @@ Then the bridge:
 
 `agentproc` on a TTY prompts `Allow? [y/N]` for each request; without a TTY it denies. See [PERMISSIONS.md](../PERMISSIONS.md).
 
+### Trust boundary & temp-home lifecycle
+
+Permission mode is inherently a **fetch-and-exec escalation**: it passes `--dangerously-bypass-hook-trust` (Codex refuses to run unsigned hooks otherwise) and installs the bundled `permission_hook.py`. The temp `CODEX_HOME` **copies `~/.codex/auth.json`** into it so the one-shot home still authenticates — that copy lives in the system temp directory for the duration of the turn.
+
+The bridge bounds that exposure:
+
+- The temp dir is named `agentproc-codex-<pid>-…` so its owner is identifiable.
+- Normal exit and error paths `rmtree` it; `atexit` + `SIGTERM`/`SIGINT` handlers are a backstop.
+- At startup the bridge sweeps leftover `agentproc-codex-*` dirs whose owner pid is dead **and** that are older than 1 hour — the only mechanism that covers a previous bridge killed with SIGKILL. Dirs owned by a live process or younger than 1h are never touched, so concurrent instances are safe.
+
+Net effect: the credential copy's lifetime is one turn, plus at most ~1h if the bridge is hard-killed. The copy has the same permissions `mkdtemp` grants (0700).
+
 ## Caveats
 
 - `codex exec --json` writes its progress lines to stderr by default (visible in bridge logs if you run with `--verbose`). Whether to surface stderr to end-users is a bridge deployment decision; the runner always captures it and makes it available via the `onStderr` callback.

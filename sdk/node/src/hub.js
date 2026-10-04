@@ -41,15 +41,22 @@ const path = require('node:path');
 const os = require('node:os');
 
 const HUB_REPO = 'jeffkit/agentproc';
-const HUB_REF = 'main';
+
+/** Git ref to fetch hub profiles from. Overridable via the
+ *  AGENTPROC_HUB_REF env var (tag, branch or commit sha) so a bridge can pin
+ *  an exact upstream version. The cache invalidates per ref. */
+function hubRef() {
+  return (process.env.AGENTPROC_HUB_REF || '').trim() || 'main';
+}
+const HUB_REF = 'main';  // default, kept for backwards compatibility
 const HUB_CACHE_TTL_SECS = 24 * 60 * 60;  // 24 hours
 
 // jsDelivr mirrors the GitHub repo on a global CDN (Fastly), reachable where
 // raw.githubusercontent.com / api.github.com are not. No token, no 60/hr limit.
 const JSDELIVR_RAW = (p) =>
-  `https://cdn.jsdelivr.net/gh/${HUB_REPO}@${HUB_REF}/${p}`;
-const JSDELIVR_DATA =
-  `https://data.jsdelivr.com/v1/packages/gh/${HUB_REPO}@${HUB_REF}`;
+  `https://cdn.jsdelivr.net/gh/${HUB_REPO}@${hubRef()}/${p}`;
+const JSDELIVR_DATA = () =>
+  `https://data.jsdelivr.com/v1/packages/gh/${HUB_REPO}@${hubRef()}`;
 
 // The hub directory shipped inside this npm package. Defaults to <pkg>/hub/
 // (this file is at <pkg>/src/hub.js). Overridable via setBundledHubDir() for
@@ -98,6 +105,8 @@ function cacheAgeSecs(name) {
   if (!fs.existsSync(marker)) return null;
   try {
     const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+    const cachedRef = meta.ref || 'main';
+    if (cachedRef !== hubRef()) return null;  // fetched for a different ref — miss
     const ts = meta.fetched_at || 0;
     return Math.max(0, Date.now() / 1000 - ts);
   } catch {
@@ -110,7 +119,7 @@ function writeCacheMeta(name) {
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, '.cache-meta.json'),
-    JSON.stringify({ fetched_at: Date.now() / 1000, ref: HUB_REF }),
+    JSON.stringify({ fetched_at: Date.now() / 1000, ref: hubRef() }),
     'utf8'
   );
 }
@@ -247,7 +256,8 @@ async function getTree() {
     try {
       const meta = JSON.parse(fs.readFileSync(tp, 'utf8'));
       const age = Math.max(0, Date.now() / 1000 - (meta.fetched_at || 0));
-      if (age < HUB_CACHE_TTL_SECS && Array.isArray(meta.tree)) {
+      if (age < HUB_CACHE_TTL_SECS && Array.isArray(meta.tree) &&
+          (meta.ref || 'main') === hubRef()) {
         _treeCache = meta.tree.map((e) => ({
           path: String((e && e.path) || ''),
           type: String((e && e.type) || ''),
@@ -257,7 +267,7 @@ async function getTree() {
     } catch { /* corrupt cache file — refetch */ }
   }
 
-  const data = await httpGetJson(JSDELIVR_DATA);
+  const data = await httpGetJson(JSDELIVR_DATA());
   if (!data || !Array.isArray(data.files)) {
     throw new Error('unexpected jsDelivr data API response');
   }
@@ -267,7 +277,7 @@ async function getTree() {
   try {
     fs.writeFileSync(tp, JSON.stringify({
       fetched_at: Date.now() / 1000,
-      ref: HUB_REF,
+      ref: hubRef(),
       tree: _treeCache,
     }), 'utf8');
   } catch { /* disk cache is best-effort */ }

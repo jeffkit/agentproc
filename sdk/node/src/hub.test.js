@@ -526,4 +526,80 @@ describe('hub', { concurrency: false }, () => {
     assert.strictEqual(hub.HUB_REPO, 'jeffkit/agentproc');
     assert.strictEqual(hub.HUB_REF, 'main');
   });
+
+  describe('AGENTPROC_HUB_REF override', () => {
+    beforeEach(setupHome);
+    afterEach(() => {
+      delete process.env.AGENTPROC_HUB_REF;
+      teardownHome();
+    });
+
+    test('env ref is used in fetch URLs', async () => {
+      process.env.AGENTPROC_HUB_REF = 'v9.9.9';
+      const seen = [];
+      const counter = installFakeFetch();
+      const innerFetch = global.fetch;
+      global.fetch = async (url, opts) => {
+        seen.push(String(url));
+        return innerFetch(url, opts);
+      };
+      try {
+        await hub.fetchProfile('echo-agent', { refresh: true });
+      } finally {
+        counter.restore();
+      }
+      assert.ok(seen.length > 0, 'expected fetches');
+      for (const u of seen) assert.match(u, /@v9\.9\.9\//, `ref not applied: ${u}`);
+    });
+
+    test('cache meta records the ref actually used', async () => {
+      process.env.AGENTPROC_HUB_REF = 'deadbeef';
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('echo-agent', { refresh: true });
+      } finally { counter.restore(); }
+      const meta = JSON.parse(fs.readFileSync(
+        path.join(hub.cacheDir('echo-agent'), '.cache-meta.json'), 'utf8'));
+      assert.strictEqual(meta.ref, 'deadbeef');
+    });
+
+    test('default ref is main without env', async () => {
+      delete process.env.AGENTPROC_HUB_REF;
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('echo-agent', { refresh: true });
+      } finally { counter.restore(); }
+      const meta = JSON.parse(fs.readFileSync(
+        path.join(hub.cacheDir('echo-agent'), '.cache-meta.json'), 'utf8'));
+      assert.strictEqual(meta.ref, 'main');
+    });
+
+    test('different ref does not reuse cache', async () => {
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('echo-agent');
+        const n = counter.text;
+        await hub.fetchProfile('echo-agent');  // same ref → cache hit
+        assert.strictEqual(counter.text, n);
+        process.env.AGENTPROC_HUB_REF = 'v1.2.3';
+        await hub.fetchProfile('echo-agent');  // different ref → miss
+        assert.ok(counter.text > n, `expected refetch: ${counter.text} vs ${n}`);
+        const meta = JSON.parse(fs.readFileSync(
+          path.join(hub.cacheDir('echo-agent'), '.cache-meta.json'), 'utf8'));
+        assert.strictEqual(meta.ref, 'v1.2.3');
+      } finally { counter.restore(); }
+    });
+
+    test('legacy meta without ref counts as main', async () => {
+      const counter = installFakeFetch();
+      try {
+        await hub.fetchProfile('echo-agent');
+      } finally { counter.restore(); }
+      const marker = path.join(hub.cacheDir('echo-agent'), '.cache-meta.json');
+      const meta = JSON.parse(fs.readFileSync(marker, 'utf8'));
+      delete meta.ref;
+      fs.writeFileSync(marker, JSON.stringify(meta));
+      assert.notStrictEqual(hub.cacheAgeSecs('echo-agent'), null);
+    });
+  });
 });
