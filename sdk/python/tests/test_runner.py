@@ -990,7 +990,7 @@ class TestExecutorPathProfileFields:
 
 
 # ---------------------------------------------------------------------------
-# Time budget / deadline / event traceability (spec doc 1.3)
+# Time budget / deadline / event traceability (spec doc 1.6)
 # ---------------------------------------------------------------------------
 
 class TestTimeBudgetAndTraceability:

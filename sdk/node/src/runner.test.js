@@ -990,7 +990,7 @@ describe('executor: field routing', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Time budget / deadline / event traceability (spec doc 1.3)
+// Time budget / deadline / event traceability (spec doc 1.6)
 // ---------------------------------------------------------------------------
 
 describe('time budget and traceability', () => {
