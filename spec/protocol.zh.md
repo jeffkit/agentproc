@@ -240,7 +240,7 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 2. 若 `makeHandlers` 存在则通过它解析 handlers，否则直接使用 `buildArgs` / `parseEvent`。
 3. 调用一次 `buildArgs(message, sessionId, env)`。返回空是硬错误。
 4. 直接 spawn 目标 CLI 的 argv（无 bridge 子进程、无 shell）。
-5. 以与 spawn 路径相同的语义应用 `timeout_secs` / `kill_grace_secs` / `streaming` / `permission`（bridge 侧的 `--timeout` / `--streaming` / `--cwd` 选项给出时覆盖 profile 字段），并按 spawn 路径相同的方式解析 `cwd`（相对路径按 profile 自身目录解析）。
+5. 以与 spawn 路径相同的语义应用 `timeout_secs` / `kill_grace_secs` / `streaming` / `permission`（bridge 侧的 `--timeout` / `--no-stream` / `--cwd` 选项给出时覆盖 profile 字段），并按 spawn 路径相同的方式解析 `cwd`（相对路径按 profile 自身目录解析）。
 6. 对 `plain: false`：逐行解码 stdout，每行调用 `parseEvent`，把 `partialText` 作为 `{"type":"partial"}` 转发，累加 `finalText`，持久化第一个非空 `sessionId`，遇到 `error` 时发 `{"type":"error"}` 并抑制后续 `partial`。
 7. 对 `plain: true`：把 stdout 当作正文，应用截断，在 turn 结束时发单个 `{"type":"result"}`。
 8. 在 turn 结束时发终态 `{"type":"result"}`（或 `{"type":"error"}`），携带第一个非空 `sessionId` 和见过的任何 `usage`。

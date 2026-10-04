@@ -642,7 +642,6 @@ def run_via_executor(
         options.timeout_secs if options.timeout_secs is not None else profile["timeout_secs"]
     )
     kill_grace_secs = profile["kill_grace_secs"]
-    permission = profile["permission"]
     cwd = options.cwd or profile["cwd"]
     if cwd and not Path(cwd).is_absolute() and options.profile_dir:
         cwd = str(Path(options.profile_dir) / cwd)
@@ -719,7 +718,6 @@ def run_via_executor(
         _run_lock.write_run_lock(options.run_lock_key, proc.pid, argv)
 
     timed_out_plain = False
-    timed_out_grace = False
     try:
         stdout, stderr = proc.communicate(input=(options.message or ""), timeout=timeout_secs)
     except subprocess.TimeoutExpired:
@@ -731,7 +729,6 @@ def run_via_executor(
         try:
             proc.communicate(timeout=kill_grace_secs)
         except subprocess.TimeoutExpired:
-            timed_out_grace = True
             _kill_process_group(proc, on_warning=options.on_stderr)
         try:
             stdout, stderr = proc.communicate(timeout=2)
