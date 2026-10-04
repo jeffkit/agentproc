@@ -10,8 +10,8 @@
 //!   executor's `build_args` spawns the target CLI directly, its
 //!   `parse_event` translates the CLI's raw output.
 //!
-//! Both apply `timeout_secs` / `kill_grace_secs` / `max_reply_chars` /
-//! `truncation_suffix` / `streaming` / `permission` identically.
+//! Both apply `timeout_secs` / `kill_grace_secs` / `streaming` /
+//! `permission` identically.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -260,6 +260,8 @@ async fn run_via_spawn(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let cli = command.clone();
     let mut child = cmd.spawn().map_err(|e| RunnerError::Spawn { cli, source: e })?;
@@ -274,11 +276,15 @@ async fn run_via_spawn(
         profile.permission,
     );
     let turn_line = turn.to_ndjson().map_err(RunnerError::Json)?;
+    // Keep stdin alive in permission mode: it must stay open after the turn
+    // line so permission responses can be written later (and is closed
+    // otherwise, signalling end-of-input).
+    let mut keep_stdin = None;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(turn_line.as_bytes()).await;
         let _ = stdin.write_all(b"\n").await;
-        if !profile.permission {
-            drop(stdin);
+        if profile.permission {
+            keep_stdin = Some(stdin);
         }
     }
 
@@ -288,23 +294,40 @@ async fn run_via_spawn(
     let stderr_task = tokio::spawn(drain_capped(stderr, opts.on_stderr.clone(), 1_000_000));
 
     let (partial_tx, partial_rx) = watch::channel(None::<String>);
-    let result = process_stdout(
+    // Read stdout and enforce the wall-clock timeout concurrently: an agent
+    // that stalls without exiting must still hit the timeout (and the
+    // two-step SIGTERM/SIGKILL kill inside wait_with_timeout).
+    let mut stdout_fut = Box::pin(process_stdout(
         BufReader::new(stdout),
         process_opts(&opts, &cfg),
         partial_tx.clone(),
-        child.stdin.take(),
-    )
-    .await;
+        keep_stdin.take(),
+    ));
+    let mut wait_fut = Box::pin(wait_with_timeout(
+        child,
+        cfg.timeout_secs,
+        profile.kill_grace_secs,
+    ));
 
-    // Stop streaming once turn is done.
+    let (result, status, stderr_output) = tokio::select! {
+        r = &mut stdout_fut => {
+            let status = wait_fut.await;
+            let stderr_output = stderr_task.await.unwrap_or_default();
+            (r, status, Ok::<_, tokio::task::JoinError>(stderr_output))
+        }
+        s = &mut wait_fut => {
+            // Timeout fired while stdout was still open: wait_with_timeout
+            // already killed the child; now drain whatever stdout produced
+            // before the pipe closed.
+            let result = stdout_fut.await;
+            let stderr_output = stderr_task.await.unwrap_or_default();
+            #[allow(clippy::let_and_return)]
+            (result, s, Ok(stderr_output))
+        }
+    };
     let _ = partial_tx.send(None);
 
-    let (status, stderr_output) = tokio::join!(
-        wait_with_timeout(child, cfg.timeout_secs),
-        stderr_task,
-    );
     let stderr_output = stderr_output.unwrap_or_default();
-
     let mut result = result?;
     let exit_code = match status {
         Ok(s) => s.code().unwrap_or(0),
@@ -333,22 +356,31 @@ async fn run_via_spawn(
 /// Holds the runtime callbacks in an Arc for cheap cloning into tasks.
 struct ProcessOpts {
     streaming: bool,
-    #[allow(dead_code)]
-    max_reply_chars: usize,
-    #[allow(dead_code)]
-    truncation_suffix: String,
     on_partial: Option<Arc<dyn Fn(String, Option<String>) + Send + Sync>>,
     on_session: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_permission:
+        Option<Arc<dyn Fn(crate::PermissionRequest) -> crate::PermissionFuture + Send + Sync>>,
 }
 
 fn process_opts(opts: &RunOptions, cfg: &ResolvedConfig) -> ProcessOpts {
     ProcessOpts {
         streaming: cfg.streaming,
-        max_reply_chars: 0,
-        truncation_suffix: String::new(),
         on_partial: opts.on_partial.clone(),
         on_session: opts.on_session.clone(),
+        on_permission: opts.on_permission.clone(),
     }
+}
+
+/// True when a session id is safe to embed in a file name inside the
+/// sessions directory: no separators, no control characters, and no
+/// dot-only segments. Mirrors the Python SDK's `_validate_session_id`.
+pub(crate) fn is_valid_session_id(sid: &str) -> bool {
+    !sid.is_empty()
+        && sid != "."
+        && sid != ".."
+        && !sid
+            .chars()
+            .any(|c| c == '/' || c == '\\' || (c as u32) < 0x20)
 }
 
 /// Read NDJSON lines from the agent's stdout, classify them, invoke callbacks,
@@ -357,7 +389,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
     mut reader: R,
     po: ProcessOpts,
     _partial_tx: watch::Sender<Option<String>>,
-    _stdin: Option<tokio::process::ChildStdin>,
+    mut stdin: Option<tokio::process::ChildStdin>,
 ) -> Result<RunResult, RunnerError> {
     let mut result = RunResult::default();
     let mut saw_error = false;
@@ -414,13 +446,43 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
                     let _ = cb;
                 }
             }
-            AgentEvent::PermissionRequest(_req) => {
-                // Permission handling via on_permission is wired but not yet
-                // driving stdin writes in this skeleton (TODO: mpsc writer
-                // task). For now we log to stderr.
-                eprintln!(
-                    "[agentproc runner] permission_request received but interactive permission channel is not wired up in this build"
-                );
+            AgentEvent::PermissionRequest(req) => {
+                use tokio::io::AsyncWriteExt;
+                if let Some(cb) = &po.on_permission {
+                    let decision = cb(req.clone()).await;
+                    let resp = match decision {
+                        crate::PermissionDecision::Allow { updated_input } => {
+                            let mut r = crate::PermissionResponse::allow(&req.request_id);
+                            r.updated_input = updated_input;
+                            r
+                        }
+                        crate::PermissionDecision::Deny { message } => {
+                            crate::PermissionResponse::deny(&req.request_id, message)
+                        }
+                    };
+                    let line = resp.to_ndjson().unwrap_or_default();
+                    if let (Some(w), false) = (stdin.as_mut(), line.is_empty()) {
+                        let _ = w.write_all(line.as_bytes()).await;
+                        let _ = w.write_all(b"\n").await;
+                    }
+                } else {
+                    // No on_permission wired: deny to avoid hanging the turn
+                    // until timeout (spec MUST).
+                    eprintln!(
+                        "[agentproc runner] permission_request `{}` for tool `{}` but no on_permission callback; denying",
+                        req.request_id, req.tool_name
+                    );
+                    let line = crate::PermissionResponse::deny(
+                        &req.request_id,
+                        "no permission handler attached",
+                    )
+                    .to_ndjson()
+                    .unwrap_or_default();
+                    if let (Some(w), false) = (stdin.as_mut(), line.is_empty()) {
+                        let _ = w.write_all(line.as_bytes()).await;
+                        let _ = w.write_all(b"\n").await;
+                    }
+                }
             }
         }
     }
@@ -433,6 +495,12 @@ fn note_session(
     on_session: &Option<Arc<dyn Fn(&str) + Send + Sync>>,
 ) {
     if sid.is_empty() {
+        return;
+    }
+    if !is_valid_session_id(sid) {
+        eprintln!(
+            "[agentproc runner] ignoring invalid session_id {sid:?} (separators/control chars not allowed)"
+        );
         return;
     }
     if result.session_id.is_empty() {
@@ -451,13 +519,6 @@ fn finalise_result(
     exit_code: i32,
     on_error: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 ) {
-    // Apply max_reply_chars truncation.
-    let max = profile.max_reply_chars;
-    if result.reply.chars().count() > max {
-        let truncated: String = result.reply.chars().take(max).collect();
-        result.reply = format!("{truncated}{}", profile.truncation_suffix);
-    }
-
     if !result.error.is_empty() {
         if profile.send_error_reply {
             if let Some(cb) = &on_error {
@@ -518,11 +579,37 @@ async fn drain_capped<R: tokio::io::AsyncRead + Unpin>(
 async fn wait_with_timeout(
     mut child: tokio::process::Child,
     secs: u64,
+    kill_grace_secs: u64,
 ) -> Result<std::process::ExitStatus, RunnerError> {
     match timeout(Duration::from_secs(secs), child.wait()).await {
         Ok(r) => r.map_err(RunnerError::from),
         Err(_) => {
-            // Timeout: SIGTERM, wait kill_grace, then SIGKILL.
+            // Two-step termination: SIGTERM, wait out the grace period
+            // (the agent may flush final partials), then SIGKILL.
+            #[cfg(unix)]
+            {
+                if let Some(pid) = child.id() {
+                    // Child was spawned as a process-group leader, so this
+                    // reaches its grandchildren too (agents spawn helpers
+                    // that inherit stdout and would otherwise hold the pipe).
+                    let pgid = pid as i32;
+                    let term = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+                    if term != 0 {
+                        unsafe { libc::kill(pgid, libc::SIGTERM) };
+                    }
+                    if kill_grace_secs > 0
+                        && timeout(Duration::from_secs(kill_grace_secs), child.wait())
+                            .await
+                            .is_ok()
+                    {
+                        return Err(RunnerError::Timeout { secs });
+                    }
+                }
+            }
+            #[cfg(unix)]
+            if let Some(pid) = child.id() {
+                unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            }
             let _ = child.start_kill();
             let _ = child.wait().await;
             Err(RunnerError::Timeout { secs })
@@ -577,6 +664,8 @@ async fn run_via_executor(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = cmd
         .spawn()
@@ -630,7 +719,7 @@ async fn run_via_executor(
     };
 
     let (status, stderr_output) = tokio::join!(
-        wait_with_timeout(child, cfg.timeout_secs),
+        wait_with_timeout(child, cfg.timeout_secs, profile.kill_grace_secs),
         stderr_task,
     );
     let stderr_output = stderr_output.unwrap_or_default();
@@ -720,7 +809,7 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
         };
 
         if let Some(sid) = &parsed.session_id {
-            if !sid.is_empty() && result.session_id.is_empty() {
+            if !sid.is_empty() && result.session_id.is_empty() && is_valid_session_id(sid) {
                 result.session_id = sid.clone();
                 if let Some(cb) = &opts.on_session {
                     cb(sid);
