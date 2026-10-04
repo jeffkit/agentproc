@@ -101,16 +101,16 @@ class TestTimeoutSalvage(unittest.TestCase):
             _make_opts(timeout_secs=2, on_partial=partials.append),
         )
         self.assertEqual(result.exit_code, EXIT_TIMEOUT)
-        self.assertTrue(
-            partials or result.reply,
-            "timeout path discarded all output produced before the timeout",
-        )
+        self.assertTrue(result.timed_out)
+        self.assertEqual(partials, ["halfway"])
+        self.assertEqual(result.reply, "halfway-done")
 
 
 class TestPartialFinalDedup(unittest.TestCase):
     def test_streaming_reply_not_duplicated(self):
-        """When partials were forwarded via on_partial, reply must be the
-        final_text only (Node/Rust semantics), not partial+final concat."""
+        """partials forwarded → reply stays '' (Node runner.js:700-702,
+        spawn path, scenarios.json) — partials are never concatenated onto
+        the final text."""
         ex = _ndjson_executor(
             "import json\n"
             "print(json.dumps({'type':'partial','text':'abc'}))\n"
@@ -119,7 +119,8 @@ class TestPartialFinalDedup(unittest.TestCase):
         partials = []
         result = run_via_executor(ex, _make_opts(streaming=True, on_partial=partials.append))
         self.assertEqual(partials, ["abc"])
-        self.assertEqual(result.reply, "abcdef")
+        self.assertEqual(result.reply, "")
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
 
     def test_partials_only_no_final_succeeds_with_empty_reply(self):
         """When partials were streamed and no final arrives, the turn
