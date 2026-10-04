@@ -112,6 +112,35 @@ function buildBaseEnv() {
   return base;
 }
 
+/**
+ * Compose the child env — the single shared three-layer policy (infra set +
+ * profile env after ${VAR} expansion / env_allowlist filtering + extraEnv).
+ * Both the spawn path and runViaExecutor MUST use this — no third
+ * composition implementation (spec: no "inherit everything" mode).
+ */
+function composeEnv(profile, options, sourceEnv = process.env) {
+  const substCtx = {
+    message: options.message,
+    sessionId: options.sessionId || '',
+    sessionName: options.sessionName || 'default',
+    profileDir: options.profileDir || '',
+  };
+  const base = {};
+  for (const name of ENV_INFRA_VARS) {
+    if (sourceEnv[name] !== undefined) base[name] = sourceEnv[name];
+  }
+  const env = base;
+  for (const [k, v] of Object.entries(profile.env)) {
+    env[k] = expandEnvRef(substitute(String(v), substCtx), sourceEnv, profile.env_allowlist, (name) => {
+      if (options.onStderr) options.onStderr(`[agentproc runner] env_allowlist blocked \${${name}} (not in allowlist); expanded to empty`);
+    });
+  }
+  if (options.extraEnv) {
+    for (const [k, v] of Object.entries(options.extraEnv)) env[k] = String(v);
+  }
+  return env;
+}
+
 // ---------------------------------------------------------------------------
 // Profile parsing & validation
 // ---------------------------------------------------------------------------
@@ -534,17 +563,7 @@ async function runViaExecutor(profile, options, executor) {
   }
 
   // Build env (infra set + profile env block + --env).
-  const substCtx = { message: options.message, sessionId, sessionName: options.sessionName || 'default', profileDir: options.profileDir || '' };
-  const allowlist = profile.env_allowlist;
-  const env = buildBaseEnv();
-  for (const [k, v] of Object.entries(profile.env)) {
-    env[k] = expandEnvRef(substitute(v, substCtx), process.env, allowlist, (name) => {
-      if (options.onStderr) options.onStderr(`[agentproc runner] env_allowlist blocked \${${name}} (not in allowlist); expanded to empty`);
-    });
-  }
-  if (options.extraEnv) {
-    for (const [k, v] of Object.entries(options.extraEnv)) env[k] = String(v);
-  }
+  const env = composeEnv(profile, options);
 
   // Resolve handlers: call makeHandlers() for stateful executors (kimi, cursor),
   // otherwise use executor.buildArgs / executor.parseEvent directly.
@@ -795,22 +814,7 @@ async function run(profileRaw, options) {
     argv.push(substitute(a, substCtx));
   }
 
-  // Build env per the composition policy (infra set + profile env + --env).
-  // No AGENT_* injections in 0.3 — the per-turn request travels on stdin.
-  const allowlist = profile.env_allowlist;
-  const env = buildBaseEnv();
-  for (const [k, v] of Object.entries(profile.env)) {
-    env[k] = expandEnvRef(substitute(v, substCtx), process.env, allowlist, (name) => {
-      if (options.onStderr) {
-        options.onStderr(`[agentproc runner] env_allowlist blocked \${${name}} (not in allowlist); expanded to empty`);
-      }
-    });
-  }
-  if (options.extraEnv) {
-    for (const [k, v] of Object.entries(options.extraEnv)) {
-      env[k] = String(v);
-    }
-  }
+  const env = composeEnv(profile, options);
 
   // Build the turn object (wire 0.3 stdin payload).
   const turn = {
@@ -1230,6 +1234,7 @@ module.exports = {
   EXIT_SIGTERM,
   ENV_INFRA_VARS,
   buildBaseEnv,
+  composeEnv,
   STDERR_DIAGNOSTICS,
   diagnoseStderrFailure,
   EXECUTORS,

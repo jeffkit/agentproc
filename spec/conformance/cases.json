@@ -47,5 +47,16 @@
     {"line": "{\"foo\":\"bar\"}", "expect": {"kind": "malformed", "value": "{\"foo\":\"bar\"}"}},
     {"line": "{\"type\":\"unknown\"}", "expect": {"kind": "malformed", "value": "{\"type\":\"unknown\"}"}},
     {"line": "{\"type\":\"SESSION\",\"id\":\"x\"}", "expect": {"kind": "malformed", "value": "{\"type\":\"SESSION\",\"id\":\"x\"}"}}
+  ],
+  "env_compose": [
+    {
+      "_comment": "Child-env composition. Both _compose_env / composeEnv MUST build infra set + profile env (${VAR} expanded, env_allowlist filtered — blocked names expand to empty string but the key is still set) + extra_env (later layers override earlier). `host_env` fakes the bridge environment (also the source the infra set is copied from). `expect_contains` = exact key/value pairs that MUST be present; `expect_absent` = names that MUST NOT appear at all.",
+      "profile_env": {"DECLARED": "${ALLOWED}", "BLOCKED": "${SECRET}", "LITERAL": "lit-val"},
+      "env_allowlist": ["ALLOWED"],
+      "extra_env": {"EXTRA_FLAG": "extra-val", "DECLARED": "overridden"},
+      "host_env": {"ALLOWED": "ok-val", "SECRET": "top-secret", "PATH": "/usr/bin:/bin", "HOME": "/home/u"},
+      "expect_contains": {"DECLARED": "overridden", "LITERAL": "lit-val", "EXTRA_FLAG": "extra-val", "PATH": "/usr/bin:/bin", "HOME": "/home/u", "BLOCKED": ""},
+      "expect_absent": ["SECRET"]
+    }
   ]
 }

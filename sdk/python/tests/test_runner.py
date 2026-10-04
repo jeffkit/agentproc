@@ -363,8 +363,8 @@ def _evt(obj: dict) -> str:
     return "echo '" + json.dumps(obj, ensure_ascii=False) + "'"
 
 
-def write_script(content: str, tmp_path: Path) -> Path:
-    f = tmp_path / "agent.sh"
+def write_script(content: str, tmp_path: Path, name: str = "agent.sh") -> Path:
+    f = tmp_path / name
     f.write_text(content)
     f.chmod(f.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return f
@@ -857,3 +857,132 @@ class TestKilledBySignal:
         agent = agent_script("#!/usr/bin/env bash\nkill -INT $$\n")
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.exit_code == 130, f"got exit_code={r.exit_code}"
+
+
+# ---------------------------------------------------------------------------
+# 3. executor-path profile-field tests (issue #5): run() passes the profile
+#    into run_via_executor, so timeout/streaming/kill_grace/cwd apply there.
+# ---------------------------------------------------------------------------
+
+class TestExecutorPathProfileFields:
+    @staticmethod
+    def _register_executor(monkeypatch, agent):
+        import agentproc.runner as runner_mod
+        fake = {
+            "cli_name": "agentproc-test-exec",
+            "plain": False,
+            "build_args": lambda message, session_id, env: [str(agent)],
+            "parse_event": lambda event: (
+                {"final_text": event.get("text", "")}
+                if event.get("type") == "result"
+                else ({"partial_text": event.get("text", "")}
+                      if event.get("type") == "partial" else None)
+            ),
+        }
+        monkeypatch.setitem(runner_mod.EXECUTORS, "agentproc-test-exec", fake)
+        return fake
+
+    def test_profile_timeout_applies(self, tmp_path, monkeypatch):
+        agent = write_script(
+            "#!/usr/bin/env bash\nsleep 30\n",
+            tmp_path, "sleep-agent.sh")
+        self._register_executor(monkeypatch, agent)
+        r = run(
+            {"executor": "agentproc-test-exec", "timeout_secs": 2},
+            RunOptions(message="hi"),
+        )
+        assert r.exit_code == EXIT_TIMEOUT
+        assert r.timed_out
+
+    def test_options_timeout_overrides_profile(self, tmp_path, monkeypatch):
+        agent = write_script(
+            "#!/usr/bin/env bash\nsleep 30\n",
+            tmp_path, "sleep-agent2.sh")
+        self._register_executor(monkeypatch, agent)
+        r = run(
+            {"executor": "agentproc-test-exec", "timeout_secs": 120},
+            RunOptions(message="hi", timeout_secs=2),
+        )
+        assert r.exit_code == EXIT_TIMEOUT
+
+    def test_profile_streaming_false_aggregates(self, tmp_path, monkeypatch):
+        agent = write_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "partial", "text": "chunk1"}) + "\n"
+            + _evt({"type": "partial", "text": "chunk2"}) + "\n"
+            + _evt({"type": "result", "text": "final"}) + "\n",
+            tmp_path, "stream-agent.sh")
+        self._register_executor(monkeypatch, agent)
+        partials: List[str] = []
+        r = run(
+            {"executor": "agentproc-test-exec", "streaming": False},
+            RunOptions(message="hi", on_partial=partials.append),
+        )
+        assert r.exit_code == 0
+        assert r.reply == "chunk1chunk2final"
+        assert partials == []
+
+    def test_streaming_true_forwards_and_leaves_reply_empty(self, tmp_path, monkeypatch):
+        agent = write_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "partial", "text": "chunk1"}) + "\n"
+            + _evt({"type": "result", "text": "final"}) + "\n",
+            tmp_path, "stream-agent2.sh")
+        self._register_executor(monkeypatch, agent)
+        partials: List[str] = []
+        r = run(
+            {"executor": "agentproc-test-exec", "streaming": True},
+            RunOptions(message="hi", on_partial=partials.append),
+        )
+        assert r.exit_code == 0
+        assert partials == ["chunk1"]
+        assert r.reply == ""
+
+    def test_profile_kill_grace_secs_applies(self, tmp_path, monkeypatch):
+        # Child ignores SIGTERM; grace of 1s means SIGKILL lands quickly.
+        agent = write_script(
+            "#!/usr/bin/env bash\ntrap '' TERM\nsleep 30\n",
+            tmp_path, "grace-agent.sh")
+        self._register_executor(monkeypatch, agent)
+        import time
+        start = time.monotonic()
+        r = run(
+            {"executor": "agentproc-test-exec", "timeout_secs": 1,
+             "kill_grace_secs": 1},
+            RunOptions(message="hi"),
+        )
+        elapsed = time.monotonic() - start
+        assert r.exit_code == EXIT_TIMEOUT
+        assert elapsed < 10
+
+    def test_profile_cwd_applies(self, tmp_path, monkeypatch):
+        workdir = tmp_path / "wd"
+        workdir.mkdir()
+        agent = write_script(
+            "#!/usr/bin/env bash\n"
+            "echo \"{\\\"type\\\":\\\"result\\\",\\\"text\\\":\\\"$PWD\\\"}\"\n",
+            tmp_path, "cwd-agent.sh")
+        self._register_executor(monkeypatch, agent)
+        r = run(
+            {"executor": "agentproc-test-exec", "cwd": str(workdir)},
+            RunOptions(message="hi"),
+        )
+        assert r.exit_code == 0, r.error
+        assert str(workdir) in r.reply
+
+    def test_options_cwd_overrides_profile(self, tmp_path, monkeypatch):
+        wd1 = tmp_path / "wd1"
+        wd2 = tmp_path / "wd2"
+        wd1.mkdir()
+        wd2.mkdir()
+        agent = write_script(
+            "#!/usr/bin/env bash\n"
+            "echo \"{\\\"type\\\":\\\"result\\\",\\\"text\\\":\\\"$PWD\\\"}\"\n",
+            tmp_path, "cwd-agent2.sh")
+        self._register_executor(monkeypatch, agent)
+        r = run(
+            {"executor": "agentproc-test-exec", "cwd": str(wd1)},
+            RunOptions(message="hi", cwd=str(wd2)),
+        )
+        assert r.exit_code == 0, r.error
+        assert str(wd2) in r.reply

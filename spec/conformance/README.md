@@ -7,7 +7,10 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
 - `cases.json` — single stdout lines paired with the expected
   `{kind, value[, role[, session_id]]}` classification. Each case is one NDJSON
   event line an agent might emit, plus what a conformant bridge must classify
-  it as.
+  it as. The same file also carries an `env_compose` section: table-driven
+  cases for the three-layer child-env policy (see
+  [`cases.json` `env_compose` format](#casesjson-env_compose-format)) — one
+  fixture file, both runner internals.
 - `scenarios.json` — multi-line stdout sequences paired with the expected
   observable runner output (reply, session_id, error, exit_code, partials).
   Each scenario is a full agent turn (a sequence of NDJSON event lines),
@@ -58,6 +61,9 @@ Both reference SDKs run the same fixtures through their runners:
 - `cases.json` → line classifiers:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.classify_line`
   - Node:   `sdk/node/src/conformance.test.js`    → `runner.classifyLine`
+- `cases.json` `env_compose` → shared child-env composition:
+  - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner._compose_env`
+  - Node:   `sdk/node/src/conformance.test.js`    → `runner.composeEnv`
 - `scenarios.json` → end-to-end `run()`:
   - Python: `sdk/python/tests/test_scenarios.py` → `agentproc.runner.run`
   - Node:   `sdk/node/src/scenarios.test.js`     → `runner.run`
@@ -136,6 +142,35 @@ SDKs. For `partial` and `result`, `value` is the `text` string; for `error` it
 is the `message` string; for `permission_request` it is the whole event
 object; for `malformed` it is the raw line. `role` is asserted only when
 present and string-typed.
+
+### cases.json `env_compose` format
+
+```json
+{
+  "env_compose": [
+    {
+      "profile_env": {"DECLARED": "${ALLOWED}", "BLOCKED": "${SECRET}"},
+      "env_allowlist": ["ALLOWED"],
+      "extra_env": {"EXTRA_FLAG": "extra-val", "DECLARED": "overridden"},
+      "host_env": {"ALLOWED": "ok-val", "SECRET": "top-secret"},
+      "expect_contains": {"DECLARED": "overridden", "BLOCKED": ""},
+      "expect_absent": ["SECRET"]
+    }
+  ]
+}
+```
+
+`host_env` fakes the bridge's own environment — it is both the `${VAR}`
+expansion source and the environment the infra set is copied from (Python
+monkeypatches `os.environ` and deletes everything not listed; Node passes it
+as `composeEnv`'s `sourceEnv`). `extra_env` goes in as
+`RunOptions.extra_env` / `extraEnv` (the CLI `--env` flag). The composed
+result must be the spec's three layers in order: infra set → profile `env`
+(expanded, `env_allowlist`-filtered — a blocked name expands to the empty
+string but the key is still set) → `extra_env` (later layers override
+earlier). `expect_contains` lists exact key/value pairs that MUST be present
+and `expect_absent` lists names that MUST NOT appear at all — the latter is
+what proves no `{**host_env}` passthrough survives.
 
 ### scenarios.json format
 

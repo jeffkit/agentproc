@@ -58,6 +58,7 @@ __all__ = [
     "EXIT_SIGTERM",
     "ENV_INFRA_VARS",
     "build_base_env",
+    "_compose_env",
     "RunResult",
     "RunOptions",
     "run",
@@ -579,15 +580,73 @@ def _kill_process_group(
                 )
 
 
-def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult:
+def _compose_env(
+    profile: Dict[str, Any],
+    options: RunOptions,
+    subst_ctx: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Compose the child env — the single shared three-layer policy.
+
+    (1) infra set (build_base_env), (2) profile env block (${VAR} expanded,
+    env_allowlist-filtered), (3) extra_env from the CLI --env flag.
+    Both the spawn path and the executor path MUST use this — no third
+    composition implementation (spec: "no inherit-everything mode").
+    """
+    if subst_ctx is None:
+        subst_ctx = {
+            "message": options.message,
+            "session_id": options.session_id,
+            "session_name": options.session_name,
+            "profile_dir": options.profile_dir or "",
+        }
+    env = build_base_env()
+    allowlist = profile["env_allowlist"]
+    for k, v in profile["env"].items():
+        env[k] = expand_env_ref(
+            substitute(str(v), subst_ctx),
+            os.environ,
+            allowlist=allowlist,
+            on_blocked=(
+                lambda name: options.on_stderr(
+                    f"[agentproc runner] env_allowlist blocked ${{{name}}} "
+                    f"(not in allowlist); expanded to empty"
+                ) if options.on_stderr else None
+            ),
+        )
+    for k, v in options.extra_env.items():
+        env[k] = str(v)
+    return env
+
+
+def run_via_executor(
+    executor: Dict[str, Any],
+    options: RunOptions,
+    profile: Optional[Dict[str, Any]] = None,
+) -> RunResult:
     """Run using a registered in-process executor (no bridge subprocess).
 
-    Mirrors the Node SDK's ``runViaExecutor`` in runner.js.
+    Mirrors the Node SDK's ``runViaExecutor`` in runner.js. When ``profile``
+    is omitted (direct calls in old tests), profile-driven fields fall back
+    to their defaults — ``run()`` always passes the normalised profile.
     """
     cli_name = executor.get("cli_name", "unknown")
     result = RunResult(exit_code=EXIT_ERROR)
 
-    env = {**os.environ, **(options.extra_env or {})}
+    if profile is None:
+        profile = normalize_profile({"executor": cli_name})
+
+    streaming = (
+        options.streaming if options.streaming is not None else profile["streaming"]
+    )
+    timeout_secs = (
+        options.timeout_secs if options.timeout_secs is not None else profile["timeout_secs"]
+    )
+    kill_grace_secs = profile["kill_grace_secs"]
+    cwd = options.cwd or profile["cwd"]
+    if cwd and not Path(cwd).is_absolute() and options.profile_dir:
+        cwd = str(Path(options.profile_dir) / cwd)
+
+    env = _compose_env(profile, options)
 
     make_handlers = executor.get("make_handlers")
     if callable(make_handlers):
@@ -629,7 +688,6 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
         return result
 
     plain = executor.get("plain", False)
-    timeout_secs = options.timeout_secs if options.timeout_secs is not None else DEFAULT_TIMEOUT_SECS
 
     # 独立进程组：超时 killpg 时把 agent CLI 的全部子孙（bash 工具调用等）一起清掉，
     # 否则只杀直接子进程，agent 的子树会变成孤儿继续持有凭据运行（2026-09-27 实测事故）。
@@ -643,6 +701,7 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             encoding="utf-8",
             errors="replace",
             start_new_session=True,
+            cwd=cwd or None,
             env=env,
         )
     except FileNotFoundError:
@@ -663,9 +722,20 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
         stdout, stderr = proc.communicate(input=(options.message or ""), timeout=timeout_secs)
     except subprocess.TimeoutExpired:
         timed_out_plain = True
-        _kill_process_group(proc, on_warning=options.on_stderr)
-        stdout, stderr = "", ""
+        # 与 spawn 路径一致的三段式：SIGTERM（polite）→ kill_grace_secs 宽限
+        # → killpg SIGKILL 清整个子树。SIGKILL 后仍未回收时经 on_warning 告警
+        # （issue #20：不可回收子进程不再静默变僵尸）。
+        _signal_process_group(proc, signal.SIGTERM)
+        try:
+            proc.communicate(timeout=kill_grace_secs)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc, on_warning=options.on_stderr)
+        try:
+            stdout, stderr = proc.communicate(timeout=2)
+        except (subprocess.TimeoutExpired, ValueError):
+            stdout, stderr = "", ""
     if timed_out_plain:
+        result.timed_out = True
         result.error = f"executor '{cli_name}' timed out after {timeout_secs}s"
         result.exit_code = EXIT_TIMEOUT
         if options.on_error:
@@ -709,10 +779,6 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             # （plain 的 reply 是整体，回调供观测/审计消费原始行）
             for protocol_line in stdout.splitlines():
                 options.on_protocol_line(protocol_line)
-        else:
-            import sys as _sys
-            print(f"[DEBUG plain] on_protocol_line falsy | stdout={stdout[:80]!r}",
-                  file=_sys.stderr)
         if options.run_lock_key:
             _run_lock.clear_run_lock(options.run_lock_key)
         return result
@@ -729,6 +795,8 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
         return result
 
     reply_parts: List[str] = []
+    partials_forwarded = False
+    error_seen = False
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -747,10 +815,12 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             continue
         if isinstance(parsed, dict):
             if parsed.get("error"):
-                result.error = parsed["error"]
-                if options.on_error:
-                    options.on_error(result.error)
-                return result
+                if not error_seen:
+                    error_seen = True
+                    result.error = parsed["error"]
+                    if options.on_error:
+                        options.on_error(result.error)
+                continue
             sid = parsed.get("session_id")
             if sid and is_valid_session_id(sid) and not result.session_id:
                 result.session_id = sid
@@ -758,15 +828,26 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
                     options.on_session(sid)
             partial = parsed.get("partial_text")
             if partial:
-                if options.on_partial:
+                if not error_seen and streaming and options.on_partial:
                     options.on_partial(partial)
-                reply_parts.append(partial)
+                    partials_forwarded = True
+                if not partials_forwarded:
+                    reply_parts.append(partial)
             final = parsed.get("final_text")
             if final:
                 reply_parts.append(final)
 
-    result.reply = "".join(reply_parts)
-    if not result.reply:
+    if error_seen:
+        if options.run_lock_key:
+            _run_lock.clear_run_lock(options.run_lock_key)
+        result.exit_code = EXIT_ERROR
+        return result
+    # streaming true 且已转发 partial → reply 置空（正文已流式送达，不重复）
+    if streaming and partials_forwarded:
+        result.reply = ""
+    else:
+        result.reply = "".join(reply_parts)
+    if not result.reply and not partials_forwarded:
         result.error = f"{cli_name} returned no reply content"
         if options.on_error:
             options.on_error(result.error)
@@ -809,7 +890,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                     f"falling back to spawn (command: {profile['command']!r})"
                 )
         else:
-            return run_via_executor(executor, options)
+            return run_via_executor(executor, options, profile)
 
     streaming = (
         options.streaming if options.streaming is not None else profile["streaming"]
@@ -836,22 +917,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     for a in profile["args"]:
         argv.append(substitute(a, subst_ctx))
 
-    allowlist = profile["env_allowlist"]
-    env = build_base_env()
-    for k, v in profile["env"].items():
-        env[k] = expand_env_ref(
-            substitute(str(v), subst_ctx),
-            os.environ,
-            allowlist=allowlist,
-            on_blocked=(
-                lambda name: options.on_stderr(
-                    f"[agentproc runner] env_allowlist blocked ${{{name}}} "
-                    f"(not in allowlist); expanded to empty"
-                ) if options.on_stderr else None
-            ),
-        )
-    for k, v in options.extra_env.items():
-        env[k] = str(v)
+    env = _compose_env(profile, options, subst_ctx)
 
     # Build the turn object (wire 0.4 stdin payload). No AGENT_* env in 0.4.
     turn: Dict[str, Any] = {
