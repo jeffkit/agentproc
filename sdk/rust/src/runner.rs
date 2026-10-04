@@ -19,6 +19,9 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -29,6 +32,21 @@ use crate::error::RunnerError;
 #[cfg(feature = "executors")]
 use crate::executors::{lookup, TurnHandlers};
 use crate::protocol::{parse_event, AgentEvent, TurnObject};
+
+/// Normalise a finished child's status into the spec exit code.
+///
+/// A signal death reports `128 + signal number` (SIGINT → 130, SIGTERM →
+/// 143, matching the spec's Exit Codes table); otherwise the process exit
+/// code is used. `signal()` is unix-only, so the check is cfg-gated and
+/// other platforms fall straight through to `code()` (Windows always
+/// reports an exit code).
+fn exit_code_from_status(status: &std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    if let Some(sig) = status.signal() {
+        return 128 + sig as i32;
+    }
+    status.code().unwrap_or(1)
+}
 
 /// Callbacks and inputs for a single [`run`] call.
 pub struct RunOptions {
@@ -330,7 +348,7 @@ async fn run_via_spawn(
     let stderr_output = stderr_output.unwrap_or_default();
     let mut result = result?;
     let exit_code = match status {
-        Ok(s) => s.code().unwrap_or(0),
+        Ok(s) => exit_code_from_status(&s),
         Err(RunnerError::Timeout { .. }) => {
             result.timed_out = true;
             124
@@ -726,7 +744,7 @@ async fn run_via_executor(
 
     let mut result = result?;
     let exit_code = match status {
-        Ok(s) => s.code().unwrap_or(0),
+        Ok(s) => exit_code_from_status(&s),
         Err(RunnerError::Timeout { .. }) => {
             result.timed_out = true;
             124

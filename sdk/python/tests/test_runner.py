@@ -838,3 +838,22 @@ class TestRunEndToEnd:
 
         assert r.exit_code == EXIT_TIMEOUT, f"expected timeout (EXIT_TIMEOUT={EXIT_TIMEOUT}), got {r.exit_code}"
         assert elapsed < 10, f"runner hung for {elapsed:.1f}s — should complete within ~10s"
+
+
+# ---------------------------------------------------------------------------
+# issue #10 — exit code when the agent is killed by a signal
+# spec/protocol.md Exit Codes: 130 = SIGINT, 143 = SIGTERM. A bash `kill -TERM
+# $$` makes the child die by signal: proc.wait() returns -15 on POSIX.
+# ---------------------------------------------------------------------------
+
+
+class TestKilledBySignal:
+    def test_sigterm_normalised_to_143(self, agent_script):
+        agent = agent_script("#!/usr/bin/env bash\nkill -TERM $$\n")
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.exit_code == 143, f"got exit_code={r.exit_code}"
+
+    def test_sigint_normalised_to_130(self, agent_script):
+        agent = agent_script("#!/usr/bin/env bash\nkill -INT $$\n")
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.exit_code == 130, f"got exit_code={r.exit_code}"

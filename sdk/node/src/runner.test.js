@@ -944,6 +944,26 @@ test('PROTOCOL_VERSION is "0.4"', () => {
 });
 
 // ---------------------------------------------------------------------------
+// issue #10 — exit code when the agent is killed by a signal
+// spec/protocol.md Exit Codes: 130 = SIGINT, 143 = SIGTERM. A bash `kill -TERM
+// $$` makes the child die by signal: child 'close' fires with code=null.
+// ---------------------------------------------------------------------------
+
+describe('agent killed by signal → exitCode normalised per spec', () => {
+  test('SIGTERM → exitCode 143', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nkill -TERM $$\n');
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.exitCode, 143, `got exitCode=${r.exitCode}`);
+  });
+
+  test('SIGINT → exitCode 130', async () => {
+    const agent = writeScript('#!/usr/bin/env bash\nkill -INT $$\n');
+    const r = await run({ command: agent }, { message: 'hi' });
+    assert.strictEqual(r.exitCode, 130, `got exitCode=${r.exitCode}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // executor: field routing — four cases
 // ---------------------------------------------------------------------------
 

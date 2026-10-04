@@ -80,3 +80,23 @@ async fn known_executor_resolves_to_in_process_path() {
     assert!(profile.executor_known(), "codex should be a known executor");
     assert_eq!(profile.executor.as_deref(), Some("codex"));
 }
+
+// issue #10 — spec: 130 = SIGINT, 143 = SIGTERM. A bash `kill -TERM $$`
+// child dies by signal; s.code() is None and must not unwrap_or(0) to success.
+#[cfg(unix)]
+#[tokio::test]
+async fn killed_by_sigterm_normalised_to_143() {
+    let yaml = "command: /bin/bash\nargs: [\"-c\", \"kill -TERM $$\"]\ntimeout_secs: 10\n".to_string();
+    let profile = Profile::from_yaml(&yaml).unwrap();
+    let result = run(&profile, RunOptions::new("hi")).await.unwrap();
+    assert_eq!(result.exit_code, 143, "exit_code: {}", result.exit_code);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn killed_by_sigint_normalised_to_130() {
+    let yaml = "command: /bin/bash\nargs: [\"-c\", \"kill -INT $$\"]\ntimeout_secs: 10\n".to_string();
+    let profile = Profile::from_yaml(&yaml).unwrap();
+    let result = run(&profile, RunOptions::new("hi")).await.unwrap();
+    assert_eq!(result.exit_code, 130, "exit_code: {}", result.exit_code);
+}

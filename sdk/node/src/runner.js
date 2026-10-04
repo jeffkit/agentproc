@@ -59,6 +59,31 @@ const EXIT_TIMEOUT = 124;
 const EXIT_SIGINT = 130;
 const EXIT_SIGTERM = 143;
 
+// POSIX signal numbers (for 128+signo normalisation). Kept as a table rather
+// than os.constants.signals to behave identically across Node versions.
+const SIGNAL_NUMBERS = {
+  SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6,
+  SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12,
+  SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15, SIGSTKFLT: 16, SIGCHLD: 17,
+  SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGTTIN: 21, SIGTTOU: 22,
+  SIGURG: 23, SIGXCPU: 24, SIGXFSZ: 25, SIGVTALRM: 26, SIGPROF: 27,
+  SIGWINCH: 28, SIGIO: 29, SIGPOLL: 29, SIGPWR: 30, SIGSYS: 31,
+};
+
+/**
+ * Normalise a child-process exit status to a spec exit code. When the child
+ * died from a signal (code === null), report 128 + signal number (SIGINT →
+ * 130, SIGTERM → 143, consistent with EXIT_SIGINT/EXIT_SIGTERM) on all
+ * platforms; EXIT_ERROR if no signal is reported either.
+ */
+function normaliseExit(code, signal) {
+  if (code === null || code === undefined) {
+    const sig = signal !== null && signal !== undefined ? SIGNAL_NUMBERS[signal] : undefined;
+    return sig !== undefined ? 128 + sig : EXIT_ERROR;
+  }
+  return code;
+}
+
 // ---------------------------------------------------------------------------
 // Environment composition policy (wire 0.3)
 // ---------------------------------------------------------------------------
@@ -585,7 +610,7 @@ async function runViaExecutor(profile, options, executor) {
     let stdout = '';
     child.stdout.on('data', (d) => { stdout += d.toString(); });
 
-    const exitCode = await new Promise(resolve => child.on('close', resolve));
+    const exitCode = await new Promise(resolve => child.on('close', (code, signal) => resolve(normaliseExit(code, signal))));
     clearTimeout(timeoutHandle);
     if (killTimer) clearTimeout(killTimer);
 
@@ -667,7 +692,7 @@ async function runViaExecutor(profile, options, executor) {
     }
   }
 
-  const exitCode = await new Promise(resolve => child.on('close', resolve));
+  const exitCode = await new Promise(resolve => child.on('close', (code, signal) => resolve(normaliseExit(code, signal))));
   clearTimeout(timeoutHandle);
   if (killTimer) clearTimeout(killTimer);
 
@@ -1116,7 +1141,7 @@ async function run(profileRaw, options) {
 
   // ---- wait for exit ----
   const exitCode = await new Promise(resolve => {
-    child.on('close', code => resolve(code));
+    child.on('close', (code, signal) => resolve(normaliseExit(code, signal)));
     child.on('error', err => {
       // spawn error — usually ENOENT. Node attributes it to argv[0]
       // regardless of whether it was the command or a referenced file that
