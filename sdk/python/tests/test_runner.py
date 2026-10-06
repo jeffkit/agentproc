@@ -15,6 +15,7 @@ import pytest
 
 from agentproc.runner import (
     PROTOCOL_VERSION,
+    EXIT_CANCELLED,
     EXIT_TIMEOUT,
     RunOptions,
     classify_line,
@@ -1106,3 +1107,34 @@ class TestTimeBudgetAndTraceability:
         )
         r = run({"command": str(agent)}, RunOptions(message="hi"))
         assert r.reply == "ok"  # no on_journal → no crash, wire output unchanged
+
+
+    def test_cancel_event_kills_long_agent_far_before_timeout(self, agent_script):
+        """协作式取消：cancel_event 命中即击杀进程组，exit_code=EXIT_CANCELLED
+        （≠ 超时 124），耗时远小于 timeout_secs。"""
+        import threading
+        import time
+
+        agent = agent_script("#!/usr/bin/env bash\nsleep 30\necho 'should not reach'\n")
+        cancel_event = threading.Event()
+        threading.Timer(1.0, cancel_event.set).start()
+
+        start = time.monotonic()
+        r = run(
+            {"command": str(agent), "kill_grace_secs": 1},
+            RunOptions(message="hi", timeout_secs=30, cancel_event=cancel_event),
+        )
+        elapsed = time.monotonic() - start
+        assert r.exit_code == EXIT_CANCELLED
+        assert r.timed_out is False
+        assert elapsed < 10, f"取消未及时生效，耗 {elapsed:.1f}s（timeout=30s）"
+
+    def test_cancel_event_none_is_pure_timeout(self, agent_script):
+        """cancel_event=None（默认）行为不变：仍走超时路径。"""
+        agent = agent_script("#!/usr/bin/env bash\nsleep 30\necho 'should not reach'\n")
+        r = run(
+            {"command": str(agent), "kill_grace_secs": 1},
+            RunOptions(message="hi", timeout_secs=1, cancel_event=None),
+        )
+        assert r.timed_out is True
+        assert r.exit_code == 124

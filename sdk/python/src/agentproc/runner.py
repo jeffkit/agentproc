@@ -56,6 +56,7 @@ __all__ = [
     "EXIT_SUCCESS",
     "EXIT_ERROR",
     "EXIT_TIMEOUT",
+    "EXIT_CANCELLED",
     "EXIT_SIGINT",
     "EXIT_SIGTERM",
     "ENV_INFRA_VARS",
@@ -89,6 +90,9 @@ DEFAULT_KILL_GRACE_SECS = 5
 EXIT_SUCCESS = 0
 EXIT_ERROR = 1
 EXIT_TIMEOUT = 124
+# 协作式取消（cancel_event 命中）：与超时区分，宿主据此判定「被取消」而非
+# 「失败」——plaita worker 取消监听置位后，取消不是错误终态。
+EXIT_CANCELLED = 125
 EXIT_SIGINT = 130
 EXIT_SIGTERM = 143
 
@@ -171,6 +175,11 @@ class RunOptions:
     # run-lock 文件，供 kill-before-start 孤儿清场定位进程组（run_lock 模块）。
     run_lock_key: Optional[str] = None
     timeout_secs: Optional[int] = None
+    # 协作式取消：一个 ``threading.Event`` 样对象（需有 ``is_set()``）。设置后
+    # 运行器在等待子进程期间轮询该事件，命中即对 agent 进程组分级击杀
+    # （SIGTERM → kill_grace_secs 宽限 → SIGKILL），返回 timed_out=False、
+    # exit_code=EXIT_CANCELLED 的 RunResult。None = 不启用（现状）。
+    cancel_event: Optional[Any] = None
     # Journal hook (spec "Event traceability", opt-in): called with a dict
     # per classified event / bridge-level decision. None ⇒ no journaling.
     on_journal: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -849,6 +858,7 @@ def run_via_executor(
     partials_forwarded = False
     error_message: Optional[str] = None
     timed_out = False
+    cancelled = False
 
     def _handle_line(raw: str) -> None:
         nonlocal last_final_text, partials_forwarded, error_message
@@ -901,6 +911,36 @@ def run_via_executor(
     )
     eof = False
     while not eof:
+        # 协作式取消：每轮轮询 cancel_event，命中即分级击杀进程组（与超时
+        # 同构但语义不同——取消是控制面意图，宿主据 cancelled 判非错误）。
+        if options.cancel_event is not None and options.cancel_event.is_set():
+            cancelled = True
+            _signal_process_group(proc, signal.SIGTERM)
+            grace_deadline = time.monotonic() + kill_grace_secs
+            while not eof and time.monotonic() < grace_deadline:
+                try:
+                    item = line_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if item is None:
+                    eof = True
+                    break
+                _handle_line(item)
+            if not eof:
+                _kill_process_group(proc, on_warning=options.on_stderr)
+                salvage_deadline = time.monotonic() + 2.0
+                while time.monotonic() < salvage_deadline:
+                    try:
+                        item = line_queue.get(timeout=0.2)
+                    except queue.Empty:
+                        if not stdout_thread.is_alive():
+                            break
+                        continue
+                    if item is None:
+                        eof = True
+                        break
+                    _handle_line(item)
+            break
         remaining = None
         if deadline is not None:
             remaining = deadline - time.monotonic()
@@ -947,7 +987,15 @@ def run_via_executor(
         _handle_line(item)
 
     exit_code: int
-    if timed_out:
+    if cancelled:
+        try:
+            exit_code = _normalise_exit_code(proc.wait(timeout=5))
+        except subprocess.TimeoutExpired:
+            exit_code = EXIT_CANCELLED
+        else:
+            # 子进程自主退出（宽限内收尾）——仍归类为取消，语义由 cancelled 决定
+            exit_code = EXIT_CANCELLED
+    elif timed_out:
         try:
             exit_code = _normalise_exit_code(proc.wait(timeout=5))
         except subprocess.TimeoutExpired:
@@ -962,6 +1010,9 @@ def run_via_executor(
     # aggregates partials + final because nothing was forwarded to callers.
     if plain:
         result.reply = "\n".join(plain_lines).strip()
+    elif cancelled:
+        # 取消 salvage：保留已产出的半轮文本（与超时同待遇，调用方不丢内容）。
+        result.reply = last_final_text if last_final_text is not None else "".join(reply_parts)
     elif timed_out:
         # Timeout salvage: keep the half-turn text so the caller does not
         # lose everything produced before the kill (acceptance: reply != '').
@@ -975,8 +1026,17 @@ def run_via_executor(
 
     stderr_text = "".join(stderr_parts).strip()
 
-    if options.run_lock_key and not timed_out:
+    if options.run_lock_key and not timed_out and not cancelled:
         _run_lock.clear_run_lock(options.run_lock_key)
+
+    if cancelled:
+        # 协作式取消：控制面意图，非错误。timed_out 保持 False；exit_code 用
+        # EXIT_CANCELLED 让 plaita 侧判定 cancelled 而非 error。
+        result.exit_code = EXIT_CANCELLED
+        result.error = f"executor '{cli_name}' cancelled"
+        if options.on_error:
+            options.on_error(result.error)
+        return result
 
     if timed_out:
         result.timed_out = True
@@ -1481,6 +1541,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
 
     exit_code: int
     timed_out = False
+    cancelled = False
     try:
         if effective_secs is not None:
             deadline = started_mono + effective_secs
@@ -1489,6 +1550,29 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
                     exit_code = _normalise_exit_code(proc.wait(timeout=0.5))
                     break
                 except subprocess.TimeoutExpired:
+                    # 协作式取消（早于超时判定）：分级击杀进程组，标记 cancelled。
+                    if (not cancelled and options.cancel_event is not None
+                            and options.cancel_event.is_set()):
+                        cancelled = True
+                        for rid in list(pending_permission_ids):
+                            _write_permission_response({
+                                "request_id": rid,
+                                "behavior": "deny",
+                                "message": "cancelled",
+                            })
+                        _close_stdin()
+                        _signal_process_group(proc, signal.SIGTERM)
+                        try:
+                            proc.wait(timeout=profile["kill_grace_secs"])
+                        except subprocess.TimeoutExpired:
+                            _signal_process_group(proc, signal.SIGKILL)
+                        try:
+                            exit_code = proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            exit_code = EXIT_CANCELLED
+                        else:
+                            exit_code = EXIT_CANCELLED
+                        break
                     if drain_error:
                         # Drain-thread failure: surface it, kill the group,
                         # and end the turn with EXIT_ERROR (not a timeout).
@@ -1617,7 +1701,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     # common "command/file not found" patterns and surface a friendly hint.
     # Uses the head-capped stderr_full (1 MB) — the interpreter-startup errors
     # these patterns target land in the first bytes, well within the cap.
-    if not timed_out and not result.error and exit_code != 0:
+    if not timed_out and not cancelled and not result.error and exit_code != 0:
         stderr_text = "".join(stderr_full)
         hint = diagnose_stderr_failure(stderr_text)
         if hint:
@@ -1625,7 +1709,12 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             if options.on_error:
                 options.on_error(hint)
 
-    if timed_out:
+    if cancelled:
+        # 协作式取消：控制面意图，非错误（与 executor 路径同语义）。
+        result.exit_code = EXIT_CANCELLED
+        if not result.error:
+            result.error = "cancelled"
+    elif timed_out:
         result.timed_out = True
         result.exit_code = EXIT_TIMEOUT
     elif result.error:
@@ -1634,6 +1723,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         result.exit_code = exit_code
 
     result.duration = time.monotonic() - started_mono
-    if options.run_lock_key:
+    if options.run_lock_key and not cancelled:
         _run_lock.clear_run_lock(options.run_lock_key)
     return result
