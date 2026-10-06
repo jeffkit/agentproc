@@ -91,7 +91,7 @@ class TestIssue16LocaleDecoding:
         # plain=True: reply is the whole (stripped) stdout
         r = run_via_executor(
             {"cli_name": "test-cli", "plain": True,
-             "build_args": lambda msg, sid, env: [sys.executable, str(agent)]},
+             "build_args": lambda msg, sid, env, ctx: [sys.executable, str(agent)]},
             RunOptions(message="hi", timeout_secs=20),
         )
         assert r.exit_code == 0

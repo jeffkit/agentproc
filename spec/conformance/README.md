@@ -10,7 +10,11 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
   it as. The same file also carries an `env_compose` section: table-driven
   cases for the three-layer child-env policy (see
   [`cases.json` `env_compose` format](#casesjson-env_compose-format)) — one
-  fixture file, both runner internals.
+  fixture file, both runner internals. It also carries the permission-posture
+  matrix for in-process executors: `auto_approve_flags` (the argv tokens that
+  count as auto-approval) and `posture_cases` (per executor: which argv a turn
+  must produce, and whether the runner must refuse to spawn at all). See
+  [posture_cases format](#posture_cases-format).
 - `scenarios.json` — multi-line stdout sequences paired with the expected
   observable runner output (reply, session_id, error, exit_code, partials).
   Each scenario is a full agent turn (a sequence of NDJSON event lines),
@@ -75,8 +79,15 @@ Both reference SDKs run the same fixtures through their runners:
 - `diagnostics.json` → stderr diagnosis table:
   - Python: `sdk/python/tests/test_diagnostics.py` → `agentproc.runner.diagnose_stderr_failure` + `STDERR_DIAGNOSTICS`
   - Node:   `sdk/node/src/diagnostics.test.js`     → `runner.diagnoseStderrFailure` + `STDERR_DIAGNOSTICS`
+- `cases.json` `posture_cases` → in-process executor permission posture:
+  - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.run`
+  - Node:   `sdk/node/src/conformance.test.js`     → `runner.run`
+  - Rust:   `sdk/rust/src/conformance.rs`          → executor `build_args` + `posture_refusal`
+  Each driver also asserts that its SDK's embedded auto-approve flag list is
+  equal, item for item, to `auto_approve_flags` — the matrix is driven from
+  this file, so those lists must not drift.
 
-If the two disagree on any case or scenario, at least one of them fails. This
+If two SDKs disagree on any case or scenario, at least one of them fails. This
 is the guardrail that keeps the Python and Node implementations honest
 against the same spec text — for both single-line classification and full
 multi-line turns.
@@ -100,6 +111,12 @@ deadline expiring, partial forwarding around a kill, exit code 124. These are
 observable in `run()`, not in any single line's classification — `cases.json`
 carries `classify_line` / `classifyLine` cases and nothing else, so the
 `budget_secs` / `deadline` feature deliberately adds no case there.
+
+Whenever a spec change touches the **executor permission posture** (which argv
+an executor builds for `permission: true`, which executors declare
+`supportsPermission`, what the runner must refuse to spawn), add a
+`posture_cases` entry instead. It pins the decision for every executor at once
+and keeps the three SDKs from drifting apart on a security-relevant default.
 
 ## Event classification rule
 
@@ -168,6 +185,31 @@ present and string-typed.
 }
 ```
 
+### posture_cases format
+
+```json
+{
+  "auto_approve_flags": ["--dangerously-skip-permissions", "--yolo", "..."],
+  "posture_cases": [
+    {
+      "name": "<short description>",
+      "executor": "<executor name>",
+      "permission": true,
+      "env": {"AGENTPROC_AUTO_APPROVE": "0"},
+      "expect": {
+        "error": true,
+        "refused": true,
+        "exit_zero": false,
+        "reply": "ok",
+        "argv_contains": ["<argv token that must be present>"],
+        "argv_excludes": ["<argv token that must be absent>"]
+      }
+
+    }
+  ]
+}
+```
+
 `host_env` fakes the bridge's own environment — it is both the `${VAR}`
 expansion source and the environment the infra set is copied from (Python
 monkeypatches `os.environ` and deletes everything not listed; Node passes it
@@ -179,6 +221,33 @@ string but the key is still set) → `extra_env` (later layers override
 earlier). `expect_contains` lists exact key/value pairs that MUST be present
 and `expect_absent` lists names that MUST NOT appear at all — the latter is
 what proves no `{**host_env}` passthrough survives.
+
+`executor` names an in-process executor; the runner is driven with a profile
+`{executor, permission?}` and a fake CLI on `PATH` that records its own argv,
+so the case asserts observable behaviour rather than internal signatures.
+`permission` is omitted when the profile does not declare the field at all
+(which is not the same as `false`). `env` is written both to the runner
+process environment and to the per-run env extras, so the value reaches
+`AGENTPROC_AUTO_APPROVE` either way.
+
+`expect.error` (`true` = the turn must fail) and `expect.exit_zero` (the
+opposite) are mutually exclusive; `reply` is the expected reply body.
+`argv_contains` / `argv_excludes` are checked against the argument list the
+CLI actually received.
+
+`expect.refused` (`true` = the runner must never spawn the CLI) is the only
+field that distinguishes a posture refusal from any other failure: the driver
+MUST assert that the fake CLI's argv file does not exist, because a failing
+turn can also come from an unrecognised stdout body. When `refused` is set the
+token lists are not checked — no argv exists to check. The Python and Node
+drivers assert `refused` for every refusal case; the Rust driver asserts the
+refusal decision and the argv of a non-refused case only (`reply` /
+`exit_zero` need a real spawn and are likewise covered by the Python and Node
+drivers).
+
+`auto_approve_flags` is the single source of truth for "this argv token means
+auto-approve". Every SDK embeds the same list (the file is not shipped with
+the packages) and the conformance drivers assert equality with it.
 
 ### scenarios.json format
 

@@ -15,7 +15,12 @@
  *     installHint: string   — how to install the CLI
  *     plain:       boolean  — true = CLI emits plain text (not NDJSON);
  *                             false (default) = CLI emits NDJSON, use parseEvent
- *     buildArgs:   (message: string, sessionId: string, env: object) => string[]
+ *     buildArgs:   (message: string, sessionId: string, env: object,
+ *                   ctx: { permission?: boolean } | undefined) => string[]
+ *     supportsPermission: boolean — true only when the executor has a mid-turn
+ *                  approval channel (default falsy). The runner refuses to run
+ *                  a profile with `permission: true` against an executor that
+ *                  does not declare it.
  *     parseEvent:  (event: object) => ParseResult | null
  *                  (omitted / irrelevant when plain: true)
  *     makeHandlers:  () => { buildArgs, parseEvent?, getSessionId? }
@@ -58,8 +63,27 @@ const claudeCode = {
   cliName: 'claude',
   installHint: 'Install: npm install -g @anthropic-ai/claude-code',
   plain: false,
+  supportsPermission: true,
 
-  buildArgs(message, sessionId, env) {
+  buildArgs(message, sessionId, env, ctx) {
+    const disallow = (env.CLAUDE_DISALLOW_TOOLS || 'AskUserQuestion').trim();
+    const model = (env.CLAUDE_MODEL || '').trim();
+    if (ctx && ctx.permission) {
+      // Bidirectional stream-json + stdio permission tool. The user message
+      // is delivered via stdin, not argv.
+      const args = [
+        'claude', '--print',
+        '--output-format', 'stream-json',
+        '--input-format', 'stream-json',
+        '--verbose',
+        '--permission-prompt-tool', 'stdio',
+        '--permission-mode', 'default',
+      ];
+      if (disallow) args.push('--disallowed-tools', disallow);
+      if (model) args.push('--model', model);
+      if (sessionId) args.push('--resume', sessionId);
+      return args;
+    }
     const args = [
       'claude', '-p', message,
       '--output-format', 'stream-json',
@@ -67,9 +91,7 @@ const claudeCode = {
       '--verbose',
       '--dangerously-skip-permissions',
     ];
-    const disallow = (env.CLAUDE_DISALLOW_TOOLS || 'AskUserQuestion').trim();
     if (disallow) args.push('--disallowed-tools', disallow);
-    const model = (env.CLAUDE_MODEL || '').trim();
     if (model) args.push('--model', model);
     if (sessionId) args.push('--resume', sessionId);
     return args;
@@ -108,7 +130,7 @@ const codebuddy = {
   installHint: 'See your internal CodeBuddy installation docs.',
   plain: false,
 
-  buildArgs(message, sessionId, env) {
+  buildArgs(message, sessionId, env, ctx) {
     const args = [
       'codebuddy', '-p', message,
       '--output-format', 'stream-json',
@@ -151,7 +173,7 @@ const codex = {
   installHint: 'Install: npm install -g @openai/codex',
   plain: false,
 
-  buildArgs(message, sessionId, env) {
+  buildArgs(message, sessionId, env, ctx) {
     const model = (env.CODEX_MODEL || '').trim();
     if (sessionId) {
       const args = ['codex', 'exec', 'resume', '--json', sessionId, message];
@@ -198,7 +220,7 @@ const cursor = {
   makeHandlers() {
     const accumulated = [];
 
-    function buildArgs(message, sessionId, env) {
+    function buildArgs(message, sessionId, env, ctx) {
       const args = [
         'agent', '-p', message,
         '--output-format', 'stream-json',
@@ -252,7 +274,7 @@ const geminiCli = {
   installHint: 'Install: npm install -g @google/gemini-cli',
   plain: false,
 
-  buildArgs(message, sessionId, env) {
+  buildArgs(message, sessionId, env, ctx) {
     const args = [
       'gemini', '-p', message,
       '--output-format', 'stream-json',
@@ -306,7 +328,7 @@ const kimiCode = {
   makeHandlers() {
     const session = { id: null };
 
-    function buildArgs(message, sessionId, env) {
+    function buildArgs(message, sessionId, env, ctx) {
       session.id = sessionId || crypto.randomUUID();
       const args = [
         'kimi', '--print', '-p', message,
@@ -341,7 +363,7 @@ const opencode = {
   installHint: 'Install: npm install -g opencode-ai  (or: curl -fsSL https://opencode.ai/install | bash)',
   plain: false,
 
-  buildArgs(message, sessionId, env) {
+  buildArgs(message, sessionId, env, ctx) {
     const args = ['opencode', 'run', message, '--auto', '--format', 'json'];
     if (sessionId) args.push('--session', sessionId);
     const model = (env.OPENCODE_MODEL || '').trim();
@@ -382,7 +404,7 @@ const qwenCode = {
   installHint: 'Install: npm install -g @qwen-code/qwen-code',
   plain: false,
 
-  buildArgs(message, sessionId, env) {
+  buildArgs(message, sessionId, env, ctx) {
     const args = [
       'qwen', '-p', message,
       '--output-format', 'stream-json',
@@ -436,7 +458,7 @@ const agy = {
   makeHandlers() {
     const session = { id: null };
 
-    function buildArgs(message, sessionId, env) {
+    function buildArgs(message, sessionId, env, ctx) {
       session.id = sessionId || crypto.randomUUID();
       const args = ['agy', '--print', message, '--conversation', session.id];
       if ((env.AGY_DANGEROUSLY_SKIP_PERMISSIONS || '1') === '1') {
@@ -460,7 +482,7 @@ const aider = {
   installHint: 'Install: pip install aider-chat',
   plain: true,
 
-  buildArgs(message, _sessionId, env) {
+  buildArgs(message, _sessionId, env, ctx) {
     const args = [
       'aider',
       '--message', message,
@@ -479,7 +501,7 @@ const deepseek = {
   installHint: 'Install from https://deepseek.com/downloads or: brew install deepseek',
   plain: true,
 
-  buildArgs(message, _sessionId, env) {
+  buildArgs(message, _sessionId, env, ctx) {
     const args = ['deepseek', 'exec', '-p', message];
     const model = (env.DEEPSEEK_MODEL || '').trim();
     if (model) args.push('--model', model);
@@ -508,7 +530,7 @@ const dsh = {
   installHint: 'Install: npm install -g @deepseek-ai/dsh',
   plain: true,
 
-  buildArgs(message) {
+  buildArgs(message, _sessionId, env, ctx) {
     return ['dsh', '--profile', 'headless', message];
   },
 };
@@ -549,7 +571,7 @@ const grokBuild = {
       return chunk;
     }
 
-    function buildArgs(message, sessionId, env) {
+    function buildArgs(message, sessionId, env, ctx) {
       const args = [
         'grok', '-p', message,
         '--output-format', 'streaming-json',
@@ -604,7 +626,7 @@ const pi = {
   installHint: 'Install: npm install -g @earendil-works/pi-coding-agent',
   plain: true,
 
-  buildArgs(message, _sessionId, env) {
+  buildArgs(message, _sessionId, env, ctx) {
     const args = ['pi', '-p', message, '--approve'];
     if ((env.PI_NO_EXTENSIONS || '1') !== '0') args.push('--no-extensions');
     const model = (env.PI_MODEL || '').trim();

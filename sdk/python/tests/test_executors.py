@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -53,6 +55,10 @@ class TestRegistry(unittest.TestCase):
         plain_executors = {"agy", "aider", "deepseek", "dsh", "pi"}
         for name in plain_executors:
             self.assertTrue(EXECUTORS[name].get("plain"), f"executor '{name}' should be plain")
+
+    def test_supports_permission_only_for_claude_code(self):
+        supporting = [n for n in self.REQUIRED_NAMES if EXECUTORS[n].get("supports_permission")]
+        self.assertEqual(supporting, ["claude-code"])
 
     def test_ndjson_executors_have_parse_event_or_make_handlers(self):
         ndjson_executors = {"claude-code", "codebuddy", "codex", "cursor", "gemini-cli",
@@ -110,6 +116,16 @@ class TestClaudeCodeBuildArgs(unittest.TestCase):
         self.assertIn("--disallowed-tools", args)
         idx = args.index("--disallowed-tools")
         self.assertEqual(args[idx + 1], "AskUserQuestion")
+
+    def test_permission_ctx_switches_to_approval_channel(self):
+        ex = EXECUTORS["claude-code"]
+        args = ex["build_args"]("hello", "", {}, {"permission": True})
+        self.assertIn("--permission-prompt-tool", args)
+        self.assertEqual(args[args.index("--permission-prompt-tool") + 1], "stdio")
+        self.assertIn("--print", args)
+        self.assertIn("--input-format", args)
+        self.assertNotIn("--dangerously-skip-permissions", args)
+        self.assertNotIn("hello", args)
 
 
 class TestCodexBuildArgs(unittest.TestCase):
@@ -275,7 +291,7 @@ class TestRunViaExecutorPlain(unittest.TestCase):
     def _make_plain_executor(self):
         session = {"id": None}
 
-        def build_args(message, session_id, env):
+        def build_args(message, session_id, env, ctx):
             session["id"] = session_id or "generated-id"
             return ["echo", message]
 
@@ -312,7 +328,7 @@ class TestRunViaExecutorPlain(unittest.TestCase):
         self.assertIn("cb-sess", captured)
 
     def test_missing_command_returns_error(self):
-        def build_args(message, session_id, env):
+        def build_args(message, session_id, env, ctx):
             return ["__nonexistent_cmd_agentproc__", message]
 
         ex = {
@@ -333,7 +349,7 @@ class TestRunViaExecutorNDJSON(unittest.TestCase):
     def _make_ndjson_executor(self, output_lines):
         joined = "\n".join(output_lines)
 
-        def build_args(message, session_id, env):
+        def build_args(message, session_id, env, ctx):
             return ["echo", joined]
 
         def parse_event(event):
@@ -377,7 +393,7 @@ class TestOnProtocolLineContract(unittest.TestCase):
     def test_plain_path_forwards_lines(self):
         ex = {
             "cli_name": "echo-plain", "install_hint": "", "plain": True,
-            "build_args": lambda m, s, e: ["echo", '{"type":"result","text":"ok"}'],
+            "build_args": lambda m, s, e, c: ["echo", '{"type":"result","text":"ok"}'],
         }
         seen = []
         result = run_via_executor(ex, _make_opts(on_protocol_line=seen.append))
@@ -395,7 +411,7 @@ class TestOnProtocolLineContract(unittest.TestCase):
         ex = {
             "cli_name": "echo-ndjson", "install_hint": "", "plain": False,
             # printf 对每个参数复用格式串 → 每行一个事件
-            "build_args": lambda m, s, e: (
+            "build_args": lambda m, s, e, c: (
                 ["printf", "%s\n"] + lines),
             "parse_event": lambda e: (
                 {"final_text": e.get("result")} if e.get("type") == "result" else None),
@@ -463,6 +479,83 @@ class TestRunWithExecutorProfile(unittest.TestCase):
                 "agy" in combined or "not found" in combined or "install" in combined.lower(),
                 f"Unexpected error: {combined}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Permission posture on the executor path (spec doc 1.6)
+# ---------------------------------------------------------------------------
+
+# Fake CLI: record every argv token in <dir>/argv.txt, then report a clean turn.
+_SHIM = """#!/usr/bin/env bash
+printf '%s\\n' "$@" > {argv_file}
+echo '{{"type":"result","result":"ok","session_id":"sess-1"}}'
+"""
+
+
+class TestPermissionPosture(unittest.TestCase):
+    """`permission: true` and `AGENTPROC_AUTO_APPROVE=0` must fail closed.
+
+    Observable-only: a fake CLI on PATH records its own argv, so the test
+    pins what the CLI would have received (or that it was never spawned).
+    """
+
+    def _run(self, executor_name, permission=None, env=None):
+        from agentproc.runner import run
+        cli_name = EXECUTORS[executor_name]["cli_name"]
+        env = env or {}
+        with tempfile.TemporaryDirectory(prefix="ap-posture-") as tmpdir:
+            argv_file = Path(tmpdir) / "argv.txt"
+            shim = Path(tmpdir) / cli_name
+            shim.write_text(_SHIM.format(argv_file=str(argv_file)))
+            shim.chmod(0o755)
+            # `env` is written to the runner process environment and to the
+            # per-run env extras, so AGENTPROC_AUTO_APPROVE reaches the runner
+            # regardless of which of the two it reads.
+            environ = {
+                "PATH": tmpdir + os.pathsep + os.environ["PATH"],
+                "AGENTPROC_AUTO_APPROVE": env.get("AGENTPROC_AUTO_APPROVE", ""),
+            }
+            profile = {"executor": executor_name}
+            if permission is not None:
+                profile["permission"] = permission
+            with patch.dict(os.environ, environ, clear=False):
+                result = run(profile, RunOptions(message="hi", extra_env=env))
+            argv = argv_file.read_text().splitlines() if argv_file.exists() else None
+        return result, argv
+
+    def test_permission_true_with_channelless_executor_is_never_spawned(self):
+        result, argv = self._run("gemini-cli", permission=True)
+        self.assertIsNone(argv, f"gemini-cli was spawned with {argv}")
+        self.assertNotEqual(result.error, "", "expected a hard failure, got a silent run")
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("permission", result.error.lower())
+
+    def test_auto_approve_off_refuses_auto_approve_argv(self):
+        result, argv = self._run(
+            "gemini-cli", env={"AGENTPROC_AUTO_APPROVE": "0"},
+        )
+        self.assertIsNone(argv, f"gemini-cli was spawned with {argv}")
+        self.assertNotEqual(result.error, "")
+        self.assertNotEqual(result.exit_code, 0)
+
+    def test_auto_approve_off_still_allows_the_approval_channel(self):
+        result, argv = self._run(
+            "claude-code", permission=True, env={"AGENTPROC_AUTO_APPROVE": "0"},
+        )
+        self.assertIsNotNone(argv, f"claude-code was never spawned: {result.error}")
+        self.assertIn("--permission-prompt-tool", argv)
+        self.assertNotIn("--dangerously-skip-permissions", argv)
+        self.assertEqual(result.error, "")
+        self.assertEqual(result.exit_code, 0)
+
+    def test_auto_approve_off_is_case_insensitive(self):
+        for value in ("0", "FALSE", "  false  "):
+            with self.subTest(value=value):
+                result, argv = self._run(
+                    "claude-code", env={"AGENTPROC_AUTO_APPROVE": value},
+                )
+                self.assertIsNone(argv, f"{value!r} did not fail closed: {argv}")
+                self.assertNotEqual(result.exit_code, 0)
 
 
 if __name__ == "__main__":

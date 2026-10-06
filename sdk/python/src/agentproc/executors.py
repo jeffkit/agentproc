@@ -12,7 +12,12 @@ Each executor is a dict (or object with the same keys) containing:
     install_hint: str   — how to install the CLI
     plain:        bool  — True = CLI emits plain text (not NDJSON);
                           False (default) = CLI emits NDJSON, use parse_event
-    build_args:   (message: str, session_id: str, env: dict) -> list[str]
+    build_args:   (message: str, session_id: str, env: dict, ctx: dict | None)
+                  -> list[str]
+    supports_permission: bool — True only when the executor has a mid-turn
+                  approval channel (default False). The runner refuses to run
+                  a profile with `permission: true` against an executor that
+                  does not declare it.
     parse_event:  (event: dict) -> ParseResult | None
                   (omitted / irrelevant when plain: True)
     make_handlers: () -> {"build_args": ..., "parse_event"?: ..., "get_session_id"?: ...}
@@ -49,7 +54,32 @@ __all__ = ["EXECUTORS", "executor_names"]
 # claude-code
 # ---------------------------------------------------------------------------
 
-def _claude_code_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _claude_code_build_args(
+    message: str,
+    session_id: str,
+    env: Dict[str, str],
+    ctx: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    disallow = env.get("CLAUDE_DISALLOW_TOOLS", "AskUserQuestion").strip()
+    model = env.get("CLAUDE_MODEL", "").strip()
+    if ctx and ctx.get("permission"):
+        # Bidirectional stream-json + stdio permission tool. The user message
+        # is delivered via stdin, not argv.
+        args = [
+            "claude", "--print",
+            "--output-format", "stream-json",
+            "--input-format", "stream-json",
+            "--verbose",
+            "--permission-prompt-tool", "stdio",
+            "--permission-mode", "default",
+        ]
+        if disallow:
+            args += ["--disallowed-tools", disallow]
+        if model:
+            args += ["--model", model]
+        if session_id:
+            args += ["--resume", session_id]
+        return args
     args = [
         "claude", "-p", message,
         "--output-format", "stream-json",
@@ -57,10 +87,8 @@ def _claude_code_build_args(message: str, session_id: str, env: Dict[str, str]) 
         "--verbose",
         "--dangerously-skip-permissions",
     ]
-    disallow = env.get("CLAUDE_DISALLOW_TOOLS", "AskUserQuestion").strip()
     if disallow:
         args += ["--disallowed-tools", disallow]
-    model = env.get("CLAUDE_MODEL", "").strip()
     if model:
         args += ["--model", model]
     if session_id:
@@ -93,6 +121,7 @@ CLAUDE_CODE = {
     "cli_name": "claude",
     "install_hint": "Install: npm install -g @anthropic-ai/claude-code",
     "plain": False,
+    "supports_permission": True,
     "build_args": _claude_code_build_args,
     "parse_event": _claude_code_parse_event,
 }
@@ -101,7 +130,7 @@ CLAUDE_CODE = {
 # codebuddy
 # ---------------------------------------------------------------------------
 
-def _codebuddy_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _codebuddy_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = [
         "codebuddy", "-p", message,
         "--output-format", "stream-json",
@@ -146,7 +175,7 @@ CODEBUDDY = {
 # codex
 # ---------------------------------------------------------------------------
 
-def _codex_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _codex_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     model = env.get("CODEX_MODEL", "").strip()
     if session_id:
         args = ["codex", "exec", "resume", "--json", session_id, message]
@@ -192,7 +221,7 @@ CODEX = {
 def _make_cursor_handlers() -> Dict[str, Any]:
     accumulated: List[str] = []
 
-    def build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+    def build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
         args = [
             "agent", "-p", message,
             "--output-format", "stream-json",
@@ -244,7 +273,7 @@ CURSOR = {
 # gemini-cli
 # ---------------------------------------------------------------------------
 
-def _gemini_cli_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _gemini_cli_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = ["gemini", "-p", message, "--output-format", "stream-json", "--yolo"]
     if (env.get("GEMINI_SANDBOX") or "").strip().lower() == "false":
         args += ["--sandbox", "false"]
@@ -292,7 +321,7 @@ GEMINI_CLI = {
 def _make_kimi_code_handlers() -> Dict[str, Any]:
     session: Dict[str, Optional[str]] = {"id": None}
 
-    def build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+    def build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
         session["id"] = session_id or str(uuid.uuid4())
         args = [
             "kimi", "--print", "-p", message,
@@ -325,7 +354,7 @@ KIMI_CODE = {
 # opencode
 # ---------------------------------------------------------------------------
 
-def _opencode_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _opencode_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = ["opencode", "run", message, "--auto", "--format", "json"]
     if session_id:
         args += ["--session", session_id]
@@ -365,7 +394,7 @@ OPENCODE = {
 # qwen-code
 # ---------------------------------------------------------------------------
 
-def _qwen_code_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _qwen_code_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = ["qwen", "-p", message, "--output-format", "stream-json", "--yolo"]
     if (env.get("QWEN_SANDBOX") or "").strip().lower() == "false":
         args += ["--sandbox", "false"]
@@ -417,7 +446,7 @@ QWEN_CODE = {
 def _make_agy_handlers() -> Dict[str, Any]:
     session: Dict[str, Optional[str]] = {"id": None}
 
-    def build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+    def build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
         session["id"] = session_id or str(uuid.uuid4())
         args = ["agy", "--print", message, "--conversation", session["id"]]
         if (env.get("AGY_DANGEROUSLY_SKIP_PERMISSIONS") or "1") == "1":
@@ -441,7 +470,7 @@ AGY = {
 }
 
 
-def _aider_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _aider_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = ["aider", "--message", message, "--yes-always", "--no-show-release-notes", "--no-stream"]
     model = env.get("AIDER_MODEL", "").strip()
     if model:
@@ -457,7 +486,7 @@ AIDER = {
 }
 
 
-def _deepseek_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _deepseek_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = ["deepseek", "exec", "-p", message]
     model = env.get("DEEPSEEK_MODEL", "").strip()
     if model:
@@ -473,7 +502,7 @@ DEEPSEEK = {
 }
 
 
-def _dsh_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _dsh_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     return ["dsh", "--profile", "headless", message]
 
 
@@ -485,7 +514,7 @@ DSH = {
 }
 
 
-def _pi_build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+def _pi_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     args = ["pi", "-p", message, "--approve"]
     if (env.get("PI_NO_EXTENSIONS") or "1") != "0":
         args.append("--no-extensions")
@@ -535,7 +564,7 @@ def _make_grok_build_handlers() -> Dict[str, Any]:
         pending = ""
         return chunk
 
-    def build_args(message: str, session_id: str, env: Dict[str, str]) -> List[str]:
+    def build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
         args = [
             "grok", "-p", message,
             "--output-format", "streaming-json",

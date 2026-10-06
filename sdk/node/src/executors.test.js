@@ -18,7 +18,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const { EXECUTORS, executorNames } = require('./executors.js');
-const { runViaExecutor, normalizeProfile, isValidSessionId } = require('./runner.js');
+const { run, runViaExecutor, normalizeProfile, isValidSessionId } = require('./runner.js');
 
 // ---------------------------------------------------------------------------
 // 1. Registry shape
@@ -69,6 +69,11 @@ describe('EXECUTORS registry', () => {
       assert.ok(!EXECUTORS[name].plain, `${name}: expected plain to be falsy`);
     }
   });
+
+  test('only claude-code declares supportsPermission', () => {
+    const supporting = EXPECTED_NAMES.filter((n) => EXECUTORS[n].supportsPermission);
+    assert.deepStrictEqual(supporting, ['claude-code']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -103,6 +108,16 @@ describe('buildArgs — claude-code', () => {
   test('empty CLAUDE_MODEL does not add --model', () => {
     const args = buildArgs('hi', '', { CLAUDE_MODEL: '' });
     assert.ok(!args.includes('--model'));
+  });
+
+  test('permission ctx switches to the approval channel', () => {
+    const args = buildArgs('hello', '', {}, { permission: true });
+    assert.ok(args.includes('--permission-prompt-tool'), `argv: ${args}`);
+    assert.strictEqual(args[args.indexOf('--permission-prompt-tool') + 1], 'stdio');
+    assert.ok(args.includes('--print'));
+    assert.ok(args.includes('--input-format'));
+    assert.ok(!args.includes('--dangerously-skip-permissions'), `argv: ${args}`);
+    assert.ok(!args.includes('hello'), 'the message is delivered via stdin, not argv');
   });
 });
 
@@ -533,5 +548,88 @@ describe('runViaExecutor — NDJSON executor', () => {
     assert.strictEqual(r.reply, '');
     assert.strictEqual(r.error, '');
     assert.strictEqual(r.exitCode, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Permission posture (spec doc 1.6)
+// ---------------------------------------------------------------------------
+//
+// `permission: true` and `AGENTPROC_AUTO_APPROVE=0` must fail closed.
+// Observable-only: a fake CLI on PATH records its own argv, so these tests pin
+// what the CLI would have received — or that it was never spawned.
+
+describe('permission posture — executor path', () => {
+  const SHIM = `#!/usr/bin/env bash
+printf '%s\\n' "$@" > {argvFile}
+echo '{"type":"result","result":"ok","session_id":"sess-1"}'
+`;
+
+  /** Run with a fake CLI on PATH; returns { result, argv } (argv null = never spawned). */
+  async function runWithShim(executorName, { permission, env = {} } = {}) {
+    const cliName = EXECUTORS[executorName].cliName;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-posture-'));
+    const argvFile = path.join(dir, 'argv.txt');
+    fs.writeFileSync(path.join(dir, cliName), SHIM.replace('{argvFile}', argvFile), { mode: 0o755 });
+
+    const savedPath = process.env.PATH;
+    const savedEnv = { AGENTPROC_AUTO_APPROVE: process.env.AGENTPROC_AUTO_APPROVE };
+    process.env.PATH = `${dir}${path.delimiter}${savedPath}`;
+    // Written to the runner process env and to the per-run env extras, so the
+    // knob reaches the runner either way; blanking it keeps the ambient
+    // environment from leaking into the case.
+    process.env.AGENTPROC_AUTO_APPROVE = env.AGENTPROC_AUTO_APPROVE || '';
+
+    const profile = { executor: executorName };
+    if (permission !== undefined) profile.permission = permission;
+
+    let result;
+    try {
+      result = await run(profile, { message: 'hi', extraEnv: env });
+    } finally {
+      process.env.PATH = savedPath;
+      if (savedEnv.AGENTPROC_AUTO_APPROVE === undefined) delete process.env.AGENTPROC_AUTO_APPROVE;
+      else process.env.AGENTPROC_AUTO_APPROVE = savedEnv.AGENTPROC_AUTO_APPROVE;
+    }
+
+    const argv = fs.existsSync(argvFile)
+      ? fs.readFileSync(argvFile, 'utf8').split('\n').filter(Boolean)
+      : null;
+    return { result, argv };
+  }
+
+  test('permission:true + channelless executor → never spawned, error', async () => {
+    const { result, argv } = await runWithShim('gemini-cli', { permission: true });
+    assert.strictEqual(argv, null, `gemini-cli was spawned with ${argv}`);
+    assert.notStrictEqual(result.error, '', 'expected a hard failure, got a silent run');
+    assert.notStrictEqual(result.exitCode, 0);
+    assert.match(result.error.toLowerCase(), /permission/);
+  });
+
+  test('AGENTPROC_AUTO_APPROVE=0 → auto-approve argv is never spawned', async () => {
+    const { result, argv } = await runWithShim('gemini-cli', { env: { AGENTPROC_AUTO_APPROVE: '0' } });
+    assert.strictEqual(argv, null, `gemini-cli was spawned with ${argv}`);
+    assert.notStrictEqual(result.error, '');
+    assert.notStrictEqual(result.exitCode, 0);
+  });
+
+  test('AGENTPROC_AUTO_APPROVE is case-insensitive and trimmed', async () => {
+    for (const value of ['0', 'FALSE', '  false  ']) {
+      const { result, argv } = await runWithShim('claude-code', { env: { AGENTPROC_AUTO_APPROVE: value } });
+      assert.strictEqual(argv, null, `${JSON.stringify(value)} did not fail closed: ${argv}`);
+      assert.notStrictEqual(result.exitCode, 0);
+    }
+  });
+
+  test('AGENTPROC_AUTO_APPROVE=0 still allows the approval channel', async () => {
+    const { result, argv } = await runWithShim('claude-code', {
+      permission: true,
+      env: { AGENTPROC_AUTO_APPROVE: '0' },
+    });
+    assert.ok(argv, `claude-code was never spawned: ${result.error}`);
+    assert.ok(argv.includes('--permission-prompt-tool'), `argv: ${argv}`);
+    assert.ok(!argv.includes('--dangerously-skip-permissions'), `argv: ${argv}`);
+    assert.strictEqual(result.error, '');
+    assert.strictEqual(result.exitCode, 0);
   });
 });

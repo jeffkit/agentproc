@@ -203,11 +203,24 @@ function probeSupport() {
 }
 
 /**
+ * AGENTPROC_AUTO_APPROVE=0 / false disables the injected auto-approve default.
+ *
+ * Read from the bridge's own process environment (spec: a process-side knob,
+ * not a profile field) — pass it through the profile `env:` block or `--env`.
+ */
+function autoApproveEnabled() {
+  const value = String(process.env.AGENTPROC_AUTO_APPROVE || '').trim().toLowerCase();
+  return value !== '0' && value !== 'false';
+}
+
+/**
  * Child environment. Unattended default: auto-approve tools — the same
  * posture as the claude-code profile's --dangerously-skip-permissions
  * default. dsh's own default is "ask", which has no UI to answer it in
  * headless mode, so we only leave it when the operator explicitly set a
  * stricter mode (workspace-write / read-only lean on the sandbox instead).
+ * Under AGENTPROC_AUTO_APPROVE=0 the default is not injected at all, leaving
+ * dsh's own "ask" default in place (fail-closed).
  *
  * The runner expands unset `${VAR}` references in the profile env block to
  * empty strings, and dsh validates several of these as real values (e.g.
@@ -219,7 +232,7 @@ function childEnv() {
   for (const key of ['DEEPSEEK_API_KEY', 'DSH_PERMISSION_MODE', 'DSH_TOOLS_MODE']) {
     if (env[key] === '') delete env[key];
   }
-  if (!env.DSH_PERMISSION_MODE) env.DSH_PERMISSION_MODE = 'danger-full-access';
+  if (!env.DSH_PERMISSION_MODE && autoApproveEnabled()) env.DSH_PERMISSION_MODE = 'danger-full-access';
   return env;
 }
 

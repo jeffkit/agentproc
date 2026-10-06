@@ -49,7 +49,7 @@ def _fake_executor(agent_path):
     return {
         "cli_name": "test-cli",
         "plain": False,
-        "build_args": lambda message, session_id, env: [str(agent_path)],
+        "build_args": lambda message, session_id, env, ctx: [str(agent_path)],
         "parse_event": lambda event: {"final_text": event.get("text", "")},
     }
 
@@ -60,7 +60,7 @@ def _register(monkeypatch, name, executor):
 
 
 def _result_executor(agent, capture=None):
-    def _build_args(message, session_id, env):
+    def _build_args(message, session_id, env, ctx):
         if capture is not None:
             capture.update(env)
         return [str(agent)]

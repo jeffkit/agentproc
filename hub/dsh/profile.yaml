@@ -29,6 +29,11 @@ agentproc:
     # DSH_PERMISSION_MODE to danger-full-access when unset (same convention as
     # the claude-code profile's --dangerously-skip-permissions default).
     # Set DSH_PERMISSION_MODE here to override (workspace-write / read-only).
+    # Set AGENTPROC_AUTO_APPROVE=0 in the bridge's own environment (via the CLI
+    # `--env` flag, or by uncommenting the pass-through below *with* the
+    # matching env_allowlist entry) and the bridge injects no default at all,
+    # leaving dsh's own "ask" policy in place.
+    # AGENTPROC_AUTO_APPROVE: "${AGENTPROC_AUTO_APPROVE}"
     DSH_PERMISSION_MODE: "${DSH_PERMISSION_MODE}"
     DSH_TOOLS_MODE: "${DSH_TOOLS_MODE}"
   env_allowlist: [DEEPSEEK_API_KEY, DSH_PERMISSION_MODE, DSH_TOOLS_MODE]
@@ -58,9 +63,12 @@ notes: |
   and maps the rest 1:1 (output/total/cache/reasoning).
 
   No mid-turn tool authorization: dsh headless has no stdio approval channel,
-  so `permission: true` is not supported. The bridge defaults
+  so `permission: true` is not supported — the SDK executor hard-fails, and
+  this bridge injects no approval argv. The bridge defaults
   DSH_PERMISSION_MODE=danger-full-access for unattended runs (auto-approve);
-  override to workspace-write / read-only to lean on the sandbox instead.
+  override to workspace-write / read-only to lean on the sandbox instead, or
+  set AGENTPROC_AUTO_APPROVE=0 in the bridge's own environment to suppress the
+  injected default entirely (dsh's own "ask" policy then applies).
 
   Attachments are appended to the task text as reference URLs — dsh's web
   tool may fetch public URLs; local file paths are not readable this way.

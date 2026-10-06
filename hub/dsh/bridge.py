@@ -196,13 +196,26 @@ def probe_support() -> dict:
     return _support_cache
 
 
+def _auto_approve_enabled() -> bool:
+    """AGENTPROC_AUTO_APPROVE=0 / false disables the injected auto-approve default.
+
+    Read from the bridge's own process environment (spec: a process-side knob,
+    not a profile field) — pass it through the profile `env:` block or `--env`.
+    """
+    return os.environ.get("AGENTPROC_AUTO_APPROVE", "").strip().lower() not in ("0", "false")
+
+
 def child_env() -> dict:
-    """Unattended default: auto-approve tools (see bridge.js for rationale)."""
+    """Unattended default: auto-approve tools (see bridge.js for rationale).
+
+    The default is skipped entirely under AGENTPROC_AUTO_APPROVE=0, leaving
+    dsh's own "ask" default in place (fail-closed).
+    """
     env = dict(os.environ)
     for key in ("DEEPSEEK_API_KEY", "DSH_PERMISSION_MODE", "DSH_TOOLS_MODE"):
         if env.get(key) == "":
             del env[key]
-    if not env.get("DSH_PERMISSION_MODE"):
+    if not env.get("DSH_PERMISSION_MODE") and _auto_approve_enabled():
         env["DSH_PERMISSION_MODE"] = "danger-full-access"
     return env
 

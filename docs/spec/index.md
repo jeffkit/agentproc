@@ -142,7 +142,7 @@ User-readable error. Honored **regardless** of `streaming` mode. The bridge forw
 
 ### Optional tool permission
 
-Opt-in via profile `permission: true`. Not general HIL — tool authorization only. CLIs without a mid-turn approval channel keep using `--dangerously-skip-permissions` / `--yolo`.
+Opt-in via profile `permission: true`. Not general HIL — tool authorization only. On the in-process executor path `permission: true` is only accepted by an executor that declares an approval channel (`claude-code` today); every other executor refuses to run — an `error` event plus a non-zero exit code, never a silent fallback to `--dangerously-skip-permissions` / `--yolo`. Profiles that do not ask for permission keep those auto-approve flags, and `AGENTPROC_AUTO_APPROVE=0` / `false` turns any of them into the same refusal.
 
 ```
 {"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}

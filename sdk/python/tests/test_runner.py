@@ -873,7 +873,7 @@ class TestExecutorPathProfileFields:
         fake = {
             "cli_name": "agentproc-test-exec",
             "plain": False,
-            "build_args": lambda message, session_id, env: [str(agent)],
+            "build_args": lambda message, session_id, env, ctx: [str(agent)],
             "parse_event": lambda event: (
                 {"final_text": event.get("text", "")}
                 if event.get("type") == "result"

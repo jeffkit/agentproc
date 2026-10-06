@@ -103,6 +103,7 @@ Environment (in the profile `env` block, overridable by your bridge env):
 | `DSH_PERMISSION_MODE` | `danger-full-access` (bridge default) | Tool authorization posture — see below |
 | `DSH_TOOLS_MODE` | — | Optional dsh Code Mode opt-in |
 | `DSH_TIMEOUT` | `1800` | Per-turn process timeout (seconds) |
+| `AGENTPROC_AUTO_APPROVE` | — | Read from the **bridge's own** environment; `0` / `false` stops the bridge injecting `DSH_PERMISSION_MODE=danger-full-access` |
 
 ### Tool authorization posture
 
@@ -118,6 +119,28 @@ env:
 
 Note: with an "ask" policy (workspace-write), a headless ask may stall or deny —
 prefer `read-only` for strict unattended runs.
+
+That default is a controllable switch, not a hard-coded deployment posture:
+`AGENTPROC_AUTO_APPROVE=0` (or `false`, case-insensitive) makes the bridge skip
+the injection entirely, leaving dsh's own "ask" policy in place (fail-closed).
+It does **not** override an explicit `DSH_PERMISSION_MODE` from the profile —
+only the bridge's own default.
+
+The variable is a process-side knob read from the bridge's environment, and the
+runner's child env only carries the infra set + the profile `env` block +
+`--env` extras, so you have to pass it in explicitly:
+
+```
+# CLI flag — simplest
+agentproc ... --env AGENTPROC_AUTO_APPROVE=0
+```
+
+```yaml
+# profile env block — note the env_allowlist entry, or ${VAR} expands to ""
+env:
+  AGENTPROC_AUTO_APPROVE: "${AGENTPROC_AUTO_APPROVE}"
+env_allowlist: [DEEPSEEK_API_KEY, DSH_PERMISSION_MODE, DSH_TOOLS_MODE, AGENTPROC_AUTO_APPROVE]
+```
 
 ## Limitations and upgrade paths
 

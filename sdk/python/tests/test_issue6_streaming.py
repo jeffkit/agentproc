@@ -47,7 +47,7 @@ SLOW_AGENT = (
 
 
 def _ndjson_executor(script):
-    def build_args(message, session_id, env):
+    def build_args(message, session_id, env, ctx):
         return [sys.executable, "-c", script]
 
     def parse_event(event):

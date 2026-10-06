@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.6`
+**Document revision:** `1.7`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -122,6 +122,15 @@ Bridges expand `${VAR}` using POSIX-shell semantics: unknown variables expand to
 
 Hub fetches read from the repo's `main` branch by default. Setting the bridge-side environment variable `AGENTPROC_HUB_REF` to a tag, branch, or commit sha pins every hub fetch (profile files, `_shared/` helpers, repo tree listing) to that exact ref. This is a **fetch-and-exec trust knob, not a sandbox**: pinning a ref makes the fetched bytes reproducible, but the fetched profile is still executed with whatever trust you already grant it — the default (`main`) means "trust whatever the repo maintainers merged most recently". The profile cache is keyed by ref: changing the variable invalidates previous cache entries, so a pinned run never silently serves a `main` copy (and vice versa).
 
+#### Denying auto-approve argv — `AGENTPROC_AUTO_APPROVE`
+
+The in-process executor path has no approval channel for most CLIs, so profiles that do not set `permission: true` run with whatever auto-approve flag the executor bakes into argv (`--dangerously-skip-permissions`, `--yolo`, …). Setting the bridge-side environment variable `AGENTPROC_AUTO_APPROVE` to `0` or `false` (case-insensitive, surrounding whitespace ignored) makes the runner **refuse** to spawn a CLI whose argv contains one of those tokens, failing the turn instead (an `error` event + a non-zero exit code). Any other value, including an unset variable, keeps the current behaviour.
+
+- **Scope.** The variable is read from the runner/bridge process's own environment — like `AGENTPROC_HUB_REF`, it is a process-side knob, not a profile field and not part of the [turn object](#input--stdin-turn-object). Hub bridges are bound by it too: a bridge that would otherwise inject an auto-approve default into the child environment (today only `hub/dsh`, with `DSH_PERMISSION_MODE=danger-full-access`) **MUST NOT** inject it while the variable is off — absent an explicit profile value, the CLI's own default applies. Since the variable is not part of the inherited infra set, reaching a bridge means passing it via the profile `env` block or the CLI `--env` flag.
+- **Rejected tokens.** `--dangerously-skip-permissions`, `--yolo`, `--always-approve`, `--yes-always`, `--approve`, `--auto` (`auto_approve_flags` in `spec/conformance/cases.json` is the single source of truth).
+- **Not affected.** An approval argv produced for `permission: true` (e.g. `--permission-prompt-tool stdio`) carries no auto-approve token, so it is still allowed.
+- **Spawn path.** Unchanged — the profile author writes that argv, and the bridge does not rewrite it.
+
 ### `env_allowlist` — shrinking `${VAR}` expansion
 
 By default, every `${VAR}` in the `env` block expands against the bridge's full environment (so a profile author can pull credentials they declare). `env_allowlist` lets a profile shrink that expansion surface to exactly the variables it needs:
@@ -194,6 +203,10 @@ If a bridge implementation chooses to use a shell (e.g., for environment-variabl
 
 `permission` is **opt-in**. Profiles and CLIs that have no mid-turn approval channel keep working unchanged.
 
+**Executors without an approval channel.** `permission: true` requests the approval channel; it does not authorise falling back to auto-approve. When the host SDK's in-process executor has no mid-turn approval channel (`supportsPermission: false`, see [Executor interface](#executor-interface)) and the profile sets `permission: true`, the runner **MUST** fail the turn — an `{"type":"error"}` event plus a non-zero exit code — and **MUST NOT** spawn the CLI with an auto-approve flag (`--dangerously-skip-permissions`, `--yolo`, or any equivalent). The profile author fixes this by removing `permission: true` or by selecting an executor that declares the capability.
+
+This rule applies to the in-process executor path only. On the spawn path (`command` / `args`) the profile author writes the argv, and the bridge does not rewrite it.
+
 ### In-process executors
 
 The `executor:` field (see [Profile YAML](#profile-yaml)) selects an **in-process executor** — a named, SDK-registered implementation of the bridge side of the protocol. When the runner recognises the name, it invokes the executor directly **in the runner's own process**, spawning the target CLI without forking a bridge subprocess first. This eliminates the bridge-process fork overhead while reusing the same CLI-adapter logic that standalone bridge scripts carry.
@@ -209,7 +222,8 @@ Every executor exposes the following surface. SDKs MAY use different concrete sy
 | `cliName` | string | The CLI binary name, used in error messages (e.g. `"claude"`, `"codex"`). |
 | `installHint` | string | Human-readable install instruction appended to "CLI not found" errors. |
 | `plain` | boolean | `true` = the CLI emits plain text on stdout (not NDJSON); the runner treats the entire stdout as the reply body and does **not** call `parseEvent`. `false` (default) = the CLI emits NDJSON, one JSON object per line, decoded via `parseEvent`. |
-| `buildArgs` | `(message, sessionId, env) -> string[]` | Builds the target CLI's argv. `message` is the turn's user message; `sessionId` is the previous turn's session id (empty string = new session); `env` is the composed child environment (infra set + profile `env` after `${VAR}` expansion + `env_allowlist` filtering). The returned argv is passed to `execve` **without** a shell. Returning an empty array is a hard error. |
+| `buildArgs` | `(message, sessionId, env, ctx) -> string[]` | Builds the target CLI's argv. `message` is the turn's user message; `sessionId` is the previous turn's session id (empty string = new session); `env` is the composed child environment (infra set + profile `env` after `${VAR}` expansion + `env_allowlist` filtering); `ctx` is `{ "permission": bool }`, the profile's `permission` value for this turn. The returned argv is passed to `execve` **without** a shell. Returning an empty array is a hard error. |
+| `supportsPermission` | boolean | `true` = this executor has a mid-turn approval channel and can honour `permission: true`. Default `false`. Consulted by the runner *before* spawning — see [Runner contract](#runner-contract) — never by `buildArgs` itself. |
 | `parseEvent` | `(event) -> ParseResult \| null` | Translates one decoded JSON object from the CLI's stdout into a `ParseResult`. Return `null` for events the executor does not recognise (the runner logs and ignores the line). Omitted / unused when `plain: true`. |
 | `makeHandlers` | `() -> { buildArgs, parseEvent }` | Optional factory for **stateful** executors that need per-turn state shared between `buildArgs` and `parseEvent` (e.g. a session id minted in `buildArgs` and returned in `parseEvent`). When present, the runner calls `makeHandlers()` **once per turn** and uses the returned pair for that turn only. When absent, the runner uses `buildArgs` / `parseEvent` directly, and they MUST be stateless and re-entrant. |
 
@@ -244,12 +258,16 @@ When the runner takes the in-process path (`executor:` present + recognised), it
 
 1. Compose the child environment exactly as the spawn path does (infra set + profile `env` after expansion + CLI `--env` extras) and pass it to `buildArgs` as the `env` argument.
 2. Resolve handlers via `makeHandlers()` if present, else use `buildArgs` / `parseEvent` directly.
-3. Call `buildArgs(message, sessionId, env)` once. An empty return is a hard error.
+3. Call `buildArgs(message, sessionId, env, ctx)` once, with `ctx = { "permission": <the profile's permission value> }`. An empty return is a hard error.
 4. Spawn the target CLI's argv directly (no bridge subprocess, no shell).
-5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path (a bridge-side `--timeout` / `--no-stream` / `--cwd` option overrides the profile field when given; `budget_secs` / `deadline` constrain the spawn path only and are not required here), and resolve `cwd` the same way the spawn path does (relative paths resolved against the profile's own directory).
+5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path (a bridge-side `--timeout` / `--no-stream` / `--cwd` option overrides the profile field when given; `budget_secs` / `deadline` constrain the spawn path only and are not required here), and resolve `cwd` the same way the spawn path does (relative paths resolved against the profile's own directory). Permission is carried to the executor through `ctx`; the runner does not rewrite argv after `buildArgs` returns.
 6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}`, accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s.
 7. For `plain: true`: treat stdout as the body, apply truncation, emit a single `{"type":"result"}` at turn end.
 8. Emit a terminal `{"type":"result"}` (or `{"type":"error"}`) at turn end, carrying the first non-empty `sessionId` and any `usage` seen.
+9. Between `buildArgs` and `spawn`, decide the permission posture and refuse to spawn when it is inconsistent:
+   - (a) the profile sets `permission: true` and the executor does not declare `supportsPermission` → refuse;
+   - (b) `AGENTPROC_AUTO_APPROVE` is set to `0` / `false` and the argv contains one of its rejected tokens → refuse.
+   Refusal means an `{"type":"error"}` event plus a non-zero exit code; the CLI is **not** spawned.
 
 The in-process path and the spawn path MUST produce observably equivalent NDJSON for the same CLI + turn. This is verified by the shared conformance suite.
 
@@ -833,6 +851,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.7** — In-process executors: `buildArgs` gains a fourth `ctx` argument carrying the profile's `permission` value, plus a new `supportsPermission` capability bit; the Runner contract now refuses to spawn when `permission: true` meets an executor without an approval channel, and a new bridge-side `AGENTPROC_AUTO_APPROVE` knob (`0` / `false`) makes the runner refuse any auto-approve argv. Both refusals are an `error` event plus a non-zero exit code — never a silent fallback to `--dangerously-skip-permissions` / `--yolo`. Hub bridges that inject an auto-approve default of their own (today only `hub/dsh`) MUST NOT inject it while the knob is off. No wire change; spawn-path semantics are unchanged.
 - **wire 0.4 / doc 1.6** — Optional bridge-side profile fields `budget_secs` and `deadline` (earliest-expiry-wins with `timeout_secs`; identical SIGTERM → grace → SIGKILL semantics, exit 124). New "Event traceability (optional)" section: bridge-internal event `seq`/`ts` metadata, `RunResult` `started_at`/`duration` (bridge-measured, distinct from agent self-reported `usage.duration_ms`), and an opt-in NDJSON journal (off by default, file-only, never stdout; stdout/stderr byte-identical when disabled). No wire changes — the bytes on stdin/stdout are unchanged. SDK packages bumped to 0.17.0.
 - **doc 1.5** — Exit Codes: a bridge MUST normalise a signal death to `128 + signal number` on every platform, regardless of how the host OS reports the death (POSIX negative wait status, Windows) — SIGINT always surfaces as `130` and SIGTERM as `143`. No wire change.
 - **doc 1.4** — Clarified the UTF-8 contract on agent stdout: bridges that decode child stdout as text SHOULD pass an explicit `encoding="utf-8"` (with lossy `errors="replace"`) rather than relying on the process locale; decoding with the locale under non-UTF-8 environments (`LANG=C`, Chinese Windows) can raise `UnicodeDecodeError` inside a drain thread and silently kill a turn. No wire change.
