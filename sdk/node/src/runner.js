@@ -785,7 +785,8 @@ async function runViaExecutor(profile, options, executor) {
 
   // NDJSON bridge mode: parse CLI stdout line by line via parseEvent.
   const parseEvent = handlers.parseEvent;
-  let lastFinalText = null;
+  let finalText = null;
+  let resultSeen = false;
   let errorMessage = null;
   let partialsForwarded = false;
 
@@ -801,8 +802,9 @@ async function runViaExecutor(profile, options, executor) {
     const parsed = parseEvent(event);
     if (!parsed) continue;
 
-    // Capture sessionId (first-wins).
-    if (parsed.sessionId && !result.sessionId) {
+    // Capture sessionId (first-wins, wire-valid ids only — a path separator
+    // would turn the persisted <id>.jsonl into a subdirectory).
+    if (parsed.sessionId && isValidSessionId(parsed.sessionId) && !result.sessionId) {
       result.sessionId = parsed.sessionId;
       if (options.onSession) options.onSession(parsed.sessionId);
     }
@@ -816,8 +818,11 @@ async function runViaExecutor(profile, options, executor) {
       }
     }
 
-    if (parsed.finalText !== undefined && parsed.finalText !== null && !errorMessage) {
-      lastFinalText = parsed.finalText;
+    // First result event wins (an explicit '' counts; later result events are
+    // ignored — "result: at most one").
+    if (parsed.finalText !== undefined && parsed.finalText !== null && !errorMessage && !resultSeen) {
+      resultSeen = true;
+      finalText = parsed.finalText;
     }
     if (parsed.usage && result.usage === null) {
       result.usage = parsed.usage;
@@ -854,8 +859,8 @@ async function runViaExecutor(profile, options, executor) {
 
   // Assemble reply: if streaming forwarded partials, result.reply stays '' (body
   // already delivered). Otherwise use finalText.
-  if (!partialsForwarded && lastFinalText !== null) {
-    result.reply = lastFinalText;
+  if (!partialsForwarded && finalText !== null) {
+    result.reply = finalText;
   }
   result.exitCode = EXIT_SUCCESS;
   return result;

@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.7`
+**文档修订：** `1.8`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -257,7 +257,7 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 3. 调用一次 `buildArgs(message, sessionId, env, ctx)`，其中 `ctx = { "permission": <profile 的 permission 值> }`。返回空是硬错误。
 4. 直接 spawn 目标 CLI 的 argv（无 bridge 子进程、无 shell）。
 5. 以与 spawn 路径相同的语义应用 `timeout_secs` / `kill_grace_secs` / `streaming` / `permission`（bridge 侧的 `--timeout` / `--no-stream` / `--cwd` 选项给出时覆盖 profile 字段；`budget_secs` / `deadline` 只约束 spawn 路径，此处不要求支持），并按 spawn 路径相同的方式解析 `cwd`（相对路径按 profile 自身目录解析）。permission 通过 `ctx` 传给 executor；runner 不在 `buildArgs` 返回后改写 argv。
-6. 对 `plain: false`：逐行解码 stdout，每行调用 `parseEvent`，把 `partialText` 作为 `{"type":"partial"}` 转发，累加 `finalText`，持久化第一个非空 `sessionId`，遇到 `error` 时发 `{"type":"error"}` 并抑制后续 `partial`。
+6. 对 `plain: false`：逐行解码 stdout，每行调用 `parseEvent`，把 `partialText` 作为 `{"type":"partial"}` 转发（仅当 `streaming: true`——`streaming: false` 时 partial 既不转发也不累加进回复），累加 `finalText`，持久化第一个非空 `sessionId`，遇到 `error` 时发 `{"type":"error"}` 并抑制后续 `partial`/`finalText`（error 之后仍可继续补录 `sessionId`）。`parseEvent` 返回的 `usage` 对象**必须**写入 `RunResult.usage`（首个非空值生效）。
 7. 对 `plain: true`：把 stdout 当作正文，应用截断，在 turn 结束时发单个 `{"type":"result"}`。
 8. 在 turn 结束时发终态 `{"type":"result"}`（或 `{"type":"error"}`），携带第一个非空 `sessionId` 和见过的任何 `usage`。
 9. 在 `buildArgs` 之后、spawn 之前判定 permission posture，遇到不一致时拒绝 spawn：
@@ -265,7 +265,9 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
    - (b) `AGENTPROC_AUTO_APPROVE` 被设为 `0` / `false` 且 argv 含有其拒绝的 token 之一 → 拒绝。
    拒绝即发 `{"type":"error"}` 事件 + 非零退出码，且**不** spawn CLI。
 
-对同一 CLI + turn，in-process 路径与 spawn 路径**必须**产出 observable 等价的 NDJSON。这由共享的 conformance 套件验证。
+回复拼装（两条路径通用）：当 `streaming: true` 且已转发至少一个 `partial` 时，终态 `result` 携带空正文（正文已随 partial 送达——**不得**重复）；否则回复为首个 `result` 事件的 `finalText`（显式空串同样生效；后续 `result` 事件被忽略——一个 turn 至多一个 `result`）。无 error 且无 `finalText` 的 turn 是**成功**（空回复，exit code 0），不是错误。
+
+对同一 CLI + turn，in-process 路径与 spawn 路径**必须**产出 observable 等价的 NDJSON。这由共享的 conformance 套件验证（spawn 路径见 `spec/conformance/scenarios.json`，executor 路径见 `spec/conformance/executors.json`）。
 
 ---
 
@@ -847,6 +849,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
+- **doc 1.8** —— 回复拼装对两条路径明文化：`streaming: true` 且已转发至少一个 `partial` 时，终态 `result` 携带空正文（正文已送达——不得重复）；否则回复为首个 `result` 事件的 `finalText`（显式空串同样生效；后续 `result` 事件被忽略）。executor 路径的 `usage` 对象**必须**写入 `RunResult.usage`（首个非空值生效）；`error` 事件使该轮失败（即使 CLI 退出码为 0）；无 error 且无正文的轮次为成功。共享 conformance 套件新增驱动 executor 路径（`spec/conformance/executors.json`）。无线协议变更。
 - **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。自行注入自动批准默认值的 hub 桥（今仅 `hub/dsh`）在该旋钮关闭时 MUST NOT 注入。无 wire 变更；spawn 路径语义不变。
 - **wire 0.4 / doc 1.6** —— 可选 bridge 侧 profile 字段 `budget_secs` 与 `deadline`（与 `timeout_secs` 取最早到期；SIGTERM → 宽限 → SIGKILL 语义一致，退出码 124）。新增「事件可追溯性（可选）」小节：bridge 内部事件 `seq`/`ts` 元数据、`RunResult` 的 `started_at`/`duration`（bridge 实测，区别于 agent 自报 `usage.duration_ms`）、opt-in NDJSON journal（默认关闭、只写文件、绝不写 stdout；关闭时 stdout/stderr 字节一致）。无 wire 变更——stdin/stdout 上的字节不变。SDK 包 bump 至 0.17.0。
 - **doc 1.5** —— Exit Codes：agent 被信号杀死时，bridge **必须**在任何平台将退出码归一为 `128 + 信号编号`，无论宿主操作系统如何报告该死亡（POSIX 负数 wait 状态、Windows）——SIGINT 一律呈现为 `130`，SIGTERM 一律呈现为 `143`。无线协议变更。

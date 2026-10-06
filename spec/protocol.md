@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.7`
+**Document revision:** `1.8`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -261,7 +261,7 @@ When the runner takes the in-process path (`executor:` present + recognised), it
 3. Call `buildArgs(message, sessionId, env, ctx)` once, with `ctx = { "permission": <the profile's permission value> }`. An empty return is a hard error.
 4. Spawn the target CLI's argv directly (no bridge subprocess, no shell).
 5. Apply `timeout_secs` / `kill_grace_secs` / `streaming` / `permission` with the same semantics as the spawn path (a bridge-side `--timeout` / `--no-stream` / `--cwd` option overrides the profile field when given; `budget_secs` / `deadline` constrain the spawn path only and are not required here), and resolve `cwd` the same way the spawn path does (relative paths resolved against the profile's own directory). Permission is carried to the executor through `ctx`; the runner does not rewrite argv after `buildArgs` returns.
-6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}`, accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s.
+6. For `plain: false`: decode stdout line by line, call `parseEvent` per line, forward `partialText` as `{"type":"partial"}` (only when `streaming: true` — with `streaming: false` partials are neither forwarded nor accumulated into the reply), accumulate `finalText`, persist the first non-empty `sessionId`, and on `error` emit `{"type":"error"}` and suppress further `partial`s/`finalText`s (`sessionId` may still be learned after the error). A `usage` object returned by `parseEvent` MUST be written to `RunResult.usage` (the first non-empty value wins).
 7. For `plain: true`: treat stdout as the body, apply truncation, emit a single `{"type":"result"}` at turn end.
 8. Emit a terminal `{"type":"result"}` (or `{"type":"error"}`) at turn end, carrying the first non-empty `sessionId` and any `usage` seen.
 9. Between `buildArgs` and `spawn`, decide the permission posture and refuse to spawn when it is inconsistent:
@@ -269,7 +269,9 @@ When the runner takes the in-process path (`executor:` present + recognised), it
    - (b) `AGENTPROC_AUTO_APPROVE` is set to `0` / `false` and the argv contains one of its rejected tokens → refuse.
    Refusal means an `{"type":"error"}` event plus a non-zero exit code; the CLI is **not** spawned.
 
-The in-process path and the spawn path MUST produce observably equivalent NDJSON for the same CLI + turn. This is verified by the shared conformance suite.
+Reply assembly (both paths): when `streaming: true` and at least one `partial` was forwarded, the terminal `result` carries an empty body (the body was already delivered via partials — it MUST NOT be duplicated); otherwise the reply is the first `result` event's `finalText` (an explicit empty string counts; a later `result` event is ignored, since a turn carries at most one `result`). A turn with no error and no `finalText` is a **success** with an empty reply (exit code 0), not an error.
+
+The in-process path and the spawn path MUST produce observably equivalent NDJSON for the same CLI + turn. This is verified by the shared conformance suite (`spec/conformance/scenarios.json` for the spawn path, `spec/conformance/executors.json` for the executor path).
 
 ---
 
@@ -851,6 +853,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.8** — Reply assembly stated for both paths: with `streaming: true` and at least one forwarded `partial`, the terminal `result` carries an empty body (the body was already delivered — it MUST NOT be duplicated); otherwise the reply is the first `result` event's `finalText` (an explicit empty string counts; later `result` events are ignored). An executor-path `usage` object MUST be written to `RunResult.usage` (first non-empty wins), an `error` event makes the turn a failure even when the CLI exited 0, and an empty turn without an error is a success. The shared conformance suite now also drives the executor path (`spec/conformance/executors.json`). No wire change.
 - **doc 1.7** — In-process executors: `buildArgs` gains a fourth `ctx` argument carrying the profile's `permission` value, plus a new `supportsPermission` capability bit; the Runner contract now refuses to spawn when `permission: true` meets an executor without an approval channel, and a new bridge-side `AGENTPROC_AUTO_APPROVE` knob (`0` / `false`) makes the runner refuse any auto-approve argv. Both refusals are an `error` event plus a non-zero exit code — never a silent fallback to `--dangerously-skip-permissions` / `--yolo`. Hub bridges that inject an auto-approve default of their own (today only `hub/dsh`) MUST NOT inject it while the knob is off. No wire change; spawn-path semantics are unchanged.
 - **wire 0.4 / doc 1.6** — Optional bridge-side profile fields `budget_secs` and `deadline` (earliest-expiry-wins with `timeout_secs`; identical SIGTERM → grace → SIGKILL semantics, exit 124). New "Event traceability (optional)" section: bridge-internal event `seq`/`ts` metadata, `RunResult` `started_at`/`duration` (bridge-measured, distinct from agent self-reported `usage.duration_ms`), and an opt-in NDJSON journal (off by default, file-only, never stdout; stdout/stderr byte-identical when disabled). No wire changes — the bytes on stdin/stdout are unchanged. SDK packages bumped to 0.17.0.
 - **doc 1.5** — Exit Codes: a bridge MUST normalise a signal death to `128 + signal number` on every platform, regardless of how the host OS reports the death (POSIX negative wait status, Windows) — SIGINT always surfaces as `130` and SIGTERM as `143`. No wire change.

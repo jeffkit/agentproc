@@ -13,6 +13,12 @@
  * that records its own argv, so a case pins observable behaviour (which argv
  * the CLI received, or that it was never spawned) rather than internal
  * signatures.
+
+
+ * Also drives `spec/conformance/executors.json` through the in-process
+ * executor path (`runViaExecutor`) with a fake tmp-script executor, asserting
+ * the full RunResult. The Python SDK (`tests/test_conformance.py`) and the
+ * Rust SDK (`sdk/rust/src/conformance.rs`) drive the same fixture.
  *
  * When you change the spec's line-recognition rules, add a case to the JSON
  * file first; both SDKs will fail until they agree.
@@ -24,10 +30,11 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { run, classifyLine, AUTO_APPROVE_FLAGS } = require('./runner.js');
+const { run, classifyLine, AUTO_APPROVE_FLAGS, runViaExecutor, normalizeProfile } = require('./runner.js');
 const { EXECUTORS } = require('./executors.js');
 
-const CASES_PATH = path.resolve(__dirname, '../../../spec/conformance/cases.json');
+const CONFORMANCE_DIR = path.resolve(__dirname, '../../../spec/conformance');
+const CASES_PATH = path.join(CONFORMANCE_DIR, 'cases.json');
 const data = JSON.parse(fs.readFileSync(CASES_PATH, 'utf8'));
 
 for (const c of data.cases) {
@@ -41,7 +48,7 @@ for (const c of data.cases) {
 // SDK's _compose_env, driven through the exported composeEnv.
 // ---------------------------------------------------------------------------
 
-const { composeEnv, normalizeProfile } = require('./runner.js');
+const { composeEnv } = require('./runner.js');
 
 for (const c of data.env_compose || []) {
   test(`composeEnv: ${JSON.stringify(c.profile_env).slice(0, 50)}`, () => {
@@ -136,5 +143,69 @@ for (const c of data.posture_cases) {
     for (const token of expect.argv_excludes || []) {
       assert.ok(!argv.includes(token), `${c.name}: ${token} present in ${argv}`);
     }
+  });
+}
+
+const EXECUTORS_PATH = path.join(CONFORMANCE_DIR, 'executors.json');
+const { scenarios } = JSON.parse(fs.readFileSync(EXECUTORS_PATH, 'utf8'));
+
+function tmpScript(content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-exec-conf-'));
+  const file = path.join(dir, 'mock.sh');
+  fs.writeFileSync(file, content, { mode: 0o755 });
+  return file;
+}
+
+// The fixture's shared rule table (see executors.json _comment).
+function parseEvent(event) {
+  const t = event.type;
+  if (t === 'partial') return { partialText: event.text };
+  if (t === 'result') {
+    const out = { finalText: event.text ?? '' };
+    if (event.session_id) out.sessionId = event.session_id;
+    if (event.usage != null) out.usage = event.usage;
+    return out;
+  }
+  if (t === 'error') {
+    const out = { error: event.message };
+    if (event.session_id) out.sessionId = event.session_id;
+    if (event.usage != null) out.usage = event.usage;
+    return out;
+  }
+  return null;
+}
+
+function fakeExecutor(lines) {
+  const body = lines.map((l) => `echo ${JSON.stringify(JSON.stringify(l))}`).join('\n');
+  const cli = tmpScript(`#!/usr/bin/env bash\n${body}\n`);
+  return {
+    cliName: 'mock-ndjson',
+    installHint: '',
+    plain: false,
+    buildArgs: () => [cli],
+    parseEvent,
+  };
+}
+
+test('executors.json has scenarios', () => {
+  // Sanity: an emptied or mis-pathed fixture must fail, not pass vacuously.
+  assert.ok(scenarios.length >= 13, `expected >= 13 executor scenarios, got ${scenarios.length}`);
+});
+
+for (const sc of scenarios) {
+  test(`executors.json: ${sc.name}`, async () => {
+    const exp = sc.expect;
+    const partials = [];
+    const r = await runViaExecutor(
+      normalizeProfile({ command: 'dummy', executor: 'test' }),
+      { message: 'hi', streaming: sc.streaming, onPartial: (p) => partials.push(p) },
+      fakeExecutor(sc.lines),
+    );
+    assert.deepStrictEqual(r.reply, exp.reply, 'reply');
+    assert.deepStrictEqual(r.sessionId, exp.session_id, 'sessionId');
+    assert.deepStrictEqual(r.error, exp.error, 'error');
+    assert.deepStrictEqual(r.exitCode, exp.exit_code, 'exitCode');
+    assert.deepStrictEqual(r.usage ?? null, exp.usage ?? null, 'usage');
+    assert.deepStrictEqual(partials, exp.partials, 'partials');
   });
 }

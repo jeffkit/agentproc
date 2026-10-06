@@ -538,6 +538,12 @@ fn finalise_result(
     on_error: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 ) {
     if !result.error.is_empty() {
+        // An error event makes the turn a failure even when the CLI exited 0
+        // (mirrors the spawn-path exit-code rules in Python/Node). A timeout
+        // (124) outranks it.
+        if exit_code == 0 {
+            result.exit_code = 1;
+        }
         if profile.send_error_reply {
             if let Some(cb) = &on_error {
                 cb(&result.error);
@@ -839,6 +845,9 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
     use tokio::io::AsyncWriteExt;
     let mut result = RunResult::default();
     let mut saw_error = false;
+    let mut result_seen = false;
+    let mut final_text: Option<String> = None;
+    let mut partials_forwarded = false;
     let mut line = String::new();
 
     loop {
@@ -889,8 +898,11 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
                 }
             }
         }
+        // First non-empty usage wins (spec: "the first non-empty value wins").
         if let Some(u) = parsed.usage {
-            result.usage = Some(u);
+            if result.usage.is_none() {
+                result.usage = Some(u);
+            }
         }
         if let Some(err) = parsed.error {
             if !saw_error {
@@ -905,15 +917,25 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
         if let Some(ptext) = parsed.partial_text {
             if cfg.streaming {
                 if let Some(cb) = &opts.on_partial {
-                    cb(ptext.clone(), result.session_id.clone().into());
+                    cb(ptext, result.session_id.clone().into());
+                    partials_forwarded = true;
                 }
-                result.reply.push_str(&ptext);
             }
         }
+        // First result event wins — an explicit empty text counts, later
+        // result events are ignored ("result: at most one").
         if let Some(Some(ftext)) = parsed.final_text {
-            if result.reply.is_empty() {
-                result.reply = ftext;
+            if !result_seen {
+                result_seen = true;
+                final_text = Some(ftext);
             }
+        }
+    }
+    // Reply assembly, mirroring the spawn path: forwarded partials already
+    // delivered the body, and an error turn carries no body.
+    if !saw_error && !(cfg.streaming && partials_forwarded) {
+        if let Some(text) = final_text {
+            result.reply = text;
         }
     }
     Ok(result)

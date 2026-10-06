@@ -3,10 +3,33 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.6`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.18.0` (unreleased); the Rust crate is on its own track currently `0.13.0`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.8`. Does not change the wire contract (except when paired with a wire bump).
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.18.2` (unreleased); the Rust crate is on its own track currently `0.13.2`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
+
+### Spec / SDK 0.18.2 — unreleased
+
+**Executor (in-process) path conformance finished across all three SDKs (#12)**
+
+- **Rust `process_executor_stdout` brought onto the shared semantics (fix):** streamed partials are no longer concatenated into `reply` (they were forwarded live, so the terminal body must not repeat them), an `error` event now yields exit code `1` even when the CLI exited `0` (`finalise_result` normalises this for both paths), `session_id` values are validated before being persisted (`is_valid_session_id`, the equivalent of `runner.py` / `runner.js` — a path separator would turn the `<id>.jsonl` history file into a subdirectory), and `usage` is first-non-empty-wins. Previously the Rust executor path diverged from `executors.json` on 10 assertions.
+- **Python `run_via_executor` / Node `runViaExecutor`: reply assembly is now first-`result`-wins** instead of last-wins, matching the spawn path and the spec's "`result` … at most one" (an explicit empty `finalText` now counts as the body, and a later `result` event can no longer replace it).
+- **Node `runViaExecutor` validates `sessionId`** before persisting it (same rule as the spawn path); an invalid id is ignored.
+- `spec/conformance/executors.json` extended to 13 scenarios: usage on a later event, usage on an `error` event, conflicting `session_id`, `session_id` discovered late on the `result`, invalid `session_id`, first-error-wins with a post-error `result` suppressed, and first-non-empty `usage` wins. The embedded rule table now spells the `usage` field on `error` events.
+- The three drivers now live in the languages' existing conformance entry points — `sdk/python/tests/test_conformance.py`, `sdk/node/src/conformance.test.js`, `sdk/rust/src/conformance.rs` (the last as a `#[cfg(feature = "executors")]` module) — so the CI conformance job actually executes the fixture. Each asserts a minimum scenario count, so an emptied or mis-pathed fixture fails instead of passing vacuously. The interim `sdk/python/tests/test_executors_conformance.py` and `sdk/node/src/executors_conformance.test.js` are deleted.
+- `spec/protocol.md` + `spec/protocol.zh.md`: the reply-assembly paragraph now states the first-`result` rule (it previously said "last non-empty `finalText`", contradicting the same document's "`result` … at most one" and the spawn-path fixture).
+- Wire protocol stays `0.4`; this is a correction of existing behaviour to the already-documented contract.
+
+### Spec / SDK 0.18.1 — unreleased
+
+**Executor (in-process) path semantics unified across SDKs (#12)**
+
+- New shared fixture `spec/conformance/executors.json`: scenario lines are NDJSON event objects fed through a fake executor with the fixture's shared rule-table parse (`partial`/`result`/`error`/ignored), asserting the full RunResult (`reply`, `session_id`, `error`, `exit_code`, `usage`, `partials`). This release landed the fixture and the Python/Node sides only — Python (`sdk/python/tests/test_executors_conformance.py`) and Node (`sdk/node/src/executors_conformance.test.js`); the Rust implementation was not touched here and the executor-path driver for it arrived in 0.18.2.
+- **Python `run_via_executor` (NDJSON branch) rewritten to Node/Rust semantics (fix):** `usage` returned by `parse_event` is now written to `RunResult.usage` (first non-empty wins; previously dropped); streaming reply dedup — when `streaming: true` and partials were forwarded, `reply` stays empty instead of concatenating partials + final text; `streaming: false` now suppresses partials entirely (neither forwarded nor folded into `reply`; `reply` = last non-empty `final_text`); an empty reply with no error is now a **success** (exit 0) instead of the bogus "`<cli> returned no reply content`" error; error handling records the first error and continues the loop (session_id may still be learned after the error; subsequent partial/final events suppressed), matching Node.
+- **Node `executors.js`:** the `claude-code`, `codebuddy`, and `cursor` `parseEvent` results now pass `usage` through (`usage: event.usage || null`) — previously only the runner's generic consumption branch saw usage from other executors.
+- Spec wording (`spec/protocol.md` + `spec/protocol.zh.md`): Runner contract items 6/8 and a new "reply assembly" paragraph now state the usage MUST, the streaming dedup rule, the `streaming: false` partial gate, and empty-reply-is-success; the conformance-suite sentence now names `executors.json` alongside `scenarios.json`. `spec/conformance/README.md` documents the new fixture.
+- Debug-residue cleanup: removed the stray `[DEBUG plain]` stderr print in the Python plain-executor path and a leftover `print("RUNNER FILE")` in `test_executors.py`; deleted the interim `tests/test_wip_issue12_executor_conformance.py` (superseded by the fixture-driven suite).
+- Wire protocol stays `0.4`; this is a semantic clarification of existing behaviour.
 
 ### Spec / SDK 0.18.0 — unreleased
 
@@ -89,7 +112,6 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - **Removed the default 8000-char reply truncation**: `max_reply_chars` / `truncation_suffix` are deleted from `Profile` (the live truncation used `profile.max_reply_chars` (default 8000) while the `ProcessOpts` copies were dead; both are now removed). Replies now arrive intact, matching the no-truncation rule. Breaking API change for the two dead pub fields; YAML keys are ignored via serde defaults.
 - **`session_id` validation**: ids containing `/`, `\`, control characters, or dot-only segments (`.`/`..`) are rejected (warned on stderr, never adopted into `RunResult.session_id`) on both the spawn and executor paths. `history::session_file_path` sanitises invalid ids to a non-colliding name and `append_history` refuses to write them, closing the path-traversal window into/out of the sessions directory.
 - New tests: `permission_channel` (allow + deny branches), `timeout_two_step_kill` (graceful SIGTERM partial flush, zero-grace SIGKILL), `no_truncation` (10k-char result intact), `session_id_validation` (adoption + traversal + history). `libc` added as a unix-only dependency; version bumped 0.12.0 → 0.12.1.
-
 ### Spec / SDK 0.16.0 — unreleased
 
 **Python SDK: `run_via_executor` streams line-by-line, salvages on timeout, dedupes partial/final (#6)**

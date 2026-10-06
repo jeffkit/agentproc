@@ -378,10 +378,24 @@ class TestRunViaExecutorNDJSON(unittest.TestCase):
             json.dumps({"type": "result", "text": "world", "session_id": "s1"}),
         ]
         ex = self._make_ndjson_executor(lines)
-        result = run_via_executor(ex, _make_opts())
+        partials = []
+        result = run_via_executor(ex, _make_opts(on_partial=partials.append))
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
-        # Dedup per spec: partials are never concatenated onto final_text;
-        # with no on_partial forwarded, reply is the final text alone.
+        # streaming + partials forwarded → body already delivered via
+        # on_partial; reply must not duplicate it
+        self.assertEqual(result.reply, "")
+        self.assertEqual(partials, ["hello "])
+        self.assertEqual(result.session_id, "s1")
+
+    def test_ndjson_non_streaming_reply_is_final_text(self):
+        import json
+        lines = [
+            json.dumps({"type": "partial", "text": "hello "}),
+            json.dumps({"type": "result", "text": "world", "session_id": "s1"}),
+        ]
+        ex = self._make_ndjson_executor(lines)
+        result = run_via_executor(ex, _make_opts(streaming=False))
+        self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertEqual(result.reply, "world")
         self.assertEqual(result.session_id, "s1")
 
@@ -417,8 +431,6 @@ class TestOnProtocolLineContract(unittest.TestCase):
                 {"final_text": e.get("result")} if e.get("type") == "result" else None),
         }
         seen = []
-        import agentproc.runner as _r
-        print("RUNNER FILE:", _r.__file__)
         result = run_via_executor(ex, _make_opts(on_protocol_line=seen.append))
         self.assertEqual(result.exit_code, EXIT_SUCCESS)
         self.assertEqual(len(seen), 2, seen)

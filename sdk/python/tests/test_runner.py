@@ -907,7 +907,7 @@ class TestExecutorPathProfileFields:
         )
         assert r.exit_code == EXIT_TIMEOUT
 
-    def test_profile_streaming_false_aggregates(self, tmp_path, monkeypatch):
+    def test_profile_streaming_false_uses_first_result_text(self, tmp_path, monkeypatch):
         agent = write_script(
             "#!/usr/bin/env bash\n"
             + _evt({"type": "partial", "text": "chunk1"}) + "\n"
@@ -921,7 +921,10 @@ class TestExecutorPathProfileFields:
             RunOptions(message="hi", on_partial=partials.append),
         )
         assert r.exit_code == 0
-        assert r.reply == "chunk1chunk2final"
+        # #12: streaming=false forwards nothing and never folds partials into
+        # the reply — the reply is the first `result` text alone (matches
+        # Node's runViaExecutor and the executors.json "non-streaming" scenario).
+        assert r.reply == "final"
         assert partials == []
 
     def test_streaming_true_forwards_and_leaves_reply_empty(self, tmp_path, monkeypatch):

@@ -918,15 +918,19 @@ def run_via_executor(
             return result
 
     plain_lines: List[str] = []
+    # Salved partials kept for the timeout / cancel fallback only — a normal
+    # turn's reply is the first `result` text alone (#12; partials are never
+    # concatenated onto it).
     reply_parts: List[str] = []
-    last_final_text: Optional[str] = None
+    final_text: Optional[str] = None
+    result_seen = False
     partials_forwarded = False
     error_message: Optional[str] = None
     timed_out = False
     cancelled = False
 
     def _handle_line(raw: str) -> None:
-        nonlocal last_final_text, partials_forwarded, error_message
+        nonlocal final_text, result_seen, partials_forwarded, error_message
         line = raw.rstrip("\r\n")
         if not line:
             return
@@ -951,24 +955,32 @@ def run_via_executor(
             result.session_id = sid
             if options.on_session:
                 options.on_session(sid)
-        if parsed.get("error"):
+        # `usage` may travel on any event, including an `error` event (#12).
+        usage = parsed.get("usage")
+        if usage and result.usage is None:
+            result.usage = usage
+        err = parsed.get("error")
+        if err:
+            # First error wins; `sessionId` may still be learned after it.
             if error_message is None:
-                error_message = parsed["error"]
+                error_message = err
+            return
+        if error_message is not None:
+            # post-error events (partial/result) are suppressed
             return
         partial = parsed.get("partial_text")
         if partial:
-            if error_message is None and streaming and options.on_partial:
+            if streaming and options.on_partial:
                 options.on_partial(partial)
                 partials_forwarded = True
             if not partials_forwarded:
                 reply_parts.append(partial)
         final = parsed.get("final_text")
-        if final is not None and final != "" and error_message is None:
-            last_final_text = final
-            reply_parts.append(final)
-        usage = parsed.get("usage")
-        if isinstance(usage, dict) and result.usage is None:
-            result.usage = usage
+        if final is not None and not result_seen:
+            # First `result` event wins — an explicit '' counts; later result
+            # events are ignored ("result: at most one").
+            result_seen = True
+            final_text = final
 
     deadline = (
         time.monotonic() + timeout_secs
@@ -1077,17 +1089,17 @@ def run_via_executor(
         result.reply = "\n".join(plain_lines).strip()
     elif cancelled:
         # 取消 salvage：保留已产出的半轮文本（与超时同待遇，调用方不丢内容）。
-        result.reply = last_final_text if last_final_text is not None else "".join(reply_parts)
+        result.reply = final_text if final_text is not None else "".join(reply_parts)
     elif timed_out:
         # Timeout salvage: keep the half-turn text so the caller does not
         # lose everything produced before the kill (acceptance: reply != '').
-        result.reply = last_final_text if last_final_text is not None else "".join(reply_parts)
+        result.reply = final_text if final_text is not None else "".join(reply_parts)
     elif streaming and partials_forwarded:
         result.reply = ""
-    elif streaming:
-        result.reply = last_final_text or ""
-    else:
-        result.reply = "".join(reply_parts)
+    elif final_text is not None:
+        # First `result` event wins (an explicit '' counts). With
+        # streaming=false partials are never folded into the reply (#12).
+        result.reply = final_text
 
     stderr_text = "".join(stderr_parts).strip()
 

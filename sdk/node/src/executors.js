@@ -115,7 +115,7 @@ const claudeCode = {
       if (event.is_error) {
         return { sessionId, error: event.result || 'claude reported an error' };
       }
-      return { sessionId, finalText: event.result || null };
+      return { sessionId, finalText: event.result || null, usage: event.usage || null };
     }
     return null;
   },
@@ -158,7 +158,7 @@ const codebuddy = {
       if (event.is_error) {
         return { sessionId, error: event.result || 'codebuddy reported an error' };
       }
-      return { sessionId, finalText: event.result || null };
+      return { sessionId, finalText: event.result || null, usage: event.usage || null };
     }
     return null;
   },
@@ -256,7 +256,7 @@ const cursor = {
         if (event.is_error || event.subtype === 'error') {
           return { sessionId, error: event.result || 'cursor agent reported an error' };
         }
-        return { sessionId, finalText: event.result || null };
+        return { sessionId, finalText: event.result || null, usage: event.usage || null };
       }
       return null;
     }

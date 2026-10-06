@@ -232,3 +232,188 @@ fn posture_cases_match_rust_permission_gate() {
     }
     assert!(checked > 10, "expected >10 posture cases, got {checked}");
 }
+
+/// Executor (in-process) path conformance — reads `spec/conformance/executors.json`
+/// and drives it through the public `run()` with a registered fake executor
+/// (printf-backed `build_args` + the fixture's shared rule-table `parse_event`),
+/// asserting the full RunResult. Same fixture, same expectations as
+/// `sdk/python/tests/test_conformance.py` and `sdk/node/src/conformance.test.js`.
+#[cfg(feature = "executors")]
+mod executor_scenarios {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use crate::executors::{register_executor, Executor, TurnCtx, TurnHandlers};
+    use crate::{run, ParseResult, Profile, RunOptions};
+
+    /// `register_executor` takes a plain `fn` factory (no captured state), so
+    /// the scenario currently under test travels through this static.
+    static LINES: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
+
+    struct FakeHandlers {
+        lines: Vec<serde_json::Value>,
+    }
+
+    impl TurnHandlers for FakeHandlers {
+        fn build_args(
+            &self,
+            _message: &str,
+            _session_id: &str,
+            _env: &HashMap<String, String>,
+        ) -> Vec<String> {
+            let joined = self
+                .lines
+                .iter()
+                .map(|l| l.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            vec!["printf".to_string(), "%s\\n".to_string(), joined]
+        }
+
+        /// The fixture's shared rule table (see `executors.json` `_comment`).
+        fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+            match event.get("type").and_then(|v| v.as_str())? {
+                "partial" => Some(ParseResult::partial(
+                    event.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                )),
+                "result" => {
+                    let mut r = ParseResult::final_text(
+                        event.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                    );
+                    if let Some(sid) = event.get("session_id").and_then(|v| v.as_str()) {
+                        r.session_id = Some(sid.to_string());
+                    }
+                    if let Some(u) = event.get("usage") {
+                        r.usage = Some(u.clone());
+                    }
+                    Some(r)
+                }
+                "error" => {
+                    let mut r = ParseResult::error(
+                        event.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                    );
+                    if let Some(sid) = event.get("session_id").and_then(|v| v.as_str()) {
+                        r.session_id = Some(sid.to_string());
+                    }
+                    if let Some(u) = event.get("usage") {
+                        r.usage = Some(u.clone());
+                    }
+                    Some(r)
+                }
+                _ => None,
+            }
+        }
+    }
+
+    struct FakeExecutor;
+
+    impl Executor for FakeExecutor {
+        fn cli_name(&self) -> &str {
+            "conformance-fake-cli"
+        }
+        fn install_hint(&self) -> &str {
+            ""
+        }
+        fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
+            Box::new(FakeHandlers {
+                lines: LINES.lock().unwrap().clone(),
+            })
+        }
+    }
+
+    fn fake_factory() -> Box<dyn Executor> {
+        Box::new(FakeExecutor)
+    }
+
+    #[tokio::test]
+    async fn executor_path_matches_executors_json() {
+        let path = super::conformance_dir().join("executors.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let file: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+        let scenarios = file["scenarios"].as_array().cloned().unwrap_or_default();
+        // Sanity: an emptied or mis-pathed fixture must fail, not pass vacuously.
+        assert!(
+            scenarios.len() >= 13,
+            "expected >= 13 executor scenarios, got {}",
+            scenarios.len()
+        );
+
+        register_executor("conformance-fake-exec", fake_factory);
+        let mut divergences: Vec<String> = Vec::new();
+
+        for sc in &scenarios {
+            let name = sc["name"].as_str().unwrap_or("?");
+            let exp = &sc["expect"];
+            *LINES.lock().unwrap() = sc["lines"].as_array().cloned().unwrap_or_default();
+
+            let mut profile = Profile::default();
+            profile.executor = Some("conformance-fake-exec".to_string());
+            profile.streaming = sc["streaming"].as_bool().unwrap_or(true);
+
+            let partials = Arc::new(Mutex::new(Vec::<String>::new()));
+            let sink = partials.clone();
+            let opts = RunOptions::new("hello").on_partial(move |text, _sid| {
+                sink.lock().unwrap().push(text);
+            });
+
+            let result = run(&profile, opts)
+                .await
+                .unwrap_or_else(|e| panic!("{name}: run failed: {e}"));
+
+            let checks: [(&str, String, String); 4] = [
+                ("reply", result.reply.clone(), exp["reply"].as_str().unwrap_or("").to_string()),
+                (
+                    "session_id",
+                    result.session_id.clone(),
+                    exp["session_id"].as_str().unwrap_or("").to_string(),
+                ),
+                ("error", result.error.clone(), exp["error"].as_str().unwrap_or("").to_string()),
+                (
+                    "exit_code",
+                    result.exit_code.to_string(),
+                    exp["exit_code"].as_i64().unwrap_or(0).to_string(),
+                ),
+            ];
+            for (field, got, want) in checks {
+                if got != want {
+                    divergences.push(format!("{name}: {field}: got {got:?} want {want:?}"));
+                }
+            }
+
+            let want_usage = if exp["usage"].is_null() {
+                None
+            } else {
+                Some(exp["usage"].clone())
+            };
+            if result.usage != want_usage {
+                divergences.push(format!(
+                    "{name}: usage: got {:?} want {want_usage:?}",
+                    result.usage
+                ));
+            }
+
+            let got_partials = partials.lock().unwrap().clone();
+            let want_partials: Vec<String> = exp["partials"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if got_partials != want_partials {
+                divergences.push(format!(
+                    "{name}: partials: got {got_partials:?} want {want_partials:?}"
+                ));
+            }
+        }
+
+        assert!(
+            divergences.is_empty(),
+            "Rust executor path diverges from executors.json:\n  {}",
+            divergences.join("\n  ")
+        );
+    }
+}
