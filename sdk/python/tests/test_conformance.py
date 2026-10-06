@@ -11,6 +11,12 @@ posture matrix. These are driven through `run()` with a fake CLI on PATH that
 records its own argv, so a case pins observable behaviour (which argv the CLI
 received, or that it was never spawned) rather than internal signatures.
 
+
+Also drives `spec/conformance/executors.json` through the in-process executor
+path (`run_via_executor`) with a fake printf-backed executor, asserting the
+full RunResult. The Node SDK (`conformance.test.js`) and the Rust SDK
+(`sdk/rust/src/conformance.rs`) drive the same fixture.
+
 When you change the spec's line-recognition rules, add a case here first;
 both SDKs will fail until they agree.
 """
@@ -26,10 +32,12 @@ from unittest.mock import patch
 import pytest
 
 from agentproc.executors import EXECUTORS
-from agentproc.runner import AUTO_APPROVE_FLAGS, RunOptions, _compose_env, classify_line, normalize_profile, run
+from agentproc.runner import AUTO_APPROVE_FLAGS, RunOptions, _compose_env, classify_line, normalize_profile, run, run_via_executor
 
-CASES_PATH = Path(__file__).resolve().parents[3] / "spec" / "conformance" / "cases.json"
+CONFORMANCE_DIR = Path(__file__).resolve().parents[3] / "spec" / "conformance"
+CASES_PATH = CONFORMANCE_DIR / "cases.json"
 CASES_DATA = json.loads(CASES_PATH.read_text(encoding="utf-8"))
+EXECUTORS_PATH = CONFORMANCE_DIR / "executors.json"
 
 
 def _load_cases():
@@ -139,3 +147,80 @@ def test_posture_conformance(case: dict) -> None:
         assert token in argv, f"{case['name']}: {token} missing from {argv}"
     for token in expect.get("argv_excludes", []):
         assert token not in argv, f"{case['name']}: {token} present in {argv}"
+
+
+def _fake_executor(lines):
+    """printf-backed fake CLI emitting one NDJSON line per scenario entry,
+    plus the fixture's shared rule-table parse_event."""
+    joined = "\n".join(json.dumps(l) for l in lines)
+
+    def build_args(message, session_id, env, ctx):
+        return ["printf", "%s\\n", joined]
+
+    def parse_event(event):
+        t = event.get("type")
+        if t == "partial":
+            return {"partial_text": event.get("text")}
+        if t == "result":
+            out = {"final_text": event.get("text", "")}
+            if event.get("session_id"):
+                out["session_id"] = event["session_id"]
+            if event.get("usage") is not None:
+                out["usage"] = event["usage"]
+            return out
+        if t == "error":
+            out = {"error": event.get("message")}
+            if event.get("session_id"):
+                out["session_id"] = event["session_id"]
+            if event.get("usage") is not None:
+                out["usage"] = event["usage"]
+            return out
+        return None
+
+    return {
+        "cli_name": "fake-cli",
+        "install_hint": "",
+        "plain": False,
+        "build_args": build_args,
+        "parse_event": parse_event,
+    }
+
+
+def _make_opts(**kwargs):
+    defaults = dict(
+        message="hello",
+        session_id="",
+        extra_env={},
+        timeout_secs=10,
+        streaming=None,
+        on_partial=None,
+        on_session=None,
+        on_error=None,
+        cwd=None,
+        profile_dir=None,
+    )
+    defaults.update(kwargs)
+    return RunOptions(**defaults)
+
+
+def _load_executor_scenarios():
+    scenarios = json.loads(EXECUTORS_PATH.read_text(encoding="utf-8"))["scenarios"]
+    # Sanity: an emptied or mis-pathed fixture must fail, not pass vacuously.
+    assert len(scenarios) >= 13, f"executors.json: expected >= 13 scenarios, got {len(scenarios)}"
+    return [pytest.param(s, id=s["name"]) for s in scenarios]
+
+
+@pytest.mark.parametrize("scenario", _load_executor_scenarios())
+def test_executor_path_conformance(scenario: dict) -> None:
+    exp = scenario["expect"]
+    partials = []
+    result = run_via_executor(
+        _fake_executor(scenario["lines"]),
+        _make_opts(streaming=scenario["streaming"], on_partial=partials.append),
+    )
+    assert result.reply == exp["reply"], "reply"
+    assert result.session_id == exp["session_id"], "session_id"
+    assert result.error == exp["error"], "error"
+    assert result.exit_code == exp["exit_code"], "exit_code"
+    assert result.usage == exp["usage"], "usage"
+    assert partials == exp["partials"], "partials"

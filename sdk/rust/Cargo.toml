@@ -1,6 +1,6 @@
 [package]
 name = "agentproc"
-version = "0.13.0"
+version = "0.13.2"
 edition = "2021"
 description = "AgentProc Protocol SDK — connect any Agent CLI to a messaging platform (Rust)"
 license = "MIT"

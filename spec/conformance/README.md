@@ -44,6 +44,19 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
   with the npm/pypi package, so the runner cannot read it at runtime); the
   conformance tests assert the embedded copies match this file rule-for-rule
   and that each rule's `sample` produces the expected `hint`.
+- `executors.json` — executor (in-process) path scenarios (issue #12). Each
+  scenario's `lines` are agent stdout NDJSON event **objects** (not pre-encoded
+  strings) fed through a fake executor, and asserts the full RunResult:
+  `{reply, session_id, error, exit_code, usage, partials}`. The fake parse
+  rules are embedded in the `_comment` and replicated in each consumer test:
+  `{type:"partial",text}` → `partial_text`; `{type:"result",text?,
+  session_id?,usage?}` → `final_text` (text may be `""`) / `session_id` /
+  `usage`; `{type:"error",message[,session_id[,usage]]}` → `error` /
+  `session_id` / `usage`; any other type → ignored. Covers usage passthrough,
+  streaming reply dedup, non-streaming final-only assembly,
+  empty-reply-is-success, error mid-stream, usage arriving on a later event or
+  on an `error` event, first-non-empty `usage`, missing / conflicting /
+  invalid `session_id`, and second-`result` suppression.
 
 ## Wire 0.4 in one paragraph
 
@@ -86,6 +99,18 @@ Both reference SDKs run the same fixtures through their runners:
   Each driver also asserts that its SDK's embedded auto-approve flag list is
   equal, item for item, to `auto_approve_flags` — the matrix is driven from
   this file, so those lists must not drift.
+
+
+- `executors.json` → executor-path `run_via_executor` / `runViaExecutor` / Rust `run` (in-process):
+  - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.run_via_executor` (fake printf-backed executor)
+  - Node:   `sdk/node/src/conformance.test.js`     → `runner.runViaExecutor` (fake tmp-script executor)
+  - Rust:   `sdk/rust/src/conformance.rs`         → `agentproc::run` with a registered fake executor (`--features executors`)
+
+  All three consumers live in the language's existing conformance entry point,
+  so each conformance job runs this fixture. Each of them asserts a minimum
+  scenario count (13) as well as the per-scenario expectations, so a fixture
+  that is emptied, renamed, or mis-pathed fails loudly instead of passing
+  vacuously.
 
 If two SDKs disagree on any case or scenario, at least one of them fails. This
 is the guardrail that keeps the Python and Node implementations honest

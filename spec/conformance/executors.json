@@ -1,0 +1,121 @@
+{
+  "_comment": "Executor (in-process) path scenarios (issue #12). Each scenario feeds the listed NDJSON event objects to a fake CLI via a fake executor (build_args returns an argv that prints the lines; parse_event maps per the embedded rules table) and asserts the full RunResult: {reply, session_id, error, exit_code, usage, partials}. Shared parse rules (identical in all three SDKs' tests): {type:'partial',text} -> partial_text; {type:'result',text?,session_id?,usage?} -> final_text/session_id/usage (text may be ''); {type:'error',message,session_id?,usage?} -> error/session_id/usage; any other type -> ignored. Python, Node, and Rust MUST match.",
+  "scenarios": [
+    {
+      "name": "usage passthrough: result event usage lands on RunResult verbatim",
+      "streaming": true,
+      "lines": [
+        {"type": "result", "text": "done", "session_id": "s-1", "usage": {"input_tokens": 3, "output_tokens": 1}}
+      ],
+      "expect": {"reply": "done", "session_id": "s-1", "error": "", "exit_code": 0, "usage": {"input_tokens": 3, "output_tokens": 1}, "partials": []}
+    },
+    {
+      "name": "streaming dedup: partials forwarded then result -> reply empty, no duplicated body",
+      "streaming": true,
+      "lines": [
+        {"type": "partial", "text": "hello "},
+        {"type": "result", "text": "hello world"}
+      ],
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "usage": null, "partials": ["hello "]}
+    },
+    {
+      "name": "non-streaming: partials suppressed, reply = final_text only",
+      "streaming": false,
+      "lines": [
+        {"type": "partial", "text": "hello "},
+        {"type": "result", "text": "final"}
+      ],
+      "expect": {"reply": "final", "session_id": "", "error": "", "exit_code": 0, "usage": null, "partials": []}
+    },
+    {
+      "name": "empty result text is a successful turn with empty reply",
+      "streaming": true,
+      "lines": [
+        {"type": "result", "text": "", "session_id": "cli-sess-9f3a2c1e"}
+      ],
+      "expect": {"reply": "", "session_id": "cli-sess-9f3a2c1e", "error": "", "exit_code": 0, "usage": null, "partials": []}
+    },
+    {
+      "name": "no recognisable events -> success with empty reply",
+      "streaming": true,
+      "lines": [
+        {"type": "unknown-event", "data": 1}
+      ],
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "usage": null, "partials": []}
+    },
+    {
+      "name": "error mid-stream: first error wins, session_id still captured, later lines suppressed",
+      "streaming": true,
+      "lines": [
+        {"type": "partial", "text": "seen before error"},
+        {"type": "result", "text": "should not appear", "session_id": "s-before-error"},
+        {"type": "error", "message": "boom"},
+        {"type": "partial", "text": "after error"}
+      ],
+      "expect": {"reply": "", "session_id": "s-before-error", "error": "boom", "exit_code": 1, "usage": null, "partials": ["seen before error"]}
+    },
+    {
+      "name": "usage only on a later event is not lost",
+      "streaming": true,
+      "lines": [
+        {"type": "partial", "text": "x"},
+        {"type": "result", "text": "y", "usage": {"input_tokens": 7, "output_tokens": 2}}
+      ],
+      "expect": {"reply": "", "session_id": "", "error": "", "exit_code": 0, "usage": {"input_tokens": 7, "output_tokens": 2}, "partials": ["x"]}
+    },
+    {
+      "name": "usage carried on an error event is kept",
+      "streaming": true,
+      "lines": [
+        {"type": "partial", "text": "x"},
+        {"type": "error", "message": "boom", "usage": {"input_tokens": 9, "output_tokens": 0}}
+      ],
+      "expect": {"reply": "", "session_id": "", "error": "boom", "exit_code": 1, "usage": {"input_tokens": 9, "output_tokens": 0}, "partials": ["x"]}
+    },
+    {
+      "name": "extra (conflicting) session_id ignored; second result ignored",
+      "streaming": true,
+      "lines": [
+        {"type": "result", "text": "done", "session_id": "first"},
+        {"type": "result", "text": "ignored", "session_id": "second"}
+      ],
+      "expect": {"reply": "done", "session_id": "first", "error": "", "exit_code": 0, "usage": null, "partials": []}
+    },
+    {
+      "name": "missing session_id on partials, discovered on result",
+      "streaming": true,
+      "lines": [
+        {"type": "partial", "text": "a"},
+        {"type": "result", "text": "", "session_id": "late-sid"}
+      ],
+      "expect": {"reply": "", "session_id": "late-sid", "error": "", "exit_code": 0, "usage": null, "partials": ["a"]}
+    },
+    {
+      "name": "invalid session_id ignored in the in-process path",
+      "streaming": true,
+      "lines": [
+        {"type": "result", "text": "done", "session_id": "bad/path"}
+      ],
+      "expect": {"reply": "done", "session_id": "", "error": "", "exit_code": 0, "usage": null, "partials": []}
+    },
+    {
+      "name": "first error wins; post-error result is suppressed",
+      "streaming": true,
+      "lines": [
+        {"type": "error", "message": "boom1"},
+        {"type": "error", "message": "boom2"},
+        {"type": "result", "text": "late"}
+      ],
+      "expect": {"reply": "", "session_id": "", "error": "boom1", "exit_code": 1, "usage": null, "partials": []}
+    },
+    {
+      "name": "second usage ignored (first non-empty wins)",
+      "streaming": true,
+      "lines": [
+        {"type": "result", "text": "a", "usage": {"input_tokens": 1, "output_tokens": 1}},
+        {"type": "result", "text": "b", "usage": {"input_tokens": 2, "output_tokens": 2}}
+      ],
+      "expect": {"reply": "a", "session_id": "", "error": "", "exit_code": 0, "usage": {"input_tokens": 1, "output_tokens": 1}, "partials": []}
+    }
+  ]
+}

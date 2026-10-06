@@ -1968,7 +1968,14 @@ mod tests {
                 "executor `{expected}` not registered; have: {names:?}"
             );
         }
-        assert_eq!(names.len(), 14, "expected exactly 14 executors, got {}", names.len());
+        // Built-ins only: dynamic registrations (e.g. the conformance fake
+        // executor) may extend the registry at runtime by design.
+        assert_eq!(
+            STATIC_EXECUTORS.len(),
+            14,
+            "expected exactly 14 built-in executors, got {}",
+            STATIC_EXECUTORS.len()
+        );
     }
 
     #[test]
