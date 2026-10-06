@@ -4,9 +4,25 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.6`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.17.0` (unreleased); the Rust crate is on its own track currently `0.13.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.18.0` (unreleased); the Rust crate is on its own track currently `0.13.0`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
+
+### Spec / SDK 0.18.0 — unreleased
+
+**fix(sdk)!: fail-closed permission posture on the executor path (#7)**
+
+- Spec (revision `1.5` → `1.6`): `buildArgs` gains a fourth `ctx` argument carrying the profile's `permission` value, plus a new `supportsPermission` capability bit; the Runner contract now refuses to spawn when `permission: true` meets an executor without an approval channel. New bridge-side `AGENTPROC_AUTO_APPROVE` knob (`0` / `false`, case-insensitive, whitespace-trimmed) makes the runner refuse any auto-approve argv. Hub bridges that inject an auto-approve default of their own (`hub/dsh`) are bound by the same knob. No wire change — `PROTOCOL_VERSION` stays `0.4`; spawn-path semantics unchanged.
+- Python/Node executors: all 14 `buildArgs` now take the `ctx` argument (`build_args(..., ctx=None)` in Python, so existing 3-argument direct calls keep working). `claude-code` builds the permission argv when `ctx.permission` is set — `--print --output-format stream-json --input-format stream-json --verbose --permission-prompt-tool stdio --permission-mode default` (message via stdin, not argv), byte-for-byte the same as the Rust executor and the `hub/claude-code` bridge — and declares `supports_permission` / `supportsPermission`. The other 13 executors leave it falsy.
+- Python/Node runners: new `AUTO_APPROVE_FLAGS` (single source of truth `auto_approve_flags` in `spec/conformance/cases.json`, asserted equal by both conformance drivers) plus a posture gate between `buildArgs` and spawn — `permission: true` on a channelless executor, or any auto-approve token in argv while `AGENTPROC_AUTO_APPROVE` is off, returns an `error` event and `EXIT_ERROR` **without spawning the CLI**. The Node path returns the result (never throws) so a caller reading the return value observes the refusal.
+- **Breaking (1):** a third-party Python executor whose `build_args` still takes three arguments now raises `TypeError` when the runner calls it with four. The existing `except Exception` around the call converts that into a failed turn with an error message — fail-closed, not silent. Fix by accepting the fourth argument.
+- **Breaking (2):** `permission: true` + an executor with no approval channel used to run with `--dangerously-skip-permissions` / `--yolo` and report success. It now hard-fails (error + non-zero exit code). Executors with a real approval channel must declare `supportsPermission: true` (Python `supports_permission`); only `claude-code` does in-tree.
+- **Known limitation:** on the Python and Node executor paths the claude-code approval argv is built, but the bidirectional frame loop (initial `stream-json` user message on stdin, `control_request` → `control_response`) is **not wired up** — do not read those paths as a working approval loop. Rust and the hub bridge are wired.
+- `hub/dsh`: `child_env()` / `childEnv()` skip the injected `DSH_PERMISSION_MODE=danger-full-access` default when `AGENTPROC_AUTO_APPROVE` is off, leaving dsh's own "ask" policy in place; an explicit `DSH_PERMISSION_MODE` in the profile is still honoured. Both bridges change together (observable parity), documented in `hub/dsh/README.md` + `profile.yaml`.
+- `hub/PERMISSIONS.md`: new "SDK executor posture" matrix, new "Posture switch" section, dsh/claude-code rows updated, and Recommendation #4 rewritten (recommend auto-approve is now an explicit switch, not an unlabelled default).
+- Docs: `docs/spec/index.md` + `docs/zh/spec/index.md` "Optional tool permission" section rewritten to match the new MUST and their revision stamps bumped to `1.6`; `docs/public/llms-full.txt` regenerated.
+- Tests: the two `[wip]` repro files are merged into `sdk/python/tests/test_executors.py` + `test_conformance.py` and `sdk/node/src/executors.test.js` + `conformance.test.js` and deleted. `posture_cases` gained an explicit `expect.refused` (= the CLI was never spawned), which is the only field that separates a posture refusal from any other failed turn; the Python and Node drivers assert it, the Rust driver asserts the refusal decision plus the argv of a non-refused case.
+- This release is not tagged and not published.
 
 ### Spec / SDK 0.17.0 — unreleased
 
@@ -48,6 +64,15 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - `hub/codex/bridge.py` / `bridge.js`: permission mode's one-shot `CODEX_HOME` (which copies `auth.json` for authentication) now uses an owner-identifiable temp dir (`agentproc-codex-<pid>-…`), sweeps stale leftover dirs at startup (deleting only dirs whose owner pid is dead **and** that are older than 1h — double protection for concurrent instances; the startup sweep is the only mechanism covering a SIGKILLed bridge), and registers atexit/SIGTERM/SIGINT handlers as a backstop. Normal-path cleanup is unchanged.
 - `hub/codex/README.md` documents the permission-mode trust boundary and the temp-home lifecycle.
 - Tests: new `sdk/python/tests/test_codex_perm_cleanup.py` drives both bridges as subprocesses (fake codex CLI on PATH, fake `~/.codex/auth.json`) asserting no residue after normal exit, startup sweep of a pre-planted stale dir, and SIGTERM cleanup — observable parity across the two bridges.
+
+### Rust SDK 0.12.3
+
+**`sdk/rust`: fail-closed permission posture on the executor path (#7)**
+
+- `Executor` gains `fn supports_permission(&self) -> bool` (default `false`), overridden to `true` only by `ClaudeCodeExecutor`; `executors::AUTO_APPROVE_FLAGS` mirrors `auto_approve_flags` from `spec/conformance/cases.json`.
+- `runner::posture_refusal` rejects a turn before `Command::new` (as `RunnerError::InvalidProfile` — error output + non-zero exit, the same shape as the function's existing hard fails) when `permission: true` meets an executor without an approval channel, or when `AGENTPROC_AUTO_APPROVE` is `0` / `false` and the built argv contains an auto-approve token. `build_args` signatures are unchanged — the Rust executor already carries `permission` via `TurnCtx`.
+- `conformance.rs`: new `posture_cases` driver — asserts the embedded flag list equals the fixture's, then for every case checks the refusal decision against `expect.error` / `expect.refused` and the argv of a non-refused case. `reply` / `exit_zero` need a real spawn and stay covered by the Python and Node drivers (noted in the driver).
+- Version bumped 0.12.2 → 0.12.3. Not tagged, not published.
 
 ### Rust SDK 0.12.2
 

@@ -8,6 +8,12 @@
  * `classify_line` in `sdk/python/tests/test_conformance.py` — together they
  * guarantee the two reference implementations classify stdout identically.
  *
+ * The same file also carries `posture_cases` — the per-executor permission
+ * posture matrix. These are driven through `run()` with a fake CLI on PATH
+ * that records its own argv, so a case pins observable behaviour (which argv
+ * the CLI received, or that it was never spawned) rather than internal
+ * signatures.
+ *
  * When you change the spec's line-recognition rules, add a case to the JSON
  * file first; both SDKs will fail until they agree.
  */
@@ -15,9 +21,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
-const { classifyLine } = require('./runner.js');
+const { run, classifyLine, AUTO_APPROVE_FLAGS } = require('./runner.js');
+const { EXECUTORS } = require('./executors.js');
 
 const CASES_PATH = path.resolve(__dirname, '../../../spec/conformance/cases.json');
 const data = JSON.parse(fs.readFileSync(CASES_PATH, 'utf8'));
@@ -53,6 +61,80 @@ for (const c of data.env_compose || []) {
     }
     for (const name of c.expect_absent) {
       assert.ok(!(name in env), `${name} leaked into the composed child env`);
+    }
+  });
+}
+
+// Fake CLI: record every argv token in <dir>/argv.txt, then report a clean turn.
+const SHIM = `#!/usr/bin/env bash
+printf '%s\\n' "$@" > {argvFile}
+echo '{"type":"result","result":"ok","session_id":"sess-1"}'
+`;
+
+/** Drive one `posture_cases` entry through `run`; returns { result, argv } (argv null = never spawned). */
+async function runPostureCase(c) {
+  const cliName = EXECUTORS[c.executor].cliName;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-posture-'));
+  const argvFile = path.join(dir, 'argv.txt');
+  fs.writeFileSync(path.join(dir, cliName), SHIM.replace('{argvFile}', argvFile), { mode: 0o755 });
+
+  const caseEnv = c.env || {};
+  const savedPath = process.env.PATH;
+  const savedKnob = process.env.AGENTPROC_AUTO_APPROVE;
+  process.env.PATH = `${dir}${path.delimiter}${savedPath}`;
+  // Written to the runner process env and to the per-run env extras, so the
+  // case reaches the runner either way. Cases without the knob explicitly
+  // blank it, so the ambient environment cannot leak a posture switch into
+  // the fixture.
+  process.env.AGENTPROC_AUTO_APPROVE = caseEnv.AGENTPROC_AUTO_APPROVE || '';
+
+  const profile = { executor: c.executor };
+  if ('permission' in c) profile.permission = c.permission;
+
+  let result;
+  try {
+    result = await run(profile, { message: 'hi', extraEnv: caseEnv });
+  } finally {
+    process.env.PATH = savedPath;
+    if (savedKnob === undefined) delete process.env.AGENTPROC_AUTO_APPROVE;
+    else process.env.AGENTPROC_AUTO_APPROVE = savedKnob;
+  }
+
+  const argv = fs.existsSync(argvFile)
+    ? fs.readFileSync(argvFile, 'utf8').split('\n').filter(Boolean)
+    : null;
+  return { result, argv };
+}
+
+test('embedded AUTO_APPROVE_FLAGS matches auto_approve_flags', () => {
+  assert.deepStrictEqual(AUTO_APPROVE_FLAGS, data.auto_approve_flags);
+});
+
+for (const c of data.posture_cases) {
+  test(`posture: ${c.name}`, async () => {
+    const { result, argv } = await runPostureCase(c);
+    const expect = c.expect;
+    if (expect.refused) {
+      assert.strictEqual(argv, null, `${c.name}: CLI was spawned with ${argv}`);
+      assert.notStrictEqual(result.error, '', `${c.name}: expected a hard failure`);
+      assert.notStrictEqual(result.exitCode, 0, `${c.name}: expected a non-zero exit code`);
+      return;
+    }
+    assert.ok(argv, `${c.name}: CLI was never spawned (${result.error})`);
+    if (expect.error) {
+      assert.notStrictEqual(result.error, '', `${c.name}: expected an error`);
+      assert.notStrictEqual(result.exitCode, 0, `${c.name}: expected non-zero exit`);
+    }
+    if (expect.exit_zero) {
+      assert.strictEqual(result.error, '', `${c.name}: ${result.error}`);
+      assert.strictEqual(result.exitCode, 0, `${c.name}: exit ${result.exitCode}`);
+    }
+    if (expect.reply !== undefined) assert.strictEqual(result.reply, expect.reply, c.name);
+    for (const token of expect.argv_contains || []) {
+      assert.ok(argv.includes(token), `${c.name}: ${token} missing from ${argv}`);
+    }
+    for (const token of expect.argv_excludes || []) {
+      assert.ok(!argv.includes(token), `${c.name}: ${token} present in ${argv}`);
     }
   });
 }

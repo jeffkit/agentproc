@@ -639,6 +639,51 @@ async fn wait_with_timeout(
 // in-process path
 // ---------------------------------------------------------------------------
 
+/// Whether executors may bake auto-approve flags into argv. Read from the
+/// runner process's own environment (the spec makes `AGENTPROC_AUTO_APPROVE` a
+/// process-side knob, not a profile field). `0` / `false`, case-insensitive
+/// and whitespace-trimmed, turns it off.
+#[cfg(feature = "executors")]
+fn auto_approve_enabled() -> bool {
+    match std::env::var("AGENTPROC_AUTO_APPROVE") {
+        Ok(value) => {
+            let v = value.trim().to_ascii_lowercase();
+            v != "0" && v != "false"
+        }
+        Err(_) => true,
+    }
+}
+
+/// Why this turn must not be spawned, or `None` to proceed.
+#[cfg(feature = "executors")]
+pub(crate) fn posture_refusal(
+    executor_name: &str,
+    supports_permission: bool,
+    permission: bool,
+    auto_approve_enabled: bool,
+    argv: &[String],
+) -> Option<String> {
+    if permission && !supports_permission {
+        return Some(format!(
+            "executor `{executor_name}` has no AgentProc permission channel; refusing to run \
+             with auto-approve. Remove 'permission: true' from the profile, or use an executor \
+             that supports it (claude-code)."
+        ));
+    }
+    if !auto_approve_enabled {
+        for token in crate::executors::AUTO_APPROVE_FLAGS {
+            if argv.iter().any(|a| a == token) {
+                return Some(format!(
+                    "executor `{executor_name}` would run with the auto-approve flag `{token}`, \
+                     but AGENTPROC_AUTO_APPROVE is off. Unset AGENTPROC_AUTO_APPROVE, or use a \
+                     profile that does not need auto-approval."
+                ));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(feature = "executors")]
 async fn run_via_executor(
     profile: &crate::Profile,
@@ -657,6 +702,16 @@ async fn run_via_executor(
             "executor `{}` build_args returned empty argv",
             exec.cli_name()
         )));
+    }
+
+    if let Some(refusal) = posture_refusal(
+        exec.cli_name(),
+        exec.supports_permission(),
+        profile.permission,
+        auto_approve_enabled(),
+        &argv,
+    ) {
+        return Err(RunnerError::InvalidProfile(refusal));
     }
 
     let cli = argv[0].clone();

@@ -142,7 +142,7 @@ stdout 每一行都是一个以 `\n` 结尾的 JSON 对象，带 `type` 字段�
 
 ### 可选工具权限
 
-通过 profile `permission: true` 开启。不是通用 HIL——仅工具授权。没有轮中审批通道的 CLI 继续使用 `--dangerously-skip-permissions` / `--yolo`。
+通过 profile `permission: true` 开启。不是通用 HIL——仅工具授权。在 in-process executor 路径上，只有声明了审批通道的 executor（今仅 `claude-code`）才接受 `permission: true`；其余 executor 一律拒绝运行——`error` 事件 + 非零退出码，永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。未请求权限的 profile 仍带这些自动批准 flag；`AGENTPROC_AUTO_APPROVE=0` / `false` 会让它们也变成同样的拒绝。
 
 ```
 {"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}

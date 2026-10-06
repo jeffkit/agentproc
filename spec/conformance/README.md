@@ -198,6 +198,7 @@ present and string-typed.
       "env": {"AGENTPROC_AUTO_APPROVE": "0"},
       "expect": {
         "error": true,
+        "refused": true,
         "exit_zero": false,
         "reply": "ok",
         "argv_contains": ["<argv token that must be present>"],
@@ -232,11 +233,17 @@ process environment and to the per-run env extras, so the value reaches
 `expect.error` (`true` = the turn must fail) and `expect.exit_zero` (the
 opposite) are mutually exclusive; `reply` is the expected reply body.
 `argv_contains` / `argv_excludes` are checked against the argument list the
-CLI actually received. When the runner refuses to spawn, no argv exists and
-the token lists are not checked — refusing is the observable outcome the case
-pins. The Rust driver asserts the refusal decision and the argv of a
-non-refused case only; `reply` / `exit_zero` need a real spawn and are covered
-by the Python and Node drivers.
+CLI actually received.
+
+`expect.refused` (`true` = the runner must never spawn the CLI) is the only
+field that distinguishes a posture refusal from any other failure: the driver
+MUST assert that the fake CLI's argv file does not exist, because a failing
+turn can also come from an unrecognised stdout body. When `refused` is set the
+token lists are not checked — no argv exists to check. The Python and Node
+drivers assert `refused` for every refusal case; the Rust driver asserts the
+refusal decision and the argv of a non-refused case only (`reply` /
+`exit_zero` need a real spawn and are likewise covered by the Python and Node
+drivers).
 
 `auto_approve_flags` is the single source of truth for "this argv token means
 auto-approve". Every SDK embeds the same list (the file is not shipped with

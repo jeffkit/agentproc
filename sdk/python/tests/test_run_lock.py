@@ -111,7 +111,7 @@ class TestRunnerIntegration:
         from agentproc import EXECUTORS
 
         def _make():
-            def build_args(message, session_id, env):
+            def build_args(message, session_id, env, ctx):
                 return list(argv)
             return {"build_args": build_args}
 

@@ -52,6 +52,18 @@ impl ParseResult {
     }
 }
 
+/// argv tokens that mean "auto-approve everything". Single source of truth is
+/// `auto_approve_flags` in spec/conformance/cases.json; the conformance driver
+/// asserts the two lists are equal item for item.
+pub const AUTO_APPROVE_FLAGS: &[&str] = &[
+    "--dangerously-skip-permissions",
+    "--yolo",
+    "--always-approve",
+    "--yes-always",
+    "--approve",
+    "--auto",
+];
+
 /// Per-CLI executor adapter. Stateless across turns — implement
 /// [`TurnHandlers`] on a separate struct (or the same one) for the per-turn
 /// pair.
@@ -61,6 +73,12 @@ pub trait Executor: Send + Sync {
     /// `true` = CLI emits plain text on stdout (not NDJSON). The runner treats
     /// stdout as the reply body and does not call `parse_event`.
     fn plain(&self) -> bool {
+        false
+    }
+    /// `true` only when this executor has a mid-turn approval channel. The
+    /// runner refuses to run a profile with `permission: true` against an
+    /// executor that does not declare it.
+    fn supports_permission(&self) -> bool {
         false
     }
     /// Build a fresh per-turn handlers pair. `ctx` carries turn-level config
@@ -363,6 +381,9 @@ impl Executor for ClaudeCodeExecutor {
     }
     fn install_hint(&self) -> &str {
         "Install: npm install -g @anthropic-ai/claude-code"
+    }
+    fn supports_permission(&self) -> bool {
+        true
     }
     fn make_turn(&self, ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
         Box::new(ClaudeCodeTurn { permission: ctx.permission })
@@ -1957,6 +1978,16 @@ mod tests {
         {
             assert!(lookup(name).is_some(), "lookup({name}) returned None");
         }
+    }
+
+    #[test]
+    fn only_claude_code_supports_permission() {
+        let mut supporting: Vec<String> = executor_names()
+            .into_iter()
+            .filter(|name| lookup(name).map(|e| e.supports_permission()).unwrap_or(false))
+            .collect();
+        supporting.sort();
+        assert_eq!(supporting, vec!["claude-code".to_string()]);
     }
 
     // ----- dsh -----

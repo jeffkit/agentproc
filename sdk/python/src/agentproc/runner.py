@@ -62,6 +62,7 @@ __all__ = [
     "ENV_INFRA_VARS",
     "build_base_env",
     "_compose_env",
+    "AUTO_APPROVE_FLAGS",
     "RunResult",
     "RunOptions",
     "run",
@@ -95,6 +96,55 @@ EXIT_TIMEOUT = 124
 EXIT_CANCELLED = 125
 EXIT_SIGINT = 130
 EXIT_SIGTERM = 143
+
+# argv tokens that mean "auto-approve everything". Single source of truth is
+# `auto_approve_flags` in spec/conformance/cases.json; the conformance driver
+# asserts the two lists are equal item for item.
+AUTO_APPROVE_FLAGS = (
+    "--dangerously-skip-permissions",
+    "--yolo",
+    "--always-approve",
+    "--yes-always",
+    "--approve",
+    "--auto",
+)
+
+
+def _auto_approve_enabled() -> bool:
+    """Whether executors may bake auto-approve flags into argv.
+
+    Read from the runner process's own environment (the spec makes
+    AGENTPROC_AUTO_APPROVE a process-side knob, not a profile field). `0` /
+    `false`, case-insensitive and whitespace-trimmed, turns it off.
+    """
+    value = os.environ.get("AGENTPROC_AUTO_APPROVE", "").strip().lower()
+    return value not in ("0", "false")
+
+
+def _posture_refusal(
+    cli_name: str,
+    supports_permission: bool,
+    permission: bool,
+    auto_approve_enabled: bool,
+    argv: List[str],
+) -> Optional[str]:
+    """Why this turn must not be spawned, or None to proceed."""
+    if permission and not supports_permission:
+        return (
+            f"executor '{cli_name}' has no AgentProc permission channel; "
+            "refusing to run with auto-approve. Remove 'permission: true' from "
+            "the profile, or use an executor that supports it (claude-code)."
+        )
+    if not auto_approve_enabled:
+        for token in AUTO_APPROVE_FLAGS:
+            if token in argv:
+                return (
+                    f"executor '{cli_name}' would run with the auto-approve flag "
+                    f"'{token}', but AGENTPROC_AUTO_APPROVE is off. Unset "
+                    "AGENTPROC_AUTO_APPROVE, or use a profile that does not need "
+                    "auto-approval."
+                )
+    return None
 
 
 def _normalise_exit_code(code):
@@ -706,6 +756,7 @@ def run_via_executor(
     """
     cli_name = executor.get("cli_name", "unknown")
     result = RunResult(exit_code=EXIT_ERROR)
+    permission = bool((profile or {}).get("permission"))
 
     if profile is None:
         profile = normalize_profile({"executor": cli_name})
@@ -741,6 +792,7 @@ def run_via_executor(
             options.message or "",
             options.session_id or "",
             env,
+            {"permission": permission},
         )
     except Exception as exc:
         result.error = f"executor '{cli_name}' build_args raised: {exc}"
@@ -752,6 +804,19 @@ def run_via_executor(
         result.error = f"executor '{cli_name}' build_args returned empty argv"
         if options.on_error:
             options.on_error(result.error)
+        return result
+
+    refusal = _posture_refusal(
+        cli_name,
+        bool(executor.get("supports_permission")),
+        permission,
+        _auto_approve_enabled(),
+        argv,
+    )
+    if refusal:
+        result.error = refusal
+        if options.on_error:
+            options.on_error(refusal)
         return result
 
     import shutil

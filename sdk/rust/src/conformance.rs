@@ -126,3 +126,109 @@ fn cases_json_matches_node_classification() {
     // Sanity: the suite must actually contain cases, not silently be empty.
     assert!(checked > 20, "expected >20 conformance cases, got {checked}");
 }
+
+// ---------------------------------------------------------------------------
+// posture_cases — in-process executor permission posture
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct PostureFile {
+    auto_approve_flags: Vec<String>,
+    posture_cases: Vec<PostureCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PostureCase {
+    name: String,
+    executor: String,
+    #[serde(default)]
+    permission: bool,
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+    expect: PostureExpect,
+}
+
+#[derive(Debug, Deserialize)]
+struct PostureExpect {
+    #[serde(default)]
+    error: bool,
+    #[serde(default)]
+    refused: bool,
+    #[serde(default)]
+    argv_contains: Vec<String>,
+    #[serde(default)]
+    argv_excludes: Vec<String>,
+    // `reply` / `exit_zero` need a real spawn; the Python and Node drivers
+    // cover them. This driver asserts only the refusal decision and the argv
+    // of a non-refused case.
+}
+
+#[test]
+fn posture_cases_match_rust_permission_gate() {
+    let path = conformance_dir().join("cases.json");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let file: PostureFile = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+
+    let embedded: Vec<String> = crate::executors::AUTO_APPROVE_FLAGS
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        file.auto_approve_flags, embedded,
+        "embedded AUTO_APPROVE_FLAGS must match auto_approve_flags item for item"
+    );
+
+    let mut checked = 0;
+    for case in &file.posture_cases {
+        let exec = crate::executors::lookup(&case.executor)
+            .unwrap_or_else(|| panic!("{}: unknown executor `{}`", case.name, case.executor));
+        let handlers = exec.make_turn(&crate::executors::TurnCtx { permission: case.permission });
+        let argv = handlers.build_args("", "", &case.env);
+
+        let auto_approve = match case.env.get("AGENTPROC_AUTO_APPROVE") {
+            Some(value) => {
+                let v = value.trim().to_ascii_lowercase();
+                v != "0" && v != "false"
+            }
+            None => true,
+        };
+        let refusal = crate::runner::posture_refusal(
+            exec.cli_name(),
+            exec.supports_permission(),
+            case.permission,
+            auto_approve,
+            &argv,
+        );
+
+        let expects_refusal = case.expect.error || case.expect.refused;
+        assert_eq!(
+            refusal.is_some(),
+            expects_refusal,
+            "{}: refusal decision ({refusal:?})",
+            case.name
+        );
+        if refusal.is_some() {
+            // No argv exists for a refused turn — the token lists are not checked.
+            checked += 1;
+            continue;
+        }
+        for token in &case.expect.argv_contains {
+            assert!(
+                argv.iter().any(|a| a == token),
+                "{}: {token} missing from {argv:?}",
+                case.name
+            );
+        }
+        for token in &case.expect.argv_excludes {
+            assert!(
+                !argv.iter().any(|a| a == token),
+                "{}: {token} present in {argv:?}",
+                case.name
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 10, "expected >10 posture cases, got {checked}");
+}

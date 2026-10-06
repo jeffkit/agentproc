@@ -59,6 +59,47 @@ const EXIT_TIMEOUT = 124;
 const EXIT_SIGINT = 130;
 const EXIT_SIGTERM = 143;
 
+// argv tokens that mean "auto-approve everything". Single source of truth is
+// `auto_approve_flags` in spec/conformance/cases.json; the conformance driver
+// asserts the two lists are equal item for item.
+const AUTO_APPROVE_FLAGS = [
+  '--dangerously-skip-permissions',
+  '--yolo',
+  '--always-approve',
+  '--yes-always',
+  '--approve',
+  '--auto',
+];
+
+// Whether executors may bake auto-approve flags into argv. Read from the
+// runner process's own environment (the spec makes AGENTPROC_AUTO_APPROVE a
+// process-side knob, not a profile field). `0` / `false`, case-insensitive and
+// whitespace-trimmed, turns it off.
+function autoApproveEnabled() {
+  const value = String(process.env.AGENTPROC_AUTO_APPROVE || '').trim().toLowerCase();
+  return value !== '0' && value !== 'false';
+}
+
+// Why this turn must not be spawned, or null to proceed.
+function postureRefusal(cliName, supportsPermission, permission, autoApprove, args) {
+  if (permission && !supportsPermission) {
+    return `executor '${cliName}' has no AgentProc permission channel; `
+      + "refusing to run with auto-approve. Remove 'permission: true' from "
+      + 'the profile, or use an executor that supports it (claude-code).';
+  }
+  if (!autoApprove) {
+    for (const token of AUTO_APPROVE_FLAGS) {
+      if (args.includes(token)) {
+        return `executor '${cliName}' would run with the auto-approve flag `
+          + `'${token}', but AGENTPROC_AUTO_APPROVE is off. Unset `
+          + 'AGENTPROC_AUTO_APPROVE, or use a profile that does not need '
+          + 'auto-approval.';
+      }
+    }
+  }
+  return null;
+}
+
 // POSIX signal numbers (for 128+signo normalisation). Kept as a table rather
 // than os.constants.signals to behave identically across Node versions.
 const SIGNAL_NUMBERS = {
@@ -634,13 +675,23 @@ async function runViaExecutor(profile, options, executor) {
     : executor;
 
   // Build CLI argv.
-  const args = handlers.buildArgs(options.message, sessionId, env);
+  const args = handlers.buildArgs(options.message, sessionId, env, { permission: !!profile.permission });
   if (!Array.isArray(args) || args.length === 0) {
     throw new Error(`[agentproc runner] executor ${JSON.stringify(profile.executor)} buildArgs returned empty argv`);
   }
 
   /** @type {RunResult} */
   const result = { reply: '', sessionId: '', error: '', exitCode: 0, timedOut: false, usage: null };
+
+  const refusal = postureRefusal(
+    executor.cliName, !!executor.supportsPermission, !!profile.permission, autoApproveEnabled(), args,
+  );
+  if (refusal) {
+    result.error = refusal;
+    result.exitCode = EXIT_ERROR;
+    if (options.onError) options.onError(refusal);
+    return result;
+  }
 
   let child;
   try {
@@ -1345,6 +1396,7 @@ module.exports = {
   ENV_INFRA_VARS,
   buildBaseEnv,
   composeEnv,
+  AUTO_APPROVE_FLAGS,
   STDERR_DIAGNOSTICS,
   diagnoseStderrFailure,
   EXECUTORS,

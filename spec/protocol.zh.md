@@ -122,7 +122,7 @@ hub 拉取默认读取仓库的 `main` 分支。将 bridge 侧环境变量 `AGEN
 
 大多数 CLI 在 in-process executor 路径上没有审批通道，因此未设置 `permission: true` 的 profile 会带上 executor 硬编码的自动批准 flag 运行（`--dangerously-skip-permissions`、`--yolo` 等）。把 bridge 侧环境变量 `AGENTPROC_AUTO_APPROVE` 设为 `0` 或 `false`（大小写不敏感，忽略首尾空白）后，runner 会**拒绝** spawn argv 中含有这些 token 的 CLI，改为让本轮失败（`error` 事件 + 非零退出码）。其他取值（包括变量未设置）保持现有行为。
 
-- **作用范围。** 该变量从 runner/bridge 自身进程环境读取——与 `AGENTPROC_HUB_REF` 一样，它是进程侧旋钮，不是 profile 字段，也不属于 [turn 对象](#输入--stdin-turn-对象)。
+- **作用范围。** 该变量从 runner/bridge 自身进程环境读取——与 `AGENTPROC_HUB_REF` 一样，它是进程侧旋钮，不是 profile 字段，也不属于 [turn 对象](#输入--stdin-turn-对象)。hub 桥同样受其约束：会向子进程环境注入自动批准默认值的桥（今仅 `hub/dsh` 的 `DSH_PERMISSION_MODE=danger-full-access`）在该变量关闭时 **MUST NOT** 注入——缺少 profile 显式取值时，一律让 CLI 自身默认生效。由于该变量不在继承的 infra 集内，要把它送到桥只能经 profile `env` 块或 CLI `--env` 标志。
 - **被拒绝的 token。** `--dangerously-skip-permissions`、`--yolo`、`--always-approve`、`--yes-always`、`--approve`、`--auto`（`spec/conformance/cases.json` 中的 `auto_approve_flags` 是单一事实源）。
 - **不受影响。** 为 `permission: true` 生成的审批 argv（例如 `--permission-prompt-tool stdio`）不含自动批准 token，因此仍被放行。
 - **spawn 路径。** 语义不变——那里的 argv 由 profile 作者书写，bridge 不改写。
@@ -847,7 +847,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
-- **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。无 wire 变更；spawn 路径语义不变。
+- **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。自行注入自动批准默认值的 hub 桥（今仅 `hub/dsh`）在该旋钮关闭时 MUST NOT 注入。无 wire 变更；spawn 路径语义不变。
 - **wire 0.4 / doc 1.6** —— 可选 bridge 侧 profile 字段 `budget_secs` 与 `deadline`（与 `timeout_secs` 取最早到期；SIGTERM → 宽限 → SIGKILL 语义一致，退出码 124）。新增「事件可追溯性（可选）」小节：bridge 内部事件 `seq`/`ts` 元数据、`RunResult` 的 `started_at`/`duration`（bridge 实测，区别于 agent 自报 `usage.duration_ms`）、opt-in NDJSON journal（默认关闭、只写文件、绝不写 stdout；关闭时 stdout/stderr 字节一致）。无 wire 变更——stdin/stdout 上的字节不变。SDK 包 bump 至 0.17.0。
 - **doc 1.5** —— Exit Codes：agent 被信号杀死时，bridge **必须**在任何平台将退出码归一为 `128 + 信号编号`，无论宿主操作系统如何报告该死亡（POSIX 负数 wait 状态、Windows）——SIGINT 一律呈现为 `130`，SIGTERM 一律呈现为 `143`。无线协议变更。
 - **doc 1.4** —— 澄清 agent stdout 的 UTF-8 合约：以文本方式解码子进程 stdout 的 bridge **SHOULD** 显式传 `encoding="utf-8"`（并配 `errors="replace"` 容错），而非依赖进程 locale；在非 UTF-8 环境（`LANG=C`、中文 Windows）下按 locale 解码可能在 drain 线程内抛 `UnicodeDecodeError` 并静默杀死一轮对话。无线协议变更。
