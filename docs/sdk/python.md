@@ -143,7 +143,7 @@ result = run(
     RunOptions(
         message="what files are here?",
         session_id="",
-        on_partial=lambda chunk: print(chunk, end="", flush=True),
+        on_partial=lambda chunk, role=None: print(chunk, end="", flush=True),
         on_error=lambda msg: print(f"agent error: {msg}"),
     ),
 )
@@ -153,6 +153,8 @@ print(result.session_id) # session id for the next turn
 print(result.exit_code)  # 0 = success, 1 = error, 124 = timeout
 print(result.usage)      # {'input_tokens': 12, 'output_tokens': 34, ...} or None
 ```
+
+`on_partial(text, role)` receives the partial's `role` as its optional second argument — `'thinking'` for reasoning text, `None` when the event carries none (never a synthesised `'output'`). A **one-argument callback still works** (`on_partial=chunks.append`, `lambda chunk: …`), so existing code needs no change. On the in-process executor path the second argument is always `None`, because a `ParseResult` has no `role`.
 
 ### `RunResult` fields
 

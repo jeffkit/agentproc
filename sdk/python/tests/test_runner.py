@@ -457,8 +457,8 @@ class TestRunEndToEnd:
         assert r.reply == ""
 
     def test_partial_with_role_streams_text(self, agent_script):
-        # Python's on_partial receives only the text (role is not forwarded);
-        # this pins that a role-bearing partial still streams its text.
+        # `partials.append` is the documented one-argument form: the role is
+        # inspected away, and a role-bearing partial still streams its text.
         agent = agent_script(
             "#!/usr/bin/env bash\n"
             + _evt({"type": "partial", "text": "thinking...", "role": "thinking"}) + "\n"
@@ -468,6 +468,41 @@ class TestRunEndToEnd:
         r = run({"command": str(agent)}, RunOptions(message="hi", on_partial=partials.append))
         assert partials == ["thinking..."]
         assert r.reply == ""
+
+    def test_partial_role_is_second_callback_argument(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "partial", "text": "thinking...", "role": "thinking"}) + "\n"
+            + _evt({"type": "partial", "text": "unknown", "role": "plan"}) + "\n"
+            + _evt({"type": "result", "text": ""}) + "\n"
+        )
+        seen: List[tuple] = []
+        run(
+            {"command": str(agent)},
+            RunOptions(
+                message="hi",
+                on_partial=lambda text, role=None: seen.append((text, role)),
+            ),
+        )
+        # Unknown roles are forwarded as-is (no lossy mapping to "output").
+        assert seen == [("thinking...", "thinking"), ("unknown", "plan")]
+
+    def test_partial_role_is_none_when_absent(self, agent_script):
+        agent = agent_script(
+            "#!/usr/bin/env bash\n"
+            + _evt({"type": "partial", "text": "plain"}) + "\n"
+            + _evt({"type": "result", "text": ""}) + "\n"
+        )
+        seen: List[tuple] = []
+        run(
+            {"command": str(agent)},
+            RunOptions(
+                message="hi",
+                on_partial=lambda text, role=None: seen.append((text, role)),
+            ),
+        )
+        # No synthetic "output": an absent role stays absent.
+        assert seen == [("plain", None)]
 
     def test_partial_skipped_when_streaming_false(self, agent_script):
         agent = agent_script(

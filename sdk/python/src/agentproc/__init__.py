@@ -344,11 +344,24 @@ def _read_turn() -> Dict[str, Any]:
 
 def _context_from_turn() -> AgentContext:
     t = _read_turn()
+    protocol_version = (
+        t.get("protocol_version")
+        if isinstance(t.get("protocol_version"), str)
+        else PROTOCOL_VERSION
+    )
+    # Diagnostic only (spec Versioning): one stderr line, then continue
+    # best-effort — it never gates or alters what the handler may send.
+    if protocol_version and protocol_version != PROTOCOL_VERSION:
+        warning = (
+            f'protocol_version "{protocol_version}" does not match this agent SDK\'s '
+            f'"{PROTOCOL_VERSION}"; continuing best-effort (fail-soft)'
+        )
+        sys.stderr.write(f"[agentproc] {warning}\n")
     return AgentContext(
         message=t.get("message") if isinstance(t.get("message"), str) else "",
         session_id=t.get("session_id") if isinstance(t.get("session_id"), str) else "",
         session_name=t.get("session_name") if isinstance(t.get("session_name"), str) else "default",
-        protocol_version=t.get("protocol_version") if isinstance(t.get("protocol_version"), str) else PROTOCOL_VERSION,
+        protocol_version=protocol_version,
         attachments=t.get("attachments") if isinstance(t.get("attachments"), list) else [],
         permission=t.get("permission") is True,
     )

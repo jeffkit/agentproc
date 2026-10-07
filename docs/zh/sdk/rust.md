@@ -56,9 +56,10 @@ use agentproc::{run, Profile, RunOptions};
 async fn main() -> anyhow::Result<()> {
     let profile = Profile::from_path("profile.yaml")?;
     let opts = RunOptions::new("explain this codebase")
-        .on_partial(|chunk| {
+        .on_partial(|chunk, role| {
+            // role 为 Some("thinking") 表示推理文本，事件不带 role 时为 None
+            // （executor 路径恒为 None）。
             print!("{chunk}");
-            std::io::Result::<()>::Ok(())
         });
     let result = run(&profile, opts).await?;
     println!("\nsession: {}", result.session_id);

@@ -345,4 +345,34 @@ describe('createProfile end-to-end', () => {
     assert.strictEqual(r.code, 0);
     assert.ok(r.stdout.includes('pv=0.4'));
   });
+
+  test('mismatched protocol_version warns on stderr and stays fail-soft', async () => {
+    const handler = `(async (sdk) => {
+      sdk.createProfile(async (ctx) => {
+        return 'pv=' + ctx.protocolVersion;
+      });
+    })`;
+    const r = await runAgent(turn({ protocol_version: '0.3' }), handler);
+
+    // Diagnostic only: same stdout, same exit code as a matching version.
+    assert.strictEqual(r.code, 0, 'stderr=' + r.stderr);
+    assert.ok(r.stdout.includes('pv=0.3'), 'stdout=' + JSON.stringify(r.stdout));
+    assert.match(r.stderr, /protocol_version/, 'stderr=' + JSON.stringify(r.stderr));
+    assert.ok(
+      r.stderr.includes('0.3') && r.stderr.includes(SDK.PROTOCOL_VERSION),
+      'warning must name both versions; stderr=' + JSON.stringify(r.stderr),
+    );
+  });
+
+  test('matching protocol_version does not warn', async () => {
+    const r = await runAgent(
+      turn(),
+      `(async (sdk) => {
+        sdk.createProfile(async (ctx) => {
+          return 'pv=' + ctx.protocolVersion;
+        });
+      })`
+    );
+    assert.strictEqual(r.stderr, '', 'stderr=' + JSON.stringify(r.stderr));
+  });
 });

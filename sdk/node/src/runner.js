@@ -612,6 +612,8 @@ function isValidSessionId(value) {
  * @property {string} [cwd] - Override profile.cwd (CLI --cwd).
  * @property {number} [timeoutSecs] - Override profile.timeout_secs (CLI --timeout).
  * @property {function(string, string=): void} [onPartial] - Streaming callback (text, role?).
+ *   `role` is the partial event's `role` field (undefined when the event carries
+ *   none). The executor path's `ParseResult` has no `role`, so there it is always undefined.
  * @property {function(string): void} [onSession] - Called when session id captured.
  * @property {function(string): void} [onError] - Called on {"type":"error"}.
  * @property {function(object): (object|Promise<object>|void)} [onPermission] -
@@ -813,6 +815,7 @@ async function runViaExecutor(profile, options, executor) {
       if (!errorMessage) errorMessage = parsed.error;
     } else if (parsed.partialText) {
       if (!errorMessage && streaming && options.onPartial) {
+        // `ParseResult` has no `role`, so the second argument is always undefined.
         options.onPartial(parsed.partialText);
         partialsForwarded = true;
       }

@@ -30,6 +30,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import queue
@@ -233,7 +234,10 @@ class RunOptions:
     # Journal hook (spec "Event traceability", opt-in): called with a dict
     # per classified event / bridge-level decision. None ⇒ no journaling.
     on_journal: Optional[Callable[[Dict[str, Any]], None]] = None
-    on_partial: Optional[Callable[[str], None]] = None
+    # Called as ``on_partial(text, role)`` where ``role`` is the partial's
+    # ``role`` field (``None`` when the event carries none). A one-argument
+    # callback still works: the arity is inspected once per run.
+    on_partial: Optional[Callable[..., None]] = None
     on_session: Optional[Callable[[str], None]] = None
     on_error: Optional[Callable[[str], None]] = None
     on_protocol_line: Optional[Callable[[str], None]] = None
@@ -743,6 +747,39 @@ def _compose_env(
     return env
 
 
+def _partial_arity(cb: Optional[Callable[..., None]]) -> int:
+    """How many positional arguments ``cb`` takes (2 = it can receive a role).
+
+    Conservative: anything not clearly callable with two positional arguments
+    is treated as one-argument, which is the pre-``role`` behaviour.
+    """
+    if cb is None:
+        return 1
+    try:
+        params = list(inspect.signature(cb).parameters.values())
+    except (TypeError, ValueError):
+        return 1
+    positional = 0
+    for p in params:
+        if p.kind is inspect.Parameter.VAR_POSITIONAL:
+            return 2
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            positional += 1
+    return 2 if positional >= 2 else 1
+
+
+def _emit_partial(
+    cb: Callable[..., None], text: str, role: Optional[str], arity: int
+) -> None:
+    if arity == 2:
+        cb(text, role)
+    else:
+        cb(text)
+
+
 def run_via_executor(
     executor: Dict[str, Any],
     options: RunOptions,
@@ -757,6 +794,7 @@ def run_via_executor(
     cli_name = executor.get("cli_name", "unknown")
     result = RunResult(exit_code=EXIT_ERROR)
     permission = bool((profile or {}).get("permission"))
+    partial_arity = _partial_arity(options.on_partial)
 
     if profile is None:
         profile = normalize_profile({"executor": cli_name})
@@ -971,7 +1009,8 @@ def run_via_executor(
         partial = parsed.get("partial_text")
         if partial:
             if streaming and options.on_partial:
-                options.on_partial(partial)
+                # `ParseResult` has no `role`, so the second argument is None.
+                _emit_partial(options.on_partial, partial, None, partial_arity)
                 partials_forwarded = True
             if not partials_forwarded:
                 reply_parts.append(partial)
@@ -1209,6 +1248,9 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     timeout_secs = (
         options.timeout_secs if options.timeout_secs is not None else profile["timeout_secs"]
     )
+    # Inspected once per turn, not per event: a one-argument callback (the
+    # documented ``lambda chunk: ...`` form) keeps working unchanged.
+    partial_arity = _partial_arity(options.on_partial)
 
     # Event traceability: bridge-measured turn timing + opt-in journal hook.
     started_wall = time.time()
@@ -1479,7 +1521,9 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             # Spec: post-error partials are discarded (not forwarded).
             # on_protocol_line still fires so debug traces stay complete.
             if not error_seen and streaming and options.on_partial:
-                options.on_partial(c["value"])
+                _emit_partial(
+                    options.on_partial, c["value"], c.get("role"), partial_arity
+                )
                 partials_forwarded = True
             if options.on_protocol_line:
                 options.on_protocol_line(line)

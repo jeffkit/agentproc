@@ -327,6 +327,27 @@ class TestCreateProfileE2E:
         assert '{"type":"result","text":"final"}\n' in out
         assert "never awaited" not in err
 
+    def test_mismatched_protocol_version_warns_and_stays_fail_soft(self):
+        out, err, code = _run_agent(
+            _turn(protocol_version="0.3"),
+            "return 'pv=' + ctx.protocol_version",
+        )
+        # Diagnostic only: same exit code, and the turn is processed unchanged.
+        assert code == 0, f"stderr={err}"
+        assert '{"type":"result","text":"pv=0.3"}\n' in out
+        assert "protocol_version" in err, f"stderr={err!r}"
+        assert "0.3" in err and agentproc.PROTOCOL_VERSION in err, (
+            f"warning must name both versions; stderr={err!r}"
+        )
+
+    def test_matching_protocol_version_does_not_warn(self):
+        out, err, code = _run_agent(
+            _turn(),
+            "return 'pv=' + ctx.protocol_version",
+        )
+        assert code == 0, f"stderr={err}"
+        assert err == "", f"stderr={err!r}"
+
 
 class TestProtocolErrorUsage:
     def test_can_be_raised_and_str(self):

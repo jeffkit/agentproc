@@ -529,6 +529,18 @@ describe('run() — end-to-end', () => {
     assert.deepStrictEqual(seen, [{ t: 'thinking...', role: 'thinking' }]);
   });
 
+  test('partial role is undefined when the event carries none', async () => {
+    const agent = writeScript(
+      '#!/usr/bin/env bash\n' +
+      'echo \'{"type":"partial","text":"plain"}\'\n' +
+      'echo \'{"type":"result","text":"ok"}\'\n'
+    );
+    const seen = [];
+    await run({ command: agent }, { message: 'hi', onPartial: (t, role) => seen.push({ t, role }) });
+    // No synthetic "output": an absent role stays absent.
+    assert.deepStrictEqual(seen, [{ t: 'plain', role: undefined }]);
+  });
+
   test('streaming=false → onPartial NOT called, result.text is reply', async () => {
     const agent = writeScript(
       '#!/usr/bin/env bash\n' +

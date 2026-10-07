@@ -100,3 +100,55 @@ async fn killed_by_sigint_normalised_to_130() {
     let result = run(&profile, RunOptions::new("hi")).await.unwrap();
     assert_eq!(result.exit_code, 130, "exit_code: {}", result.exit_code);
 }
+
+// issue #19 — on_partial's second argument is the partial's `role` (raw string,
+// `None` when absent), not the session id.
+#[cfg(unix)]
+#[tokio::test]
+async fn on_partial_second_arg_is_the_partial_role() {
+    use std::fs;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = tmp.path().join("agent.sh");
+    fs::write(
+        &agent,
+        "#!/bin/bash\n\
+read -r turn\n\
+printf '%s\\n' '{\"type\":\"partial\",\"text\":\"thinking chunk\",\"role\":\"thinking\"}'\n\
+printf '%s\\n' '{\"type\":\"partial\",\"text\":\"plain chunk\"}'\n\
+printf '%s\\n' '{\"type\":\"partial\",\"text\":\"plan chunk\",\"role\":\"plan\"}'\n\
+printf '%s\\n' '{\"type\":\"result\",\"text\":\"\"}'\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let yaml = format!(
+        "command: /bin/bash\nargs: [\"{}\"]\ntimeout_secs: 15\nstreaming: true\n",
+        agent.display()
+    );
+    let profile = Profile::from_yaml(&yaml).unwrap();
+
+    let seen: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let opts = RunOptions::new("hi").on_partial(move |text, role| {
+        sink.lock().unwrap().push((text, role));
+    });
+
+    let result = run(&profile, opts).await.unwrap();
+    assert!(result.ok(), "error: {}", result.error);
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            ("thinking chunk".to_string(), Some("thinking".to_string())),
+            ("plain chunk".to_string(), None),
+            // Unknown roles are forwarded as-is (no lossy enum).
+            ("plan chunk".to_string(), Some("plan".to_string())),
+        ],
+        "on_partial's second argument must be the partial role"
+    );
+}

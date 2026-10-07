@@ -224,3 +224,37 @@ def test_executor_path_conformance(scenario: dict) -> None:
     assert result.exit_code == exp["exit_code"], "exit_code"
     assert result.usage == exp["usage"], "usage"
     assert partials == exp["partials"], "partials"
+
+
+def _load_partial_role_cases():
+    cases = CASES_DATA.get("partial_role_cases", [])
+    # Sanity: an emptied or mis-pathed fixture must fail, not pass vacuously.
+    assert len(cases) >= 3, f"cases.json: expected >= 3 partial_role_cases, got {len(cases)}"
+    return [pytest.param(c, id=c["name"]) for c in cases]
+
+
+@pytest.mark.parametrize("case", _load_partial_role_cases())
+def test_partial_role_conformance(case: dict, tmp_path: Path) -> None:
+    """The `on_partial` second argument, which the classifier cases cannot see."""
+    quoted = "'" + case["line"].replace("'", "'\\''") + "'"
+    script = tmp_path / "agent.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf '%s\\n' {quoted}\n"
+        "printf '%s\\n' '{\"type\":\"result\",\"text\":\"\"}'\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+    seen = []
+    run(
+        {"command": str(script)},
+        _make_opts(
+            streaming=True,
+            on_partial=lambda text, role=None: seen.append((text, role)),
+        ),
+    )
+    assert seen == [(case["expect_text"], case["expect_role"])], (
+        f"on_partial calls: got {seen!r}, expected "
+        f"{[(case['expect_text'], case['expect_role'])]!r}"
+    )

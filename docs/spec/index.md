@@ -1,6 +1,6 @@
 # Protocol Specification
 
-**Wire protocol:** `0.4` · **Document revision:** `1.8` · **Status:** Stable
+**Wire protocol:** `0.4` · **Document revision:** `1.9` · **Status:** Stable
 
 The full specification is maintained in the repository at [`spec/protocol.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.md).
 
@@ -71,6 +71,7 @@ Before the agent reads its first byte of stdin, the bridge writes **exactly one*
 | Field | Description |
 |-------|-------------|
 | `session_name` | Human-readable session name (default `"default"`). |
+| `from_user` | Platform-specific sender identifier. MAY be included when the platform knows the sender; absent or `""` = unknown. Agents MUST ignore it when they do not need it. |
 | `attachments` | Array of `{kind, url, ...}` (e.g. `{"kind":"image","url":"https://..."}`). The only attachment channel — there are no single-attachment convenience vars. Absent/`[]` = none. |
 | `permission` | `true` when the profile has `permission: true`; absent/`false` otherwise. |
 

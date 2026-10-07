@@ -192,6 +192,51 @@ test('executors.json has scenarios', () => {
   assert.ok(scenarios.length >= 13, `expected >= 13 executor scenarios, got ${scenarios.length}`);
 });
 
+// ---------------------------------------------------------------------------
+// partial_role_cases: the `onPartial` second argument, observed through a real
+// spawn. The `cases` array above only pins `classifyLine`, which cannot see
+// the callback's arguments.
+// ---------------------------------------------------------------------------
+
+test('partial_role_cases has cases', () => {
+  // Sanity: an emptied or mis-pathed fixture must fail, not pass vacuously.
+  const n = (data.partial_role_cases || []).length;
+  assert.ok(n >= 3, `expected >= 3 partial_role_cases, got ${n}`);
+});
+
+for (const c of data.partial_role_cases || []) {
+  test(`partial_role_cases: ${c.name}`, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-role-'));
+    try {
+      const agent = path.join(dir, 'agent.sh');
+      fs.writeFileSync(
+        agent,
+        '#!/usr/bin/env bash\n' +
+          `printf '%s\\n' ${JSON.stringify(c.line)}\n` +
+          'printf \'%s\\n\' \'{"type":"result","text":""}\'\n',
+        { mode: 0o755 },
+      );
+      const seen = [];
+      const r = await run(
+        { command: agent },
+        {
+          message: 'hi',
+          streaming: true,
+          onPartial: (text, role) => seen.push([text, role === undefined ? null : role]),
+        },
+      );
+      assert.strictEqual(r.exitCode, 0, `${c.name}: exit ${r.exitCode} (${r.error})`);
+      assert.deepStrictEqual(
+        seen,
+        [[c.expect_text, c.expect_role]],
+        `${c.name}: onPartial calls were ${JSON.stringify(seen)}`,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 for (const sc of scenarios) {
   test(`executors.json: ${sc.name}`, async () => {
     const exp = sc.expect;

@@ -60,6 +60,9 @@ pub struct RunOptions {
     pub streaming: Option<bool>,
     pub extra_env: HashMap<String, String>,
     pub attachments: Vec<crate::Attachment>,
+    /// Streaming callback: `(text, role)`. `role` is the `partial` event's
+    /// `role` field, `None` when the event carries none (including every
+    /// chunk on the executor path, whose `ParseResult` has no `role`).
     pub on_partial:
         Option<Arc<dyn Fn(String, Option<String>) + Send + Sync>>,
     pub on_session: Option<Arc<dyn Fn(&str) + Send + Sync>>,
@@ -424,7 +427,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
             continue;
         };
         match event {
-            AgentEvent::Partial { text, session_id, .. } => {
+            AgentEvent::Partial { text, role, session_id } => {
                 if saw_error {
                     continue;
                 }
@@ -433,7 +436,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
                 }
                 if po.streaming {
                     if let Some(cb) = &po.on_partial {
-                        cb(text.clone(), result.session_id.clone().into());
+                        cb(text.clone(), role.clone());
                     }
                     result.reply.push_str(&text);
                 }
@@ -917,7 +920,8 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
         if let Some(ptext) = parsed.partial_text {
             if cfg.streaming {
                 if let Some(cb) = &opts.on_partial {
-                    cb(ptext, result.session_id.clone().into());
+                    // `ParseResult` has no `role`, so the second argument is None.
+                    cb(ptext, None);
                     partials_forwarded = true;
                 }
             }

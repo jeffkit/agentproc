@@ -115,16 +115,24 @@ pub fn read_turn<R: std::io::BufRead>(mut reader: R) -> Option<TurnInput> {
     if reader.read_line(&mut line).ok()? == 0 {
         return None;
     }
-    serde_json::from_str::<TurnInput>(line.trim()).ok()
+    let turn = serde_json::from_str::<TurnInput>(line.trim()).ok()?;
+    if let Some(msg) = protocol_version_warning(&turn.protocol_version) {
+        eprintln!("[agentproc] {msg}");
+    }
+    Some(turn)
 }
 
-/// Distinguish assistant output from reasoning/thinking text on `partial` events.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum PartialRole {
-    #[default]
-    Output,
-    Thinking,
+/// One-line stderr diagnostic for a turn whose `protocol_version` disagrees
+/// with this SDK's [`PROTOCOL_VERSION`]. `None` when they match (or when the
+/// field is absent/empty). Diagnostic only — it never changes behaviour.
+pub(crate) fn protocol_version_warning(got: &str) -> Option<String> {
+    if got.is_empty() || got == PROTOCOL_VERSION {
+        return None;
+    }
+    Some(format!(
+        "protocol_version \"{got}\" does not match this agent SDK's \"{PROTOCOL_VERSION}\"; \
+continuing best-effort (fail-soft)"
+    ))
 }
 
 /// A tool-permission request emitted by the agent (only when `permission: true`).
@@ -160,14 +168,11 @@ fn lenient_session_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<S
     Ok(opt.and_then(|v| v.as_str().map(|s| s.to_string())))
 }
 
-/// Deserialize an optional role string, treating non-string values as None.
-fn lenient_role<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<PartialRole>, D::Error> {
+/// Deserialize an optional role, treating non-string values as None. A string
+/// role is kept **as-is** — the spec forwards unknown values unchanged.
+fn lenient_role<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     let opt: Option<serde_json::Value> = serde::Deserialize::deserialize(d)?;
-    match opt.and_then(|v| v.as_str().map(String::from)) {
-        Some(s) if s == "thinking" => Ok(Some(PartialRole::Thinking)),
-        Some(s) if s == "output" => Ok(Some(PartialRole::Output)),
-        _ => Ok(None),
-    }
+    Ok(opt.and_then(|v| v.as_str().map(String::from)))
 }
 
 /// A parsed stdout event from the agent.
@@ -178,7 +183,7 @@ pub enum AgentEvent {
         #[serde(default, deserialize_with = "lenient_string")]
         text: String,
         #[serde(default, deserialize_with = "lenient_role")]
-        role: Option<PartialRole>,
+        role: Option<String>,
         #[serde(default, deserialize_with = "lenient_session_id")]
         session_id: Option<String>,
     },
@@ -338,6 +343,36 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_partial_keeps_role_strings_as_is() {
+        let ev = parse_event(r#"{"type":"partial","text":"x","role":"thinking"}"#).unwrap();
+        match ev {
+            AgentEvent::Partial { role, .. } => assert_eq!(role.as_deref(), Some("thinking")),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Unknown roles are forwarded unchanged (no lossy enum).
+        let ev = parse_event(r#"{"type":"partial","text":"x","role":"plan"}"#).unwrap();
+        match ev {
+            AgentEvent::Partial { role, .. } => assert_eq!(role.as_deref(), Some("plan")),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Non-string roles are dropped.
+        let ev = parse_event(r#"{"type":"partial","text":"x","role":42}"#).unwrap();
+        match ev {
+            AgentEvent::Partial { role, .. } => assert_eq!(role, None),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn protocol_version_warning_only_for_mismatch() {
+        assert!(protocol_version_warning("0.4").is_none());
+        assert!(protocol_version_warning("").is_none());
+        let warning = protocol_version_warning("0.3").expect("mismatch must warn");
+        assert!(warning.contains("0.3"), "{warning}");
+        assert!(warning.contains(PROTOCOL_VERSION), "{warning}");
     }
 
     #[test]

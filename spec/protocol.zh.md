@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.8`
+**文档修订：** `1.9`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -15,6 +15,7 @@
 - 如果 bridge 注入了一个 agent 不识别的版本字符串，agent **SHOULD** 按字段未设置处理（best-effort，fail-soft）。
 - 如果 agent 期望某个 bridge 未注入的版本字符串，agent **MUST** 回退到其内置默认值。
 - 该字符串**不是**能力发现机制：不存在协商、不存在能力声明、也不存在排序。agent 若需要知道某项具体能力（例如图片附件）是否存在，**MUST** 直接检查 [turn 对象](#输入--stdin-turn-对象)中对应的字段（例如非空的 `attachments` 数组），而不是检查版本字符串。
+- 读取 turn 时，若其 `protocol_version` 非空且不等于实现自身的线协议版本，实现 **SHOULD** 向 stderr 写**一条**同时含两个版本字符串的诊断行，随后 best-effort 继续。该诊断**不得**改变任何事件、回复、会话 id 或退出码，也**不得**被用作协商或能力探测——它是诊断，不是兼容闸门。
 
 理由：任何可比较的版本号都会诱导实现者用 `>= 0.4` 来 gate 行为，而一旦某个 bridge 没有同步 bump 数字，这种判断就会失效。把字符串视为不透明，能让契约保持诚实：某项能力的存在由承载它的字段来表示。
 
@@ -221,9 +222,10 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 | `buildArgs` | `(message, sessionId, env, ctx) -> string[]` | 构建目标 CLI 的 argv。`message` 是本轮用户消息；`sessionId` 是上一轮的会话 id（空串 = 新会话）；`env` 是组合后的子进程环境（infra 集 + profile `env` 经 `${VAR}` 展开和 `env_allowlist` 过滤后的结果）；`ctx` 为 `{ "permission": bool }`，即本 turn 的 profile `permission` 值。返回的 argv **不**经 shell 直接传给 `execve`。返回空数组是硬错误。 |
 | `supportsPermission` | boolean | `true` = 该 executor 具有 turn 中审批通道，能够兑现 `permission: true`。缺省 `false`。由 runner 在 spawn **之前**读取（见 [Runner 契约](#runner-契约)），`buildArgs` 本身不读它。 |
 | `parseEvent` | `(event) -> ParseResult \| null` | 将 CLI stdout 的一行解码后的 JSON 对象翻译为 `ParseResult`。对不识别的事件返回 `null`（runner 记日志并忽略该行）。`plain: true` 时省略 / 不使用。 |
-| `makeHandlers` | `() -> { buildArgs, parseEvent }` | 可选工厂，用于**有状态** executor——需要在 `buildArgs` 和 `parseEvent` 之间共享 per-turn 状态（例如 `buildArgs` 生成的会话 id 在 `parseEvent` 中返回）。存在时，runner **每 turn 调用一次** `makeHandlers()`，仅在该 turn 使用返回的 pair。缺省时，runner 直接使用 `buildArgs` / `parseEvent`，且它们**必须**无状态、可重入。 |
+| `makeHandlers` | `() -> { buildArgs, parseEvent, getSessionId? }` | 可选工厂，用于**有状态** executor——需要在 `buildArgs` 和 `parseEvent` 之间共享 per-turn 状态（例如 `buildArgs` 生成的会话 id 在 `parseEvent` 中返回）。存在时，runner **每 turn 调用一次** `makeHandlers()`，仅在该 turn 使用返回的 handlers。缺省时，runner 直接使用 `buildArgs` / `parseEvent`，且它们**必须**无状态、可重入。 |
+| `getSessionId` | `() -> string` | 可选。本轮 `buildArgs` 铸造或复用的会话 id（例如 `agy --conversation <id>`）。runner 在 `plain: true` 路径上于 CLI 进程退出后每轮读取一次；当该值满足线协议 `session_id` 规则、且此前未学到其它 id 时，作为 `RunResult.sessionId` 返回（首个非空值规则不变）。缺省 → 由 host 持久化自己发出的 id（见[事件上的 `session_id`](#事件上的-session_id)）。 |
 
-`buildArgs` 和 `parseEvent`（或 `makeHandlers` 返回的 pair）构成一个 turn 内闭合的契约：runner 在 spawn 前调用一次 `buildArgs`，随后对每行 stdout 调用 `parseEvent` 直到 EOF。executor **不得**假设 CLI 自身保证之外的事件顺序。
+`buildArgs` 和 `parseEvent`（或 `makeHandlers` 返回的 handlers）构成一个 turn 内闭合的契约：runner 在 spawn 前调用一次 `buildArgs`，随后对每行 stdout 调用 `parseEvent` 直到 EOF。executor **不得**假设 CLI 自身保证之外的事件顺序。
 
 #### `ParseResult`
 
@@ -244,7 +246,7 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 当 `plain: true` 时，runner 不把 stdout 当作 NDJSON 解码，也不调用 `parseEvent`。而是：
 
 - 整个 stdout（UTF-8 解码、去尾部空白）成为回复正文。
-- 不支持会话连续性（契约本身无法从纯文本提取 `sessionId`——需要会话连续性的 `plain` executor **必须**在该接口之外使用自建 run 循环，如 `recursive` 和 `echo-agent` 所做）。
+- 纯文本不携带 `parseEvent` 字段，契约本身无法从 stdout 提取 `sessionId`。会话连续性改在 executor 的参数构建阶段处理：`buildArgs` 铸造或复用 id（例如 `agy --conversation <id>`），`makeHandlers()` 通过 `getSessionId()` 交回（见[事件上的 `session_id`](#事件上的-session_id)）。runner 在进程退出后读取该 handler 一次，并把 id 作为 `RunResult.sessionId` 返回；CLI 没有恢复标志时 `getSessionId()` 返回 `""`，由 host 持久化自己发出的 id。
 - 超时（`timeout_secs` / `kill_grace_secs`）仍然适用。可选的 `budget_secs` / `deadline` 字段只约束 subprocess spawn 路径——此 in-process 路径不要求支持它们。
 - `streaming: true` 对 `plain` executor 无效（没有 `partial` 事件可转发）。
 
@@ -296,6 +298,7 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 | 字段 | 类型 | 描述 |
 |-------|------|-------------|
 | `session_name` | string | 人类可读的会话名。缺省时默认为 `"default"`。 |
+| `from_user` | string | 平台侧发送者标识。平台已知发送者时 bridge **MAY** 携带；缺省或 `""` = 未知。不需要的 agent **MUST** 忽略它。 |
 | `attachments` | array | 本次 turn 的附件列表。每个元素 **MUST** 是含 `kind`（字符串）和 `url`（字符串）的对象；bridge 在已知时 **SHOULD** 同时附带 `filename` / `mime_type` / `size`，agent **MUST** 忽略未知的可选字段。`kind` 受控词表为 `image` / `file` / `audio` / `video` —— 未知值落回 `"other"`，bridge **SHOULD** 记录 warning。`url` **MUST** 用以下 scheme 之一：`file://`、`http://`、`https://`、`data:` —— 其他 scheme（含 `ftp://` / `javascript:`）bridge **MUST** warn 并丢弃，避免异常上游把 URL 偷塞进 agent prompt。相对 `file://` 路径按 profile 的 `cwd` 解析。缺省或 `[]` = 本次 turn 无附件。不再有单独的单附件便利字段——`attachments` 是唯一的附件通道。 |
 | `permission` | boolean | 当 profile 设了 `permission: true` 且 bridge 支持可选 permission 通道时为 `true`；否则缺省或 `false`。能发出 permission 请求的 agent **MUST** 在依赖 turn 中批准前检查此项——缺省意味着只能自动批准 / skip-permissions。 |
 
@@ -849,6 +852,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
+- **doc 1.9** —— 对实现本已携带的字段做一次卫生整理：把 `from_user`（平台发送者标识）记为 turn 的**可选**字段——它属于应用层关注点，bridge **MAY** 发送，缺省或 `""` 表示未知；[Executor 接口](#executor-接口)表新增 `getSessionId`（`plain` executor 的会话 id，在 `buildArgs` 中铸造、进程退出后由 runner 读取），同时消除 [`plain` executor](#plain-executor) 小节里与之矛盾的表述——纯文本 CLI executor 的会话连续性在**接口内**完成，而非另建 run 循环。版本治理新增 SHOULD：读取到 `protocol_version` 与自身版本不同的 turn 时，实现向 stderr 写一条同时含两个版本字符串的诊断并 best-effort 继续（永不作为兼容闸门，永不改变行为）。SDK 侧：三个 SDK 的 `on_partial` / `onPartial` 回调第二参统一为 partial 的 `role`（缺省 = 无 role）。无线协议变更——stdin/stdout 上的字节不变。
 - **doc 1.8** —— 回复拼装对两条路径明文化：`streaming: true` 且已转发至少一个 `partial` 时，终态 `result` 携带空正文（正文已送达——不得重复）；否则回复为首个 `result` 事件的 `finalText`（显式空串同样生效；后续 `result` 事件被忽略）。executor 路径的 `usage` 对象**必须**写入 `RunResult.usage`（首个非空值生效）；`error` 事件使该轮失败（即使 CLI 退出码为 0）；无 error 且无正文的轮次为成功。共享 conformance 套件新增驱动 executor 路径（`spec/conformance/executors.json`）。无线协议变更。
 - **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。自行注入自动批准默认值的 hub 桥（今仅 `hub/dsh`）在该旋钮关闭时 MUST NOT 注入。无 wire 变更；spawn 路径语义不变。
 - **wire 0.4 / doc 1.6** —— 可选 bridge 侧 profile 字段 `budget_secs` 与 `deadline`（与 `timeout_secs` 取最早到期；SIGTERM → 宽限 → SIGKILL 语义一致，退出码 124）。新增「事件可追溯性（可选）」小节：bridge 内部事件 `seq`/`ts` 元数据、`RunResult` 的 `started_at`/`duration`（bridge 实测，区别于 agent 自报 `usage.duration_ms`）、opt-in NDJSON journal（默认关闭、只写文件、绝不写 stdout；关闭时 stdout/stderr 字节一致）。无 wire 变更——stdin/stdout 上的字节不变。SDK 包 bump 至 0.17.0。
