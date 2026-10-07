@@ -19,6 +19,14 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - Tests: the three `[wip]` repro files (`sdk/node/src/wip-issue19-protocol-hygiene.test.js`, `sdk/python/tests/test_wip_issue19_protocol_hygiene.py`, `sdk/rust/tests/wip_issue19_partial_role.rs`) are merged into the permanent suites — `runner.test.js` / `index.test.js` / `hub_bridge_conformance.test.js`, `test_runner.py` / `test_agentproc.py` / `test_hub_bridge_conformance.py` / `test_executors.py`, `tests/spawn_path.rs` plus a `protocol.rs` unit test — and deleted. The `on_partial` / `onPartial` examples in `docs/sdk/{node,python,rust}.md` (+ `docs/zh/…`) and the landing pages now show the two-argument form; the Rust example previously showed a one-argument closure returning `io::Result`, which does not compile against the real API.
 - **Wire protocol stays `0.4`.** Nothing on stdin/stdout changed: `from_user` is documentation-only, the callback signature is in-process API, and the version diagnostic is a single stderr line that only fires on a mismatch. Python/Node bump to `0.19.0`; the Rust crate bumps to `0.14.0` for the breaking callback change. Not tagged, not published.
 
+### Spec / SDK 0.18.3 — unreleased
+
+**Python SDK: run lock records the spawning worker pid and refuses takeover while it lives (#9)**
+
+- `agentproc/run_lock.py`: the tombstone record gains `spawner` — the pid of the process that called `write_run_lock`, i.e. the worker that spawned the agent (not `getppid()`, which points at the runner's parent). `write_run_lock(key, pid, argv, *, spawner=None)` defaults to `os.getpid()`; both runner spawn points are unchanged.
+- `cleanup_stale_run`: after the existing double-factor identity check, a live agent pid is only killed when its recorded `spawner` is confirmed dead (`action: killed`, `reason: spawner-gone`). A live spawner raises `RunLockBusy` without `killpg` and without deleting the lock — previously a healthy agent of a still-running worker was SIGKILLed and the worker saw exit 137 / a mutual-kill loop. Records without a `spawner` field (pre-0.18.3 tombstones) are treated as unverifiable and also raise `RunLockBusy`; the rule and the operator remedy (confirm the pid is gone, then delete the lock file) are stated in the module docstring. Check order: `unsupported` → `clean` → `corrupt` → `pid-gone` → ps-unavailable busy → `pid-reused` → spawner check.
+- Tests: `test_run_lock.py` gains the live-spawner and dead-spawner directions plus the legacy-record cases (12 → 17); the `[wip]` repro file is merged in and deleted. Wire protocol stays `0.4`; not spec-relevant, not tagged, not published.
+
 ### Spec / SDK 0.18.2 — unreleased
 
 **Executor (in-process) path conformance finished across all three SDKs (#12)**

@@ -8,11 +8,14 @@
 之外的触发器（PDEATHSIG 仅 Linux、看门狗线程随 worker 同死）。两半：
 
 - spawn 侧（:func:`write_run_lock` / :func:`clear_run_lock`）：Popen 成功后把
-  pid/命令落盘为普通 JSON；正常结束清理。worker 硬死时文件残留即遗言。
+  pid/命令 + 派它的 worker（spawner）pid 落盘为普通 JSON；正常结束清理。
+  worker 硬死时文件残留即遗言。
 - 接管侧（:func:`cleanup_stale_run`）：新 agent 开工前探测——pid 已死 → 清锁
-  放行；pid 活着且身份核实通过（pgid==pid 且命令含记录的 argv0 基名）→
-  killpg 整组、等死后放行；活着但身份无法核实 → 不杀不放行，抛
-  :class:`RunLockBusy` 由调用方决定（编排节点=报错终态；reaper=告警继续）。
+  放行；pid 活着且身份核实通过（pgid==pid 且命令含记录的 argv0 基名）→ 再看
+  记录的 spawner：已死 → 判孤儿，killpg 整组、等死后放行；仍存活 → 不杀不放
+  行，抛 :class:`RunLockBusy`（issue #9 的修复点：原判定只看 agent 自己，会把
+  「worker 仍在跑的健康 agent」当孤儿击杀）；活着但身份无法核实 → 不杀不放
+  行，抛 :class:`RunLockBusy` 由调用方决定（编排节点=报错终态；reaper=告警继续）。
 
 设计取舍：
 
@@ -26,6 +29,14 @@
   wait 之前（罕见），存活 pid 恰是真孤儿——被杀正是期望行为。
 - **双因子身份核实防 pid 重用误杀**：孤儿判定要求 pgid==pid（会话领袖）且
   命令行含记录的 argv0 基名；任一不符按 stale 处理，绝不盲杀。
+- **spawner 存活即不可接管**：原双因子只答「我是不是本机制派生的会话领袖」，
+  spawner 补上「谁派的我、它还在不在」；识别到健康占用时宁可 Busy 也不盲杀。
+- **无 ``spawner`` 字段（0.18.3 之前的旧记录）一律按不可核实处理** → 抛
+  :class:`RunLockBusy`，不 killpg、不删锁；运维处置 = 人工确认该 agent 进程
+  已死或与本机制无关后删除锁文件。**不采用 ppid==1（被 init/launchd 收养）
+  自动判定**：那依赖平台 reparent 行为，不写进杀决策。
+- **spawner pid 被系统复用时**会误判为「worker 还活着」→ Busy，属 fail-safe
+  的可接受代价（不杀不删，人工可解）。
 - Windows 无 killpg：探测返回 ``unsupported``（不阻塞主流程），锁读写照常。
 """
 from __future__ import annotations
@@ -57,8 +68,19 @@ def lock_path_for(key: str) -> Path:
     return _lock_dir() / f"{digest}.json"
 
 
-def write_run_lock(key: str, pid: int, argv: List[str]) -> Optional[Path]:
-    """Popen 成功后落遗言锁（best-effort：失败只损失孤儿可见性，不阻断运行）。"""
+def write_run_lock(
+    key: str,
+    pid: int,
+    argv: List[str],
+    *,
+    spawner: Optional[int] = None,
+) -> Optional[Path]:
+    """Popen 成功后落遗言锁（best-effort：失败只损失孤儿可见性，不阻断运行）。
+
+    ``spawner`` = 调用本函数的进程（它正是 Popen 掉 agent 的那一个），默认
+    ``os.getpid()``；不用 ``os.getppid()``——那指向 runner 的父进程，核实不出
+    「worker 是否还活着」。显式传值仅为测试注入已死 spawner。
+    """
     try:
         path = lock_path_for(key)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +89,7 @@ def write_run_lock(key: str, pid: int, argv: List[str]) -> Optional[Path]:
             "pid": int(pid),
             "command": Path(argv[0]).name if argv else "",
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "spawner": int(os.getpid() if spawner is None else spawner),
         }
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
@@ -177,7 +200,22 @@ def cleanup_stale_run(key: str, *, grace_secs: float = 10.0) -> Dict[str, Any]:
         _unlink(path)
         return {"action": "stale", "reason": "pid-reused", "pid": pid}
 
-    # 身份核实通过：确为本机制派生的孤儿 agent → 杀整组再放行
+    # spawner（派这个 agent 的 worker pid）已死才可接管；缺字段/解析不出 = 不可核实。
+    try:
+        spawner = int(record["spawner"])
+    except (KeyError, TypeError, ValueError):
+        spawner = None
+    if spawner is None:
+        raise RunLockBusy(
+            f"workspace {os.path.abspath(key)!r} 的遗言锁无 spawner(worker) 记录"
+            f"（旧格式或字段损坏），无法核实派它的 worker 是否已死——不杀不放行；"
+            f"请人工确认后删除锁文件 {path}")
+    if _pid_alive(spawner):
+        raise RunLockBusy(
+            f"workspace {os.path.abspath(key)!r} 的 agent pid {pid} 仍在跑，"
+            f"且派它的 worker pid {spawner} 仍存活——这不是孤儿，拒绝接管")
+
+    # 身份核实通过且 spawner 已死：确为本机制派生的孤儿 agent → 杀整组再放行
     try:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -192,7 +230,7 @@ def cleanup_stale_run(key: str, *, grace_secs: float = 10.0) -> Dict[str, Any]:
             f"workspace {os.path.abspath(key)!r} 孤儿 pid {pid} SIGKILL 后 "
             f"{grace_secs}s 仍存活（D 状态?）——拒绝开工")
     _unlink(path)
-    return {"action": "killed", "pid": pid, "command": command}
+    return {"action": "killed", "reason": "spawner-gone", "pid": pid, "command": command}
 
 
 def _unlink(path: Path) -> None:
