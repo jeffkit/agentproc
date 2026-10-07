@@ -104,17 +104,16 @@ def detect_support(help_text: str) -> dict:
 
 
 def build_args(task: str, session_id: str, support: dict) -> list[str]:
-    """dsh argv. JSON mode always requests the event stream (and `--` so a
-    task starting with `-` stays a positional); with session support and an
-    inbound id, adopt that Session."""
+    """dsh argv. The task is always a positional preceded by `--` (a task
+    starting with `-` must not read as a flag); JSON mode additionally
+    requests the event stream and, with session support and an inbound id,
+    adopts that Session."""
     args = [CLI_NAME, "--profile", "headless"]
     if support["json_mode"]:
         args.append("--json")
         if support["session_resume"] and session_id:
             args += ["--session-id", session_id]
-        args += ["--", task]
-    else:
-        args.append(task)
+    args += ["--", task]
     return args
 
 

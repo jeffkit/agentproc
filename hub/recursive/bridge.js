@@ -151,7 +151,9 @@ function globalArgs() {
 }
 
 function buildRunArgs(message) {
-  return globalArgs().concat(['run', message]);
+  // "run" takes the message positionally: `--` keeps a message that starts
+  // with "-" a positional, so every flag stays ahead of the separator.
+  return globalArgs().concat(['run', '--', message]);
 }
 
 function buildResumeArgs(sessionDir, message) {
@@ -327,6 +329,8 @@ module.exports = {
   env,
   providerArgs,
   globalArgs,
+  buildRunArgs,
+  buildResumeArgs,
   extractSessionDir,
   lastAssistantText,
   SESSION_RECORDING_RE,

@@ -29,7 +29,7 @@ notes: |
     - item.completed (agent_message) → emits {"type":"partial"} with the text
     - turn.completed → end of turn
 
-  Session continuity uses `codex exec resume --json <thread_id> <prompt>` on
+  Session continuity uses `codex exec resume --json <thread_id> -- <prompt>` on
   subsequent turns. `--json` MUST be present on both first-turn and resume paths;
   without it codex emits non-NDJSON output that the bridge cannot parse.
 

@@ -42,8 +42,16 @@ test('detectSupport: --json upgrades transport, --session-id gates continuity', 
 
 test('buildArgs: plain fallback for legacy dsh — stateless', () => {
   const plain = { jsonMode: false, sessionResume: false };
-  assert.deepStrictEqual(buildArgs('hi', '', plain), ['dsh', '--profile', 'headless', 'hi']);
-  assert.deepStrictEqual(buildArgs('hi', 'session-abc', plain), ['dsh', '--profile', 'headless', 'hi']);
+  assert.deepStrictEqual(buildArgs('hi', '', plain), ['dsh', '--profile', 'headless', '--', 'hi']);
+  assert.deepStrictEqual(buildArgs('hi', 'session-abc', plain), ['dsh', '--profile', 'headless', '--', 'hi']);
+});
+
+test('buildArgs: `--` guards a `-`-prefixed task on both paths', () => {
+  for (const support of [{ jsonMode: false, sessionResume: false }, { jsonMode: true, sessionResume: true }]) {
+    const args = buildArgs('--profile evil', 'session-abc', support);
+    assert.deepStrictEqual(args.slice(-2), ['--', '--profile evil']);
+    assert.strictEqual(args.indexOf('--'), args.length - 2);
+  }
 });
 
 test('buildArgs: json mode requests the stream, `--` guards the task', () => {
@@ -257,6 +265,7 @@ test('legacy dsh: stays stateless — no --json, plain stdout as result', () => 
   assert.deepStrictEqual(event, { type: 'result', text: 'shim reply' });
   const call = fs.readFileSync(shim.callsFile, 'utf8');
   assert.ok(!call.includes('ARG:--json'));
+  assert.ok(call.includes('ARG:--'), 'legacy path must still guard the positional task');
 });
 
 test('legacy dsh: non-zero exit with stderr → error event', () => {

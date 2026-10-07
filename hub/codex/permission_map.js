@@ -9,13 +9,17 @@
 
 function buildArgs(message, sessionId, env) {
   const model = (env.CODEX_MODEL || '').trim();
+  // '--' keeps a message that starts with '-' a positional, not a flag; every
+  // flag must therefore precede it.
   if (sessionId) {
-    const args = ['codex', 'exec', 'resume', '--json', sessionId, message];
+    const args = ['codex', 'exec', 'resume', '--json', sessionId];
     if (model) args.push('-c', `model="${model}"`);
+    args.push('--', message);
     return args;
   }
-  const args = ['codex', 'exec', '--json', message];
+  const args = ['codex', 'exec', '--json'];
   if (model) args.push('-c', `model="${model}"`);
+  args.push('--', message);
   return args;
 }
 
@@ -25,8 +29,8 @@ function buildPermissionArgs(message, sessionId, env) {
   const args = buildArgs(message, sessionId, env);
   // Insert flags after `exec` / `exec resume`.
   // buildArgs shapes:
-  //   codex exec --json <msg>
-  //   codex exec resume --json <id> <msg>
+  //   codex exec --json -- <msg>
+  //   codex exec resume --json <id> -- <msg>
   const insertAt = args[2] === 'resume' ? 3 : 2;
   args.splice(
     insertAt,

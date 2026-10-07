@@ -3,8 +3,9 @@
  * Cross-language parity test for hub/recursive/bridge.js.
  *
  * Drives the shared `hub/recursive/tests/parity.json` fixture through the
- * Node bridge's pure helpers (`providerArgs`, `globalArgs`, `extractSessionDir`,
- * `lastAssistantText`) and asserts they match the fixture's expectations. The
+ * Node bridge's pure helpers (`providerArgs`, `globalArgs`, `buildRunArgs`,
+ * `buildResumeArgs`, `extractSessionDir`, `lastAssistantText`) and asserts
+ * they match the fixture's expectations. The
  * Python bridge runs the same fixture through its helpers in
  * `hub/recursive/tests/test_bridge_parity.py` — together they guard the
  * hub/README.md claim that both bridges produce identical observable behaviour.
@@ -57,6 +58,19 @@ for (const c of data.arg_cases) {
     withCleanEnv(c.env, () => {
       assert.deepStrictEqual(bridge.providerArgs(), c.expect_provider_args);
       assert.deepStrictEqual(bridge.globalArgs(), c.expect_global_args);
+    });
+  });
+}
+
+for (const c of data.turn_args_cases) {
+  test(`turn_args: ${c.name}`, () => {
+    withCleanEnv(c.env, () => {
+      // The message is the token right after `--`; every flag precedes it.
+      assert.deepStrictEqual(bridge.buildRunArgs(c.message), c.expect_run_args);
+      assert.deepStrictEqual(
+        bridge.buildResumeArgs('/tmp/rec-abc', c.message),
+        c.expect_resume_args,
+      );
     });
   });
 }

@@ -24,7 +24,7 @@ tested: community
 maintainer: jeffkit
 tags: [coding, ai, open-source]
 notes: |
-  Uses `opencode run <message> --auto --format json` for non-interactive mode.
+  Uses `opencode run --auto --format json -- <message>` for non-interactive mode.
   The `--auto` flag auto-approves all non-denied permissions. The `--format json`
   flag emits NDJSON events that this bridge parses for text and session IDs.
 

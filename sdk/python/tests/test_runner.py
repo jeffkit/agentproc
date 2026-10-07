@@ -1176,3 +1176,36 @@ class TestTimeBudgetAndTraceability:
         )
         assert r.timed_out is True
         assert r.exit_code == 124
+
+
+# ---------------------------------------------------------------------------
+# Spawn-path drain readiness: select() cannot watch a subprocess pipe fd on
+# Windows (Winsock accepts sockets only) and raises ValueError above
+# FD_SETSIZE on POSIX, so the drain must not depend on it — and must still
+# deliver the turn where poll() itself is unavailable.
+# ---------------------------------------------------------------------------
+
+class TestDrainPipeBoundary:
+    def test_drain_never_calls_select_on_a_pipe_fd(self, agent_script, monkeypatch):
+        import agentproc.runner as runner_mod
+
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("drain called select() on a pipe fd")
+
+        monkeypatch.setattr(runner_mod.select, "select", _boom)
+        agent = agent_script("#!/usr/bin/env bash\n" + _evt({"type": "result", "text": "hello"}) + "\n")
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.reply == "hello"
+        assert r.error == ""
+
+    def test_drain_still_delivers_the_turn_without_poll(self, agent_script, monkeypatch):
+        """No poll() (Windows): the blocking fallback is used, and the turn
+        still produces its reply instead of a drain failure."""
+        import agentproc.runner as runner_mod
+
+        monkeypatch.delattr(runner_mod.select, "poll", raising=False)
+        agent = agent_script("#!/usr/bin/env bash\n" + _evt({"type": "result", "text": "hello"}) + "\n")
+        r = run({"command": str(agent)}, RunOptions(message="hi"))
+        assert r.reply == "hello"
+        assert r.error == ""
+        assert r.exit_code == 0

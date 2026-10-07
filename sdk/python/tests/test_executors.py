@@ -138,11 +138,31 @@ class TestCodexBuildArgs(unittest.TestCase):
         self.assertIn("codex", args)
         self.assertIn("--json", args)
         self.assertIn("test", args)
+        # message is positional and guarded by an end-of-options separator
+        self.assertEqual(args[-2:], ["--", "test"])
 
     def test_model_config(self):
         args = self._build(env={"CODEX_MODEL": "gpt-4o"})
         # codex uses -c model="..." syntax
         self.assertTrue(any("gpt-4o" in a for a in args))
+
+
+class TestOpencodeBuildArgs(unittest.TestCase):
+    def _build(self, message="hi", session_id="", env=None):
+        ex = EXECUTORS["opencode"]
+        return ex["build_args"](message, session_id, env or {})
+
+    def test_basic(self):
+        args = self._build("hello")
+        self.assertEqual(
+            args, ["opencode", "run", "--auto", "--format", "json", "--", "hello"]
+        )
+
+    def test_flags_precede_separator(self):
+        args = self._build("hello", env={"OPENCODE_MODEL": "gpt-4o"})
+        # every flag comes before the separator; the message is the last token
+        self.assertLess(args.index("--auto"), args.index("--"))
+        self.assertEqual(args[-2:], ["--", "hello"])
 
 
 class TestAiderBuildArgs(unittest.TestCase):
@@ -180,7 +200,7 @@ class TestDshBuildArgs(unittest.TestCase):
 
     def test_basic(self):
         args = self._build("hello")
-        self.assertEqual(args, ["dsh", "--profile", "headless", "hello"])
+        self.assertEqual(args, ["dsh", "--profile", "headless", "--", "hello"])
 
 
 class TestPiBuildArgs(unittest.TestCase):
@@ -218,6 +238,13 @@ class TestAgyMakeHandlers(unittest.TestCase):
         self.assertEqual(sid, "existing-session")
         idx = args.index("--conversation")
         self.assertEqual(args[idx + 1], "existing-session")
+
+    def test_message_is_positional_after_separator(self):
+        ex = EXECUTORS["agy"]
+        handlers = ex["make_handlers"]()
+        args = handlers["build_args"]("hi", "", {})
+        self.assertEqual(args[:2], ["agy", "--print"])
+        self.assertEqual(args[-2:], ["--", "hi"])
 
     def test_per_turn_isolation(self):
         ex = EXECUTORS["agy"]

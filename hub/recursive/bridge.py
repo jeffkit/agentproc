@@ -174,7 +174,9 @@ def _global_args() -> list[str]:
 
 
 def build_run_args(message: str) -> list[str]:
-    return _global_args() + ["run", message]
+    # "run" takes the message positionally: `--` keeps a message that starts
+    # with "-" a positional, so every flag stays ahead of the separator.
+    return _global_args() + ["run", "--", message]
 
 
 def build_resume_args(session_dir: str, message: str) -> list[str]:

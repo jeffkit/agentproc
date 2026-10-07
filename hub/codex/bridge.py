@@ -3,8 +3,8 @@
 AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.4).
 
 Default:
-    codex exec --json <message>
-    codex exec resume --json <thread_id> <message>
+    codex exec --json -- <message>
+    codex exec resume --json <thread_id> -- <message>
 
 Permission mode (turn.permission is true / profile permission: true):
     Same argv + --dangerously-bypass-hook-trust + approval_policy=on-request,
@@ -53,14 +53,18 @@ if _PROFILE_DIR not in sys.path:
 
 def build_args(message: str, session_id: str, env) -> list[str]:
     model = env.get("CODEX_MODEL", "").strip()
+    # "--" keeps a message that starts with "-" a positional, not a flag; every
+    # flag must therefore precede it.
     if session_id:
-        args = [CLI_NAME, "exec", "resume", "--json", session_id, message]
+        args = [CLI_NAME, "exec", "resume", "--json", session_id]
         if model:
             args += ["-c", f'model="{model}"']
+        args += ["--", message]
         return args
-    args = [CLI_NAME, "exec", "--json", message]
+    args = [CLI_NAME, "exec", "--json"]
     if model:
         args += ["-c", f'model="{model}"']
+    args += ["--", message]
     return args
 
 

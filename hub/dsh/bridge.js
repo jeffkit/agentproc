@@ -104,9 +104,10 @@ function detectSupport(help) {
 }
 
 /**
- * Build the dsh argv. JSON mode always requests the event stream (and `--`
- * so a task starting with `-` stays a positional); with session support and
- * an inbound id, adopt that Session.
+ * Build the dsh argv. The task is always a positional preceded by `--` (a
+ * task starting with `-` must not read as a flag); JSON mode additionally
+ * requests the event stream and, with session support and an inbound id,
+ * adopts that Session.
  * @param {string} task
  * @param {string} sessionId - inbound turn session id ('' = new session)
  * @param {{jsonMode: boolean, sessionResume: boolean}} support
@@ -116,10 +117,8 @@ function buildArgs(task, sessionId, support) {
   if (support.jsonMode) {
     args.push('--json');
     if (support.sessionResume && sessionId) args.push('--session-id', sessionId);
-    args.push('--', task);
-  } else {
-    args.push(task);
   }
+  args.push('--', task);
   return args;
 }
 

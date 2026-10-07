@@ -2,10 +2,12 @@
 
 Drives the shared ``hub/recursive/tests/parity.json`` fixture through the
 Python bridge's pure helpers (``provider_args``, ``_global_args``,
-``extract_session_dir``, ``_last_assistant_text``) and asserts they match the
-fixture's expectations. The Node bridge runs the same fixture through its
-``providerArgs`` / ``globalArgs`` / ``extractSessionDir`` / ``lastAssistantText``
-in ``hub/recursive/tests/test_bridge_parity.js`` — together they guard the
+``build_run_args``, ``build_resume_args``, ``extract_session_dir``,
+``_last_assistant_text``) and asserts they match the fixture's expectations.
+The Node bridge runs the same fixture through its ``providerArgs`` /
+``globalArgs`` / ``buildRunArgs`` / ``buildResumeArgs`` / ``extractSessionDir``
+/ ``lastAssistantText`` in ``hub/recursive/tests/test_bridge_parity.js`` —
+together they guard the
 hub/README.md claim that both bridges produce identical observable behaviour.
 
 The full NDJSON event classification (``handleLine`` inside ``main``) is not
@@ -55,6 +57,16 @@ def test_arg_building(case, clean_env):
         clean_env.setenv(k, val)
     assert bridge.provider_args() == case["expect_provider_args"]
     assert bridge._global_args() == case["expect_global_args"]
+
+
+@pytest.mark.parametrize("case", data["turn_args_cases"],
+                         ids=[c["name"] for c in data["turn_args_cases"]])
+def test_turn_arg_building(case, clean_env):
+    """The message is the token right after `--`; every flag precedes it."""
+    for k, val in case["env"].items():
+        clean_env.setenv(k, val)
+    assert bridge.build_run_args(case["message"]) == case["expect_run_args"]
+    assert bridge.build_resume_args("/tmp/rec-abc", case["message"]) == case["expect_resume_args"]
 
 
 @pytest.mark.parametrize("case", data["extract_session_dir_cases"],

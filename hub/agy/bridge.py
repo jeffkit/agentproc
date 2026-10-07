@@ -28,12 +28,14 @@ INSTALL_HINT = "See the agy project for installation instructions."
 
 
 def build_args(message: str) -> list[str]:
-    args = [CLI_NAME, "--print", message]
+    # Message last, after "--", so a message starting with "-" stays positional.
+    args = [CLI_NAME, "--print"]
     if os.environ.get("AGY_DANGEROUSLY_SKIP_PERMISSIONS", "1") == "1":
         args.append("--dangerously-skip-permissions")
     model = os.environ.get("AGY_MODEL", "").strip()
     if model:
         args += ["--model", model]
+    args += ["--", message]
     return args
 
 

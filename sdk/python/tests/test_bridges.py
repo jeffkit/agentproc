@@ -286,7 +286,7 @@ class TestCodexBridge:
 
     def test_build_args_first_turn_uses_json(self):
         args = self.mod.build_args("hi", "", {})
-        assert args == ["codex", "exec", "--json", "hi"]
+        assert args == ["codex", "exec", "--json", "--", "hi"]
 
     def test_build_args_resume_also_has_json(self):
         """Regression: resume path used to omit --json, which made codex emit
@@ -296,7 +296,8 @@ class TestCodexBridge:
             f"resume must include --json, got: {args}"
         )
         assert args[4] == "thread-1"
-        assert args[5] == "hi"
+        assert args[5] == "--"
+        assert args[6] == "hi"
 
     def test_build_args_model_added_on_both_paths(self):
         a1 = self.mod.build_args("hi", "", {"CODEX_MODEL": "gpt-5"})
@@ -638,7 +639,7 @@ class TestOpencodeBridge:
 
     def test_build_args_basic(self):
         args = self.mod.build_args("hello", "", {})
-        assert args == ["opencode", "run", "hello", "--auto", "--format", "json"]
+        assert args == ["opencode", "run", "--auto", "--format", "json", "--", "hello"]
 
     def test_build_args_no_session_on_first_turn(self):
         args = self.mod.build_args("hi", "", {})
@@ -923,7 +924,8 @@ class TestAgyBridge:
         monkeypatch.delenv("AGY_MODEL", raising=False)
         monkeypatch.setenv("AGY_DANGEROUSLY_SKIP_PERMISSIONS", "1")
         args = self.mod.build_args("hello")
-        assert args[:3] == ["agy", "--print", "hello"]
+        assert args[:2] == ["agy", "--print"]
+        assert args[-2:] == ["--", "hello"]
         assert "--dangerously-skip-permissions" in args
 
     def test_build_args_skip_permissions_disabled(self, monkeypatch):
@@ -1040,8 +1042,16 @@ class TestDshBridge:
 
     def test_build_args_plain_fallback_is_stateless(self):
         plain = {"json_mode": False, "session_resume": False}
-        assert self.mod.build_args("hi", "", plain) == ["dsh", "--profile", "headless", "hi"]
-        assert self.mod.build_args("hi", "s-1", plain) == ["dsh", "--profile", "headless", "hi"]
+        assert self.mod.build_args("hi", "", plain) == ["dsh", "--profile", "headless", "--", "hi"]
+        assert self.mod.build_args("hi", "s-1", plain) == ["dsh", "--profile", "headless", "--", "hi"]
+
+    def test_build_args_argv_guard_on_both_paths(self):
+        """A task starting with '-' must stay positional in legacy mode too."""
+        for support in ({"json_mode": False, "session_resume": False},
+                        {"json_mode": True, "session_resume": True}):
+            args = self.mod.build_args("--profile evil", "s-1", support)
+            assert args[-2:] == ["--", "--profile evil"]
+            assert args.index("--") == len(args) - 2
 
     def test_build_args_json_mode_requests_stream_and_guards_task(self):
         support = {"json_mode": True, "session_resume": True}

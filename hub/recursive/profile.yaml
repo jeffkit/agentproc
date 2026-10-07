@@ -41,7 +41,7 @@ tested: community
 maintainer: jeffkit
 tags: [coding, rust, ai, self-improving]
 notes: |
-  Drives `recursive --json [--stream] run <message>` on the first turn and
+  Drives `recursive --json [--stream] run -- <message>` on the first turn and
   `recursive --json [--stream] resume --from-file <session-dir> -p <message>`
   on subsequent turns (native session-id resume). Parses recursive's AgentEvent
   NDJSON stream:

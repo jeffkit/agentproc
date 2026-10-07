@@ -42,7 +42,7 @@ maintainer: kong
 tags: [coding, ai, deepseek, agent, harness]
 notes: |
   Runs via the bundled bridge (bridge.js on Node, bridge.py on Python), which
-  invokes `dsh --profile headless --json "<task>"` (the DeepSeek Harness one-shot
+  invokes `dsh --profile headless --json -- "<task>"` (the DeepSeek Harness one-shot
   bundle: coding persona, bash/fs/search tools, sandbox, persisted session
   log). Verified end-to-end against dsh 0.1.7-rc.2.
 

@@ -62,7 +62,7 @@ env:
 
 recursive emits its lifecycle as NDJSON `AgentEvent` objects when run with `--json`. The bridge invokes:
 
-- **First turn:** `recursive --json --stream -H run <message>` — and captures the session directory recursive logs on stderr (`session: recording to <dir>`).
+- **First turn:** `recursive --json --stream -H run -- <message>` — the message is a positional argument, so `--` separates it from the flags and a message beginning with `-` cannot be read as one. Captures the session directory recursive logs on stderr (`session: recording to <dir>`).
 - **Subsequent turns:** `recursive --json --stream -H resume --from-file <session-dir> -p <message>` — native session-id resume.
 
 and maps the event stream to AgentProc:

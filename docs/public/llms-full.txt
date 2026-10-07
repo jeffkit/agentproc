@@ -2,7 +2,7 @@
 
 > Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: https://agentproc.dev
 
-> Protocol version: 0.4 · Package version: 0.19.0 · Generated from commit in repo.
+> Protocol version: 0.4 · Package version: 0.20.0 · Generated from commit in repo.
 
 
 ## Table of contents
@@ -28,7 +28,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.9`
+**Document revision:** `1.10`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -257,6 +257,16 @@ Every executor exposes the following surface. SDKs MAY use different concrete sy
 | `getSessionId` | `() -> string` | Optional. The session id this turn's `buildArgs` minted or reused (e.g. `agy --conversation <id>`). Consulted once per turn by the runner on the `plain: true` path, after the CLI process has exited; a value that satisfies the wire `session_id` rules and arrives when no other id has been learned is surfaced as `RunResult.sessionId` (the first-non-empty rule is unchanged). Absent → the host persists the id it sent (see [Plain-CLI executors](#session_id-on-events)). |
 
 `buildArgs` and `parseEvent` (or the pair returned by `makeHandlers`) form a closed turn-local contract: the runner calls `buildArgs` once before spawn, then calls `parseEvent` for each stdout line until EOF. The executor MUST NOT assume any ordering between events beyond what the CLI itself guarantees.
+
+#### Message delivery and argv
+
+On the spawn path the message travels on stdin and is never substituted into argv (see [Design Principles](#design-principles)). An in-process executor cannot honour that rule in general: it drives a *third-party CLI*, and most such CLIs only accept their prompt as a command-line argument. An executor's `buildArgs` therefore MAY place the message — or a task string composed from it — in the target CLI's argv. This is a deliberate, bounded exception covering only the argv the executor itself builds; deployments that use the executor path accept three consequences.
+
+- **`ps(1)` exposure.** `argv` is readable by any local process running as the same user. On a shared or multi-tenant host, any local account can read the current user's message — which routinely contains source, internal URLs, or pasted secrets. Run a bridge that uses the executor path on a **dedicated host, container, or VM**, not alongside untrusted local users. This is the same co-location assumption the repository's `SECURITY.md` already states for the protocol.
+- **OS argument-length limits.** A single argv token is capped by the operating system (≈128 KiB on Linux, ~32 K characters on Windows). A message longer than the cap makes the spawn fail; hosts that accept long text SHOULD prefer stdin where the CLI allows it.
+- **Option injection.** A message that begins with `-` can be read as a flag. When the message is a **positional** argument, the executor MUST place the conventional end-of-options marker `--` immediately before it and MUST place every flag **before** that marker, so the message can never change which options the CLI runs with.
+
+An executor whose target CLI can read its prompt from stdin SHOULD keep the message out of argv and deliver it on stdin instead. The `claude-code` permission-mode argv is the in-tree example: `--input-format stream-json` with `--permission-prompt-tool stdio` takes the user message on stdin, not argv.
 
 #### `ParseResult`
 
@@ -770,7 +780,7 @@ Built-in shortcuts (e.g. `type: claude-code`) are platform extensions, not P0. I
 0.3 separates the three input paths by purpose:
 
 - **stdin** — the dynamic per-turn request (the turn object). Carries arbitrary structure: `attachments` arrays, nested fields, anything JSON can express.
-- **argv** — launch params via `{{SESSION_ID}}` / `{{PROFILE_DIR}}`. The message is intentionally excluded from argv: argv is visible in `ps(1)`, has OS-level length limits, and puts user input in a location that is not stdin — making it harder to reason about trust boundaries.
+- **argv** — launch params via `{{SESSION_ID}}` / `{{PROFILE_DIR}}`. The message is intentionally excluded from argv: argv is visible in `ps(1)`, has OS-level length limits, and puts user input in a location that is not stdin — making it harder to reason about trust boundaries. (The in-process executor path is a documented exception — see [Message delivery and argv](#message-delivery-and-argv).)
 - **env** — secrets and configuration (the profile `env` block), kept in env deliberately so they are not logged as part of the turn payload.
 
 Debuggability is barely changed: `AGENT_MESSAGE="hello" ./agent.sh` becomes `echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | ./agent` — still a one-liner, just no longer an env-var assignment.
@@ -883,6 +893,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.10** — New [Message delivery and argv](#message-delivery-and-argv) subsection under In-process executors: the executor path is an explicit, bounded exception to the "message never in argv" rule, because most wrapped CLIs only accept their prompt as a command-line argument. It records the three consequences (message readable via `ps(1)`; OS argv-length limits; `-`-prefixed messages parsed as flags) and the deployment prerequisite (dedicated host / container / VM). Normative rule added: when the message is a positional argument, `--` MUST immediately precede it and every flag MUST precede `--`. Executors whose CLI can read the prompt from stdin SHOULD keep the message off argv. The Design Principles argv bullet now points at the exception. No wire change.
 - **doc 1.9** — Hygiene pass over fields that implementations already carry: `from_user` (platform sender identifier) recorded as an **optional** turn field, matching the fact that it is an application-layer concern — a bridge MAY send it, absent or `""` means unknown; `getSessionId` added to the [Executor interface](#executor-interface) table (the `plain` executor's session id, minted in `buildArgs` and read by the runner after exit), which also resolves the contradicting statement in the [`plain` executors](#plain-executors) section — session continuity for plain-CLI executors happens **inside** the interface, not via a bespoke run loop. Versioning gains a SHOULD: an implementation that reads a turn whose `protocol_version` differs from its own writes one stderr diagnostic naming both strings and continues best-effort (never a compatibility gate, never a behaviour change). SDK-facing: the `on_partial` / `onPartial` callback's second argument is the partial `role` (absent = no role) in all three SDKs. No wire change — the bytes on stdin/stdout are unchanged.
 - **doc 1.8** — Reply assembly stated for both paths: with `streaming: true` and at least one forwarded `partial`, the terminal `result` carries an empty body (the body was already delivered — it MUST NOT be duplicated); otherwise the reply is the first `result` event's `finalText` (an explicit empty string counts; later `result` events are ignored). An executor-path `usage` object MUST be written to `RunResult.usage` (first non-empty wins), an `error` event makes the turn a failure even when the CLI exited 0, and an empty turn without an error is a success. The shared conformance suite now also drives the executor path (`spec/conformance/executors.json`). No wire change.
 - **doc 1.7** — In-process executors: `buildArgs` gains a fourth `ctx` argument carrying the profile's `permission` value, plus a new `supportsPermission` capability bit; the Runner contract now refuses to spawn when `permission: true` meets an executor without an approval channel, and a new bridge-side `AGENTPROC_AUTO_APPROVE` knob (`0` / `false`) makes the runner refuse any auto-approve argv. Both refusals are an `error` event plus a non-zero exit code — never a silent fallback to `--dangerously-skip-permissions` / `--yolo`. Hub bridges that inject an auto-approve default of their own (today only `hub/dsh`) MUST NOT inject it while the knob is off. No wire change; spawn-path semantics are unchanged.

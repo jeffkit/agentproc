@@ -30,11 +30,14 @@ Responsibilities:
 
 from __future__ import annotations
 
+import codecs
 import inspect
+import io
 import json
 import os
 import queue
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -43,7 +46,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 from . import run_lock as _run_lock
 
@@ -709,6 +712,86 @@ def _kill_process_group(
                 )
 
 
+# Spawn-path drain tuning: how long a drain thread parks in poll() before it
+# re-checks "child reaped and pipe drained?" (see _iter_pipe_lines) and the
+# read chunk size.
+_PIPE_POLL_MS = 20
+_PIPE_CHUNK = 65536
+
+
+def _iter_pipe_lines(stream: Any, writer_gone: Callable[[], bool]) -> Iterator[str]:
+    """Yield the lines one child wrote to its pipe ``stream``, then stop.
+
+    Iterating ``proc.stdout`` — the simpler spelling — cannot be used on
+    POSIX: once the direct child has exited its bytes sit in the pipe, but the
+    iterator's next read only returns after *every* duplicate of the write end
+    is closed, and a helper process the agent spawned inherits one and may
+    hold it for minutes. The drain thread is then blocked with the child's
+    tail in hand and the caller, having no way to tell that tail apart from a
+    straggler writing after the turn ended, drops it — observed as flaky
+    lost ``result`` / ``partial`` lines (empty reply, missing session id).
+
+    ``poll`` replaces the guess: by the time the child has been reaped, every
+    byte it wrote is already in the pipe, so "writer gone + pipe empty" is a
+    sound end-of-turn boundary and the child's own tail can no longer be
+    missed. The boundary is that probe, not the child's exit: a straggler
+    writing in the interval between the two is indistinguishable from the
+    child, so its bytes are read as part of this turn (they can flip ``reply``
+    to empty through ``partials_forwarded``, or have a ``session_id``
+    adopted). What is guaranteed is the other direction — once the boundary is
+    observed the drain is over, so no callback fires after ``run()`` returns.
+
+    ``writer_gone`` therefore MUST only become true once ``proc.wait()`` has
+    returned. Lines are decoded exactly like ``text=True, errors="replace"``
+    iteration: universal newlines, replacement characters for malformed UTF-8,
+    a final unterminated fragment yielded as-is (never at the boundary above —
+    an unterminated fragment there belongs to whatever wrote after the child).
+
+    ``poll`` rather than ``select`` because ``select`` cannot watch a pipe fd
+    at or above ``FD_SETSIZE`` (a bridge run with a raised ``RLIMIT_NOFILE``
+    would get ``ValueError``) and cannot watch a pipe fd at all on Windows —
+    Winsock ``select`` accepts sockets only, so every spawn-path turn there
+    would be reported as a drain failure. Where ``poll`` does not exist the
+    stream is iterated blocking instead: the turn ends at EOF or at the join
+    backstop, so a straggler-held tail can still be lost there — but never as
+    a drain failure.
+    """
+    if not hasattr(select, "poll"):
+        yield from stream
+        return
+
+    fd = stream.fileno()
+    decoder = io.IncrementalNewlineDecoder(
+        codecs.getincrementaldecoder("utf-8")(errors="replace"), translate=True
+    )
+    pending = ""
+
+    def _split(text: str) -> Iterator[str]:
+        nonlocal pending
+        pending += text
+        lines = pending.split("\n")
+        pending = lines.pop()
+        for line in lines:
+            yield line + "\n"
+
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    while True:
+        if not poller.poll(_PIPE_POLL_MS):
+            # Re-probe the pipe *after* observing the reaped child: it may
+            # have written between the probe above and its exit.
+            if writer_gone() and not poller.poll(0):
+                return
+            continue
+        chunk = os.read(fd, _PIPE_CHUNK)
+        if not chunk:
+            yield from _split(decoder.decode(b"", True))
+            if pending:
+                yield pending
+            return
+        yield from _split(decoder.decode(chunk, False))
+
+
 def _compose_env(
     profile: Dict[str, Any],
     options: RunOptions,
@@ -1340,10 +1423,15 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     pending_permission_ids: set = set()
     stdin_lock = threading.Lock()
     stdin_closed = False
-    # Turn epoch guard: set once the subprocess has exited and the run is in
-    # its final drain phase. Drain threads check it to drop events arriving
-    # after run() has logically finished this turn (e.g. a grandchild holding
-    # the pipe write-end writes late lines).
+    # Set once proc.wait() has returned: the child is reaped, so every byte it
+    # wrote is already in the pipes. Drain threads use it to end the turn at
+    # "writer gone and pipe drained" instead of blocking on a grandchild that
+    # inherited the write end (see _iter_pipe_lines).
+    child_gone = threading.Event()
+    # Turn epoch guard: set once the drain phase is over (the drain threads
+    # stopped, or the join backstop below gave up on them and closed their
+    # pipes). A straggler line picked up from here on is dropped instead of
+    # firing callbacks after run() returned.
     turn_finished = False
     # Set once the post-join backstop below force-closes the pipe read-ends.
     # A read failure after that close (ValueError / OSError, incl. EBADF) is
@@ -1486,7 +1574,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     def _drain_stderr() -> None:
         assert proc.stderr is not None
         try:
-            for line in proc.stderr:
+            for line in _iter_pipe_lines(proc.stderr, child_gone.is_set):
                 if turn_finished:
                     return
                 _append_stderr(line)
@@ -1647,7 +1735,7 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     def _drain_stdout() -> None:
         assert proc.stdout is not None
         try:
-            for raw_line in proc.stdout:
+            for raw_line in _iter_pipe_lines(proc.stdout, child_gone.is_set):
                 if turn_finished:
                     return
                 _handle_line(raw_line.rstrip("\n"))
@@ -1771,35 +1859,40 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         exit_code = _normalise_exit_code(proc.wait())
 
     _close_stdin()
-    # Turn epoch starts here: the subprocess is gone; anything the drain
-    # threads still read belongs to stragglers (grandchildren) and must not
-    # fire consumer callbacks for this finished turn.
-    turn_finished = True
-    # Process has exited. Drain threads should hit EOF on their pipes within
-    # milliseconds and finish. The hard timeout here is a backstop for the
-    # rare case a grandchild inherited the stderr fd and is still alive — it
-    # keeps the runner from hanging indefinitely without letting drain latency
-    # balloon past the kill_grace_secs budget. 1s each = at most ~2s of extra
-    # latency; diagnosis may be incomplete if it fires, but the post-mortem
-    # stderr patterns target interpreter-startup errors that land in the
-    # first bytes of stderr anyway, well within the 1MB head capture.
+    # The subprocess is gone: its output is all in the pipes, so the drain
+    # threads can read the rest of the turn and stop without waiting for a
+    # grandchild that inherited a pipe write-end (see _iter_pipe_lines).
+    child_gone.set()
+    # Drain threads now finish within one poll interval of the child's exit.
+    # The hard timeout here is a backstop for a straggler that keeps writing
+    # (the pipe keeps them busy) — it keeps the runner from hanging
+    # indefinitely without letting drain latency balloon past the
+    # kill_grace_secs budget. 1s each = at most ~2s of extra latency;
+    # diagnosis may be incomplete if it fires, but the post-mortem stderr
+    # patterns target interpreter-startup errors that land in the first bytes
+    # of stderr anyway, well within the 1MB head capture.
     stdout_thread.join(timeout=1)
     stderr_thread.join(timeout=1)
+    # Turn epoch ends here: whatever a straggler-driven drain thread still
+    # picks up must not fire consumer callbacks for this finished turn.
+    turn_finished = True
     # Set before closing: a drain thread unblocked by the close must already
     # observe the flag when it handles the resulting ValueError/OSError.
     pipes_closed = True
+    # Both read ends are released before returning whether or not the threads
+    # got there by themselves: a pipe kept open by a straggler must not leak
+    # an fd per turn (issue #20).
     for th, stream in ((stdout_thread, proc.stdout), (stderr_thread, proc.stderr)):
-        if th.is_alive():
-            if options.on_stderr:
-                options.on_stderr(
-                    f"[agentproc runner] warning: {th.name} still alive; "
-                    "closing pipe read end to unblock"
-                )
-            try:
-                if stream is not None and not stream.closed:
-                    stream.close()
-            except OSError:
-                pass
+        if th.is_alive() and options.on_stderr:
+            options.on_stderr(
+                f"[agentproc runner] warning: {th.name} still alive; "
+                "closing pipe read end to unblock"
+            )
+        try:
+            if stream is not None and not stream.closed:
+                stream.close()
+        except OSError:
+            pass
 
     if drain_error:
         result.error = drain_error[0]

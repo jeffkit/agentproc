@@ -137,6 +137,34 @@ describe('buildArgs — codex', () => {
     assert.ok(args.includes('resume'));
     assert.ok(args.includes('thread-123'));
   });
+
+  test('message is positional and guarded by --', () => {
+    const args = buildArgs('hello', '', {});
+    assert.deepStrictEqual(args.slice(-2), ['--', 'hello']);
+  });
+
+  test('resume: message follows the -- separator', () => {
+    const args = buildArgs('hello', 'thread-123', {});
+    assert.deepStrictEqual(args.slice(-2), ['--', 'hello']);
+  });
+});
+
+describe('buildArgs — opencode', () => {
+  const { buildArgs } = EXECUTORS['opencode'];
+
+  test('message is positional, after --, with flags first', () => {
+    const args = buildArgs('hello', '', {});
+    assert.deepStrictEqual(
+      args,
+      ['opencode', 'run', '--auto', '--format', 'json', '--', 'hello'],
+    );
+  });
+
+  test('session and model flags precede the -- separator', () => {
+    const args = buildArgs('hello', 'ses_1', { OPENCODE_MODEL: 'gpt-4o' });
+    assert.ok(args.indexOf('--auto') < args.indexOf('--'));
+    assert.deepStrictEqual(args.slice(-2), ['--', 'hello']);
+  });
 });
 
 describe('buildArgs — aider (plain, no session)', () => {
@@ -169,7 +197,7 @@ describe('buildArgs — dsh (plain, no session)', () => {
 
   test('boots the headless profile with the message as task', () => {
     const args = buildArgs('run the tests', '', {});
-    assert.deepStrictEqual(args, ['dsh', '--profile', 'headless', 'run the tests']);
+    assert.deepStrictEqual(args, ['dsh', '--profile', 'headless', '--', 'run the tests']);
   });
 
   test('does not include any session flag', () => {
@@ -238,6 +266,13 @@ describe('agy executor — session management via makeHandlers', () => {
     const h = EXECUTORS['agy'].makeHandlers();
     const args = h.buildArgs('hello', '', {});
     assert.ok(args.includes('--print'));
+  });
+
+  test('message is positional, after --', () => {
+    const h = EXECUTORS['agy'].makeHandlers();
+    const args = h.buildArgs('hello', '', {});
+    assert.deepStrictEqual(args.slice(0, 2), ['agy', '--print']);
+    assert.deepStrictEqual(args.slice(-2), ['--', 'hello']);
   });
 
   test('AGY_MODEL env adds --model', () => {

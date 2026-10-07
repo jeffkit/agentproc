@@ -177,14 +177,18 @@ CODEBUDDY = {
 
 def _codex_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
     model = env.get("CODEX_MODEL", "").strip()
+    # "--" keeps a message that starts with "-" a positional, not a flag; every
+    # flag must therefore precede it.
     if session_id:
-        args = ["codex", "exec", "resume", "--json", session_id, message]
+        args = ["codex", "exec", "resume", "--json", session_id]
         if model:
             args += ["-c", f'model="{model}"']
+        args += ["--", message]
         return args
-    args = ["codex", "exec", "--json", message]
+    args = ["codex", "exec", "--json"]
     if model:
         args += ["-c", f'model="{model}"']
+    args += ["--", message]
     return args
 
 
@@ -355,12 +359,15 @@ KIMI_CODE = {
 # ---------------------------------------------------------------------------
 
 def _opencode_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
-    args = ["opencode", "run", message, "--auto", "--format", "json"]
+    # Flags precede "--": everything after it is positional, so a message that
+    # starts with "-" cannot be parsed as a flag.
+    args = ["opencode", "run", "--auto", "--format", "json"]
     if session_id:
         args += ["--session", session_id]
     model = env.get("OPENCODE_MODEL", "").strip()
     if model:
         args += ["--model", model]
+    args += ["--", message]
     return args
 
 
@@ -448,12 +455,14 @@ def _make_agy_handlers() -> Dict[str, Any]:
 
     def build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
         session["id"] = session_id or str(uuid.uuid4())
-        args = ["agy", "--print", message, "--conversation", session["id"]]
+        # Message last, after "--", so a message starting with "-" stays positional.
+        args = ["agy", "--print", "--conversation", session["id"]]
         if (env.get("AGY_DANGEROUSLY_SKIP_PERMISSIONS") or "1") == "1":
             args.append("--dangerously-skip-permissions")
         model = env.get("AGY_MODEL", "").strip()
         if model:
             args += ["--model", model]
+        args += ["--", message]
         return args
 
     def get_session_id() -> Optional[str]:
@@ -503,7 +512,8 @@ DEEPSEEK = {
 
 
 def _dsh_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
-    return ["dsh", "--profile", "headless", message]
+    # "--" so a task starting with "-" stays a positional (hub/dsh does the same).
+    return ["dsh", "--profile", "headless", "--", message]
 
 
 DSH = {

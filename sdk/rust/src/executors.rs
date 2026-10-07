@@ -313,22 +313,24 @@ impl TurnHandlers for CodexTurn {
         session_id: &str,
         env: &HashMap<String, String>,
     ) -> Vec<String> {
-        // Mirrors node sdk: `codex exec [--json] [resume --json <id>] <msg> [-c model="..."]`
+        // Mirrors node sdk: `codex exec [--json] [resume --json <id>] [-c model="..."] -- <msg>`
+        // "--" keeps a message that starts with '-' a positional, not a flag;
+        // every flag must therefore precede it.
         let model = env.get("CODEX_MODEL").map(|s| s.trim()).filter(|s| !s.is_empty());
         let mut args: Vec<String> = vec![CodexExecutor.cli_name().to_string(), "exec".into()];
         if !session_id.is_empty() {
             args.push("resume".into());
             args.push("--json".into());
             args.push(session_id.to_string());
-            args.push(message.to_string());
         } else {
             args.push("--json".into());
-            args.push(message.to_string());
         }
         if let Some(m) = model {
             args.push("-c".into());
             args.push(format!("model=\"{m}\""));
         }
+        args.push("--".into());
+        args.push(message.to_string());
         args
     }
 
@@ -1192,10 +1194,11 @@ struct OpencodeTurn;
 #[async_trait::async_trait]
 impl TurnHandlers for OpencodeTurn {
     fn build_args(&self, message: &str, session_id: &str, env: &HashMap<String, String>) -> Vec<String> {
+        // Flags precede "--": everything after it is positional, so a message
+        // that starts with '-' cannot be parsed as a flag.
         let mut args: Vec<String> = vec![
             OpencodeExecutor.cli_name().to_string(),
             "run".into(),
-            message.to_string(),
             "--auto".into(),
             "--format".into(),
             "json".into(),
@@ -1208,6 +1211,8 @@ impl TurnHandlers for OpencodeTurn {
             args.push("--model".into());
             args.push(model.to_string());
         }
+        args.push("--".into());
+        args.push(message.to_string());
         args
     }
 
@@ -1381,10 +1386,10 @@ impl TurnHandlers for AgyTurn {
             session_id.to_string()
         };
         self.session_id.set(Some(id.clone()));
+        // Message last, after "--", so a message starting with '-' stays positional.
         let mut args: Vec<String> = vec![
             AgyExecutor.cli_name().to_string(),
             "--print".into(),
-            message.to_string(),
             "--conversation".into(),
             id,
         ];
@@ -1395,6 +1400,8 @@ impl TurnHandlers for AgyTurn {
             args.push("--model".into());
             args.push(model.to_string());
         }
+        args.push("--".into());
+        args.push(message.to_string());
         args
     }
 
@@ -1515,10 +1522,12 @@ struct DshTurn;
 #[async_trait::async_trait]
 impl TurnHandlers for DshTurn {
     fn build_args(&self, message: &str, _session_id: &str, _env: &HashMap<String, String>) -> Vec<String> {
+        // "--" so a task starting with '-' stays a positional (hub/dsh does the same).
         vec![
             DshExecutor.cli_name().to_string(),
             "--profile".into(),
             "headless".into(),
+            "--".into(),
             message.to_string(),
         ]
     }
@@ -2004,7 +2013,7 @@ mod tests {
         let h = DshExecutor.make_turn(&TurnCtx::default());
         let env = HashMap::new();
         let args = h.build_args("hi", "", &env);
-        assert_eq!(args, vec!["dsh", "--profile", "headless", "hi"]);
+        assert_eq!(args, vec!["dsh", "--profile", "headless", "--", "hi"]);
     }
 
     // ----- codebuddy -----

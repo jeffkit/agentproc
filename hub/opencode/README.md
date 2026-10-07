@@ -77,7 +77,7 @@ echo '{"type":"turn","message":"reply with exactly: opencode ok","session_id":""
 turn.message / turn.session_id
   ↓
 bridge.py / bridge.js
-  ↓ opencode run <message> --auto --format json [--session <id>] [--model <m>]
+  ↓ opencode run --auto --format json [--session <id>] [--model <m>] -- <message>
 opencode CLI  (emits NDJSON events on stdout)
   ↓ step_start → sessionID captured
   ↓ text       → {"type":"partial"} (streaming) or accumulated for reply body

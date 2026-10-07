@@ -79,7 +79,7 @@ echo '{"type":"turn","message":"reply with exactly: agy ok","session_id":"","pro
 turn.message
   ↓
 bridge.py / bridge.js
-  ↓ agy --print <message> [--dangerously-skip-permissions] [--model <m>]
+  ↓ agy --print [--dangerously-skip-permissions] [--model <m>] -- <message>
 agy CLI
   ↓ plain text reply on stdout (after the turn completes)
 bridge.py / bridge.js

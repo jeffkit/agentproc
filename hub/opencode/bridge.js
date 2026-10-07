@@ -4,8 +4,8 @@
  * AgentProc bridge for the `opencode` CLI.
  *
  * Invokes:
- *   opencode run <message> --auto --format json \
- *       [--session <session_id>] [--model <model>]
+ *   opencode run --auto --format json \
+ *       [--session <session_id>] [--model <model>] -- <message>
  *
  * Parses the NDJSON stream via the shared stream_utils.
  */
@@ -18,7 +18,9 @@ const CLI_NAME = 'opencode';
 const INSTALL_HINT = 'Install: npm install -g opencode-ai  (or: curl -fsSL https://opencode.ai/install | bash)';
 
 function buildArgs(message, sessionId, env) {
-  const args = ['opencode', 'run', message, '--auto', '--format', 'json'];
+  // Flags precede '--': everything after it is positional, so a message that
+  // starts with '-' cannot be parsed as a flag.
+  const args = ['opencode', 'run', '--auto', '--format', 'json'];
   if (sessionId) {
     args.push('--session', sessionId);
   }
@@ -26,6 +28,7 @@ function buildArgs(message, sessionId, env) {
   if (model) {
     args.push('--model', model);
   }
+  args.push('--', message);
   return args;
 }
 

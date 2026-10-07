@@ -110,6 +110,20 @@ def test_2_late_callbacks_dropped_after_run_returns(tmp_path):
     subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
 
 
+def test_2b_turn_ends_at_child_reap_not_at_pipe_eof(tmp_path):
+    """The grandchild holds both write ends for 30s. The turn must end at the
+    "child reaped and pipe drained" boundary — not when the pipes EOF, and not
+    when the 1s join backstop expires — while the child's own result line is
+    still delivered."""
+    start = time.monotonic()
+    result = run(_leaky_profile(tmp_path), RunOptions(message="hi"))
+    elapsed = time.monotonic() - start
+    assert result.reply == "done"
+    assert result.error == ""
+    assert elapsed < 1.5, f"turn waited on the grandchild-held pipe ({elapsed:.2f}s)"
+    subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
+
+
 def test_3_kill_process_group_reaps_zombie(tmp_path, monkeypatch):
     """_kill_process_group must reap the child even when its communicate()
     backstop times out — the child must not be left as a zombie with

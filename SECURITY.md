@@ -19,6 +19,7 @@ AgentProc assumes the bridge and the agent process are co-located on a trusted h
 - Environment variables are visible to any process the agent spawns.
 - stdout is plaintext; the protocol does not authenticate the agent to the bridge.
 - The `command` field in a profile is executed directly; do not load profiles from untrusted sources.
+- On the in-process executor path the user message may be carried in the wrapped CLI's argv, because most CLIs only accept their prompt as a command-line argument. That argv is readable by any process running as the same user via `ps(1)`, and is subject to OS argument-length limits. Run executor-path bridges on a dedicated host, container, or VM — never alongside untrusted local users.
 
 If you need to run an untrusted agent, sandbox the entire process (container, VM, or similar) rather than relying on the protocol.
 

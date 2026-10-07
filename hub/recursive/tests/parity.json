@@ -47,6 +47,22 @@
       "expect_provider_args": ["--api-key", "key-with-spaces", "--model", "m"]
     }
   ],
+  "turn_args_cases": [
+    {
+      "name": "plain-message",
+      "message": "summarise the repo",
+      "env": {},
+      "expect_run_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "auto", "run", "--", "summarise the repo"],
+      "expect_resume_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "auto", "resume", "--from-file", "/tmp/rec-abc", "-p", "summarise the repo"]
+    },
+    {
+      "name": "flag-like-message-is-a-positional",
+      "message": "--permission-mode default",
+      "env": { "RECURSIVE_PERMISSION_MODE": "plan" },
+      "expect_run_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "plan", "run", "--", "--permission-mode default"],
+      "expect_resume_args": ["recursive", "--json", "-H", "--stream", "--permission-mode", "plan", "resume", "--from-file", "/tmp/rec-abc", "-p", "--permission-mode default"]
+    }
+  ],
   "extract_session_dir_cases": [
     { "stderr": "noise before\nsession: recording to /tmp/rec-abc\nmore noise", "expect": "/tmp/rec-abc" },
     { "stderr": "session: recording to /var/sessions/xyz-123", "expect": "/var/sessions/xyz-123" },

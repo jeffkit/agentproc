@@ -3,9 +3,10 @@
 AgentProc bridge for the `opencode` CLI.
 
 Invokes:
-    opencode run <message> --auto --format json \
+    opencode run --auto --format json \
         [--session <session_id>] \
-        [--model <model>]
+        [--model <model>] \
+        -- <message>
 
 Parses the NDJSON stream and re-emits as AgentProc protocol output:
     step_start  → captures sessionID (stamped on partial/result/error)
@@ -42,12 +43,15 @@ INSTALL_HINT = "Install: npm install -g opencode-ai  (or: curl -fsSL https://ope
 
 
 def build_args(message: str, session_id: str, env) -> list[str]:
-    args = ["opencode", "run", message, "--auto", "--format", "json"]
+    # Flags precede "--": everything after it is positional, so a message that
+    # starts with "-" cannot be parsed as a flag.
+    args = ["opencode", "run", "--auto", "--format", "json"]
     if session_id:
         args += ["--session", session_id]
     model = env.get("OPENCODE_MODEL", "").strip()
     if model:
         args += ["--model", model]
+    args += ["--", message]
     return args
 
 

@@ -175,13 +175,17 @@ const codex = {
 
   buildArgs(message, sessionId, env, ctx) {
     const model = (env.CODEX_MODEL || '').trim();
+    // '--' keeps a message that starts with '-' a positional, not a flag; every
+    // flag must therefore precede it.
     if (sessionId) {
-      const args = ['codex', 'exec', 'resume', '--json', sessionId, message];
+      const args = ['codex', 'exec', 'resume', '--json', sessionId];
       if (model) args.push('-c', `model="${model}"`);
+      args.push('--', message);
       return args;
     }
-    const args = ['codex', 'exec', '--json', message];
+    const args = ['codex', 'exec', '--json'];
     if (model) args.push('-c', `model="${model}"`);
+    args.push('--', message);
     return args;
   },
 
@@ -364,10 +368,13 @@ const opencode = {
   plain: false,
 
   buildArgs(message, sessionId, env, ctx) {
-    const args = ['opencode', 'run', message, '--auto', '--format', 'json'];
+    // Flags precede '--': everything after it is positional, so a message that
+    // starts with '-' cannot be parsed as a flag.
+    const args = ['opencode', 'run', '--auto', '--format', 'json'];
     if (sessionId) args.push('--session', sessionId);
     const model = (env.OPENCODE_MODEL || '').trim();
     if (model) args.push('--model', model);
+    args.push('--', message);
     return args;
   },
 
@@ -460,12 +467,14 @@ const agy = {
 
     function buildArgs(message, sessionId, env, ctx) {
       session.id = sessionId || crypto.randomUUID();
-      const args = ['agy', '--print', message, '--conversation', session.id];
+      // Message last, after '--', so a message starting with '-' stays positional.
+      const args = ['agy', '--print', '--conversation', session.id];
       if ((env.AGY_DANGEROUSLY_SKIP_PERMISSIONS || '1') === '1') {
         args.push('--dangerously-skip-permissions');
       }
       const model = (env.AGY_MODEL || '').trim();
       if (model) args.push('--model', model);
+      args.push('--', message);
       return args;
     }
 
@@ -531,7 +540,8 @@ const dsh = {
   plain: true,
 
   buildArgs(message, _sessionId, env, ctx) {
-    return ['dsh', '--profile', 'headless', message];
+    // '--' so a task starting with '-' stays a positional (hub/dsh does the same).
+    return ['dsh', '--profile', 'headless', '--', message];
   },
 };
 

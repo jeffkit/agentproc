@@ -4,8 +4,8 @@
  * AgentProc bridge for the `codex` CLI (OpenAI Codex, wire 0.4).
  *
  * Default:
- *   codex exec --json <message>
- *   codex exec resume --json <thread_id> <message>
+ *   codex exec --json -- <message>
+ *   codex exec resume --json <thread_id> -- <message>
  *
  * Permission mode (turn.permission === true / profile permission: true):
  *   Same argv + --dangerously-bypass-hook-trust + approval_policy=on-request,

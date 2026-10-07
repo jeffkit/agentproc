@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.4` · **文档修订：** `1.9` · **状态：** 稳定
+**线协议：** `0.4` · **文档修订：** `1.10` · **状态：** 稳定
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -144,6 +144,10 @@ stdout 每一行都是一个以 `\n` 结尾的 JSON 对象，带 `type` 字段�
 ### 可选工具权限
 
 通过 profile `permission: true` 开启。不是通用 HIL——仅工具授权。在 in-process executor 路径上，只有声明了审批通道的 executor（今仅 `claude-code`）才接受 `permission: true`；其余 executor 一律拒绝运行——`error` 事件 + 非零退出码，永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。未请求权限的 profile 仍带这些自动批准 flag；`AGENTPROC_AUTO_APPROVE=0` / `false` 会让它们也变成同样的拒绝。
+
+### In-process executor 的 argv
+
+在 spawn 路径上消息只走 stdin，永不进 argv。in-process executor 驱动的是第三方 CLI，而这类 CLI 大多只接受把 prompt 作为命令行参数——因此 executor 路径是一处**明文豁免**：`buildArgs` 可以把消息放进目标 CLI 的 argv。该 argv 可被同用户的任意进程经 `ps(1)` 读取，受 OS 参数长度上限约束（Linux ≈128 KiB，Windows ~32 K 字符），且当消息以 `-` 开头时可能被误当作 flag。当消息是位置参数时，executor **必须**在它前面紧邻放置 `--`，并把所有 flag 放在 `--` 之前；目标 CLI 能从 stdin 读 prompt 的 executor 应让消息留在 argv 之外。executor 路径的 bridge 请跑在独占宿主、容器或 VM 上。细节见完整规范。
 
 ```
 {"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}

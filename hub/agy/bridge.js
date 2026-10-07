@@ -20,12 +20,14 @@ const CLI_NAME = 'agy';
 const INSTALL_HINT = 'See the agy project for installation instructions.';
 
 function buildArgs(message) {
-  const args = [CLI_NAME, '--print', message];
+  // Message last, after '--', so a message starting with '-' stays positional.
+  const args = [CLI_NAME, '--print'];
   if ((process.env.AGY_DANGEROUSLY_SKIP_PERMISSIONS || '1') === '1') {
     args.push('--dangerously-skip-permissions');
   }
   const model = (process.env.AGY_MODEL || '').trim();
   if (model) args.push('--model', model);
+  args.push('--', message);
   return args;
 }
 

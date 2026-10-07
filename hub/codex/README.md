@@ -94,7 +94,7 @@ codex emits NDJSON events with its own schema (different from claude's):
 | `turn.completed` | Signals end of turn (no-op for the bridge) |
 | `turn.failed` | Emits `{"type":"error"}` |
 
-For session continuity, the bridge invokes `codex exec resume --json <thread_id> <prompt>` when `turn.session_id` is set. The `--json` flag is present on both the first-turn and resume paths — without it codex emits non-NDJSON output that the bridge cannot parse. The thread id is opaque — the messaging bridge forwards it without interpreting.
+For session continuity, the bridge invokes `codex exec resume --json <thread_id> -- <prompt>` when `turn.session_id` is set. The `--json` flag is present on both the first-turn and resume paths — without it codex emits non-NDJSON output that the bridge cannot parse. The thread id is opaque — the messaging bridge forwards it without interpreting.
 
 ## Environment variables
 
@@ -117,7 +117,7 @@ Then the bridge:
 
 1. Creates a one-shot `CODEX_HOME` (copies `auth.json` / `config.toml` from the real home).
 2. Installs a `PermissionRequest` hook (`permission_hook.py`) that relays approvals over a Unix socket.
-3. Runs `codex exec --json` with `--dangerously-bypass-hook-trust` and `-c approval_policy="on-request"`.
+3. Runs `codex exec --json ... -- <prompt>` with `--dangerously-bypass-hook-trust` and `-c approval_policy="on-request"`.
 4. Translates Codex hook decisions ↔ AgentProc `turn.permission_REQUEST` / `turn.permission_RESPONSE`.
 
 `agentproc` on a TTY prompts `Allow? [y/N]` for each request; without a TTY it denies. See [PERMISSIONS.md](../PERMISSIONS.md).
