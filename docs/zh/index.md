@@ -158,7 +158,7 @@ async function handleMessage(message, sessionId) {
   const result = await run(profile, {
     message,
     sessionId,
-    onPartial: (chunk) => console.log(`[streaming] ${chunk}`),
+    onPartial: (chunk, role) => console.log(`[streaming] ${chunk}`),  // role: 'thinking' | undefined
   });
   console.log(`Reply: ${result.reply}`);
   console.log(`Session: ${result.sessionId}`);  // 下一轮把这个传回来

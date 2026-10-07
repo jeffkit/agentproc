@@ -2,7 +2,7 @@
 
 > Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: https://agentproc.dev
 
-> Protocol version: 0.4 · Package version: 0.18.3 · Generated from commit in repo.
+> Protocol version: 0.4 · Package version: 0.19.0 · Generated from commit in repo.
 
 
 ## Table of contents
@@ -28,7 +28,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.8`
+**Document revision:** `1.9`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -42,6 +42,7 @@ The wire protocol and this document are versioned **independently**. The wire ve
 - If a bridge sends a version string the agent does not recognise, the agent SHOULD behave as if the field were unset (best-effort, fail-soft).
 - If an agent expects a version string the bridge does not send, the agent MUST fall back to its built-in default.
 - The string is not a feature-detection mechanism: there is no negotiation, no capability advertisement, and no ordering. Agents that need to know whether a specific feature (e.g. an image attachment) is present MUST inspect the relevant field in the [turn object](#input--stdin-turn-object) directly (e.g. a non-empty `attachments` array), not the version string.
+- On reading a turn whose `protocol_version` is non-empty and not equal to the implementation's own wire version, an implementation SHOULD write **one** diagnostic line to stderr naming both version strings, then continue best-effort. The diagnostic MUST NOT change any event, reply, session id, or exit code, and MUST NOT be used as negotiation or a capability probe — it is a diagnostic, not a compatibility gate.
 
 The rationale is that any comparable version invites implementers to gate behaviour on `>= 0.4`, which breaks the moment a bridge ships without bumping the number. Treating the string as opaque keeps the contract honest: presence of a feature is signalled by presence of the field that carries it.
 
@@ -252,7 +253,8 @@ Every executor exposes the following surface. SDKs MAY use different concrete sy
 | `buildArgs` | `(message, sessionId, env, ctx) -> string[]` | Builds the target CLI's argv. `message` is the turn's user message; `sessionId` is the previous turn's session id (empty string = new session); `env` is the composed child environment (infra set + profile `env` after `${VAR}` expansion + `env_allowlist` filtering); `ctx` is `{ "permission": bool }`, the profile's `permission` value for this turn. The returned argv is passed to `execve` **without** a shell. Returning an empty array is a hard error. |
 | `supportsPermission` | boolean | `true` = this executor has a mid-turn approval channel and can honour `permission: true`. Default `false`. Consulted by the runner *before* spawning — see [Runner contract](#runner-contract) — never by `buildArgs` itself. |
 | `parseEvent` | `(event) -> ParseResult \| null` | Translates one decoded JSON object from the CLI's stdout into a `ParseResult`. Return `null` for events the executor does not recognise (the runner logs and ignores the line). Omitted / unused when `plain: true`. |
-| `makeHandlers` | `() -> { buildArgs, parseEvent }` | Optional factory for **stateful** executors that need per-turn state shared between `buildArgs` and `parseEvent` (e.g. a session id minted in `buildArgs` and returned in `parseEvent`). When present, the runner calls `makeHandlers()` **once per turn** and uses the returned pair for that turn only. When absent, the runner uses `buildArgs` / `parseEvent` directly, and they MUST be stateless and re-entrant. |
+| `makeHandlers` | `() -> { buildArgs, parseEvent, getSessionId? }` | Optional factory for **stateful** executors that need per-turn state shared between `buildArgs` and `parseEvent` (e.g. a session id minted in `buildArgs` and returned in `parseEvent`). When present, the runner calls `makeHandlers()` **once per turn** and uses the returned handlers for that turn only. When absent, the runner uses `buildArgs` / `parseEvent` directly, and they MUST be stateless and re-entrant. |
+| `getSessionId` | `() -> string` | Optional. The session id this turn's `buildArgs` minted or reused (e.g. `agy --conversation <id>`). Consulted once per turn by the runner on the `plain: true` path, after the CLI process has exited; a value that satisfies the wire `session_id` rules and arrives when no other id has been learned is surfaced as `RunResult.sessionId` (the first-non-empty rule is unchanged). Absent → the host persists the id it sent (see [Plain-CLI executors](#session_id-on-events)). |
 
 `buildArgs` and `parseEvent` (or the pair returned by `makeHandlers`) form a closed turn-local contract: the runner calls `buildArgs` once before spawn, then calls `parseEvent` for each stdout line until EOF. The executor MUST NOT assume any ordering between events beyond what the CLI itself guarantees.
 
@@ -275,7 +277,7 @@ The object `parseEvent` returns. All fields optional; a `null` return means "thi
 When `plain: true`, the runner does not decode stdout as NDJSON and does not call `parseEvent`. Instead:
 
 - The entire stdout (UTF-8 decoded, trailing whitespace trimmed) becomes the reply body.
-- Session continuity is not supported (no `sessionId` can be extracted from plain text by the contract itself — a `plain` executor that needs session continuity MUST use a bespoke run loop outside this interface, as `recursive` and `echo-agent` do).
+- Plain text carries no `parseEvent` field, so no `sessionId` can be extracted from stdout by the contract itself. Session continuity is instead handled in the executor's argument-building step: `buildArgs` mints or reuses the id (e.g. `agy --conversation <id>`) and `makeHandlers()` exposes it through `getSessionId()` (see [Plain-CLI executors](#session_id-on-events)). The runner reads that handler once after the process exits and returns the id as `RunResult.sessionId`; when the CLI has no resumption flag, `getSessionId()` returns `""` and the host persists the id it sent.
 - Timeouts (`timeout_secs` / `kill_grace_secs`) still apply. The optional `budget_secs` / `deadline` fields constrain the subprocess spawn path only — this in-process path is not required to honour them (see [Time budget and absolute deadline](#time-budget-and-absolute-deadline-optional-profile-fields)).
 - `streaming: true` has no effect for `plain` executors (there are no `partial` events to forward).
 
@@ -327,6 +329,7 @@ Optional fields use **presence-as-feature**: the bridge includes the field when 
 | Field | Type | Description |
 |-------|------|-------------|
 | `session_name` | string | Human-readable session name. Defaults to `"default"` when absent. |
+| `from_user` | string | Platform-specific sender identifier. Bridges MAY include it when the platform knows the sender; absent or `""` = unknown. Agents MUST ignore it when they do not need it. |
 | `attachments` | array | Attachment list for this turn. Each element **MUST** be an object with `kind` (string) and `url` (string); bridges SHOULD also include `filename` / `mime_type` / `size` when known, and agents MUST ignore unknown optional fields. `kind` is one of the controlled vocabulary `image` / `file` / `audio` / `video` — unknown values fall back to `"other"` and bridges SHOULD log a warning. `url` MUST use one of these schemes: `file://`, `http://`, `https://`, or `data:` — other schemes (including `ftp://` / `javascript:`) MUST be dropped by the bridge with a warning so misbehaving upstreams cannot smuggle URLs into the agent prompt. Relative `file://` paths are resolved against the profile's `cwd`. Absent or `[]` = no attachments this turn. There is no separate single-attachment convenience field — `attachments` is the only attachment channel. |
 | `permission` | boolean | `true` when the profile has `permission: true` and the bridge supports the optional permission channel; absent or `false` otherwise. Agents that can emit permission requests MUST check this before relying on mid-turn approval — absence means auto-approve / skip-permissions is the only option. |
 
@@ -880,6 +883,7 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
 
+- **doc 1.9** — Hygiene pass over fields that implementations already carry: `from_user` (platform sender identifier) recorded as an **optional** turn field, matching the fact that it is an application-layer concern — a bridge MAY send it, absent or `""` means unknown; `getSessionId` added to the [Executor interface](#executor-interface) table (the `plain` executor's session id, minted in `buildArgs` and read by the runner after exit), which also resolves the contradicting statement in the [`plain` executors](#plain-executors) section — session continuity for plain-CLI executors happens **inside** the interface, not via a bespoke run loop. Versioning gains a SHOULD: an implementation that reads a turn whose `protocol_version` differs from its own writes one stderr diagnostic naming both strings and continues best-effort (never a compatibility gate, never a behaviour change). SDK-facing: the `on_partial` / `onPartial` callback's second argument is the partial `role` (absent = no role) in all three SDKs. No wire change — the bytes on stdin/stdout are unchanged.
 - **doc 1.8** — Reply assembly stated for both paths: with `streaming: true` and at least one forwarded `partial`, the terminal `result` carries an empty body (the body was already delivered — it MUST NOT be duplicated); otherwise the reply is the first `result` event's `finalText` (an explicit empty string counts; later `result` events are ignored). An executor-path `usage` object MUST be written to `RunResult.usage` (first non-empty wins), an `error` event makes the turn a failure even when the CLI exited 0, and an empty turn without an error is a success. The shared conformance suite now also drives the executor path (`spec/conformance/executors.json`). No wire change.
 - **doc 1.7** — In-process executors: `buildArgs` gains a fourth `ctx` argument carrying the profile's `permission` value, plus a new `supportsPermission` capability bit; the Runner contract now refuses to spawn when `permission: true` meets an executor without an approval channel, and a new bridge-side `AGENTPROC_AUTO_APPROVE` knob (`0` / `false`) makes the runner refuse any auto-approve argv. Both refusals are an `error` event plus a non-zero exit code — never a silent fallback to `--dangerously-skip-permissions` / `--yolo`. Hub bridges that inject an auto-approve default of their own (today only `hub/dsh`) MUST NOT inject it while the knob is off. No wire change; spawn-path semantics are unchanged.
 - **wire 0.4 / doc 1.6** — Optional bridge-side profile fields `budget_secs` and `deadline` (earliest-expiry-wins with `timeout_secs`; identical SIGTERM → grace → SIGKILL semantics, exit 124). New "Event traceability (optional)" section: bridge-internal event `seq`/`ts` metadata, `RunResult` `started_at`/`duration` (bridge-measured, distinct from agent self-reported `usage.duration_ms`), and an opt-in NDJSON journal (off by default, file-only, never stdout; stdout/stderr byte-identical when disabled). No wire changes — the bytes on stdin/stdout are unchanged. SDK packages bumped to 0.17.0.
@@ -1048,7 +1052,7 @@ result = run(
     RunOptions(
         message="what files are here?",
         session_id="",
-        on_partial=lambda chunk: print(chunk, end="", flush=True),
+        on_partial=lambda chunk, role=None: print(chunk, end="", flush=True),
         on_error=lambda msg: print(f"agent error: {msg}"),
     ),
 )
@@ -1058,6 +1062,8 @@ print(result.session_id) # session id for the next turn
 print(result.exit_code)  # 0 = success, 1 = error, 124 = timeout
 print(result.usage)      # {'input_tokens': 12, 'output_tokens': 34, ...} or None
 ```
+
+`on_partial(text, role)` receives the partial's `role` as its optional second argument — `'thinking'` for reasoning text, `None` when the event carries none (never a synthesised `'output'`). A **one-argument callback still works** (`on_partial=chunks.append`, `lambda chunk: …`), so existing code needs no change. On the in-process executor path the second argument is always `None`, because a `ParseResult` has no `role`.
 
 ### `RunResult` fields
 
@@ -1252,7 +1258,7 @@ const result = await run(
   {
     message: 'what files are here?',
     sessionId: '',              // empty = new session
-    onPartial: (chunk) => process.stdout.write(chunk),
+    onPartial: (chunk, role) => process.stdout.write(chunk),  // role: 'output' | 'thinking' | … | undefined
     onError: (msg) => console.error('agent error:', msg),
   }
 );
@@ -1263,6 +1269,8 @@ console.log(result.exitCode);   // 0 = success, 1 = error, 124 = timeout
 console.log(result.usage);      // { input_tokens, output_tokens, ... } or null
 ```
 
+`onPartial(text, role)` receives the partial's `role` as its second argument — `'thinking'` for reasoning text, `undefined` when the event carries none (never a synthesised `'output'`). On the in-process executor path the second argument is always `undefined`, because a `ParseResult` has no `role`.
+
 ### Using in-process executors
 
 For profiles backed by a known CLI (claude, codex, gemini, …), set `executor:` to skip the bridge-subprocess fork:
@@ -1271,7 +1279,7 @@ For profiles backed by a known CLI (claude, codex, gemini, …), set `executor:`
 const result = await run(
   { executor: 'claude-code', timeout_secs: 600, streaming: true,
     env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } },
-  { message: 'explain this codebase', onPartial: (c) => process.stdout.write(c) }
+  { message: 'explain this codebase', onPartial: (c, role) => process.stdout.write(c) }
 );
 // result.usage?.input_tokens — token count from claude
 ```

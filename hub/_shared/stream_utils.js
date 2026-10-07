@@ -34,6 +34,10 @@
 const { spawn } = require('node:child_process');
 const readline = require('node:readline');
 
+// Wire-protocol version this engine implements — kept in sync with the three
+// SDKs' PROTOCOL_VERSION constants (spec `Versioning`).
+const PROTOCOL_VERSION = '0.4';
+
 function emitObj(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
@@ -104,6 +108,14 @@ function readTurn() {
 async function runBridge({ cliName, cliInstallHint, buildArgs, parseEvent, turn = null }) {
   if (turn === null) turn = await readTurn();
   const env = process.env;
+  const turnVersion = turn.protocol_version;
+  if (typeof turnVersion === 'string' && turnVersion && turnVersion !== PROTOCOL_VERSION) {
+    // Diagnostic only (spec `Versioning`): the turn is processed unchanged.
+    process.stderr.write(
+      `[agentproc hub] protocol_version "${turnVersion}" does not match this hub bridge's ` +
+        `"${PROTOCOL_VERSION}"; continuing best-effort (fail-soft)\n`,
+    );
+  }
   const message = (typeof turn.message === 'string') ? turn.message : '';
   const sessionId = (typeof turn.session_id === 'string') ? turn.session_id : '';
 

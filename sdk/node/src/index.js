@@ -161,11 +161,20 @@ function readTurn() {
 function contextFromTurn() {
   const t = readTurn();
   const permissionEnabled = t.permission === true;
+  const protocolVersion = typeof t.protocol_version === 'string' ? t.protocol_version : PROTOCOL_VERSION;
+  // Diagnostic only (spec Versioning): one stderr line, then continue
+  // best-effort — it never gates or alters what the handler may send.
+  if (protocolVersion && protocolVersion !== PROTOCOL_VERSION) {
+    process.stderr.write(
+      `[agentproc] protocol_version "${protocolVersion}" does not match this agent SDK's ` +
+        `"${PROTOCOL_VERSION}"; continuing best-effort (fail-soft)\n`,
+    );
+  }
   return {
     message: typeof t.message === 'string' ? t.message : '',
     sessionId: typeof t.session_id === 'string' ? t.session_id : '',
     sessionName: typeof t.session_name === 'string' ? t.session_name : 'default',
-    protocolVersion: typeof t.protocol_version === 'string' ? t.protocol_version : PROTOCOL_VERSION,
+    protocolVersion,
     attachments: Array.isArray(t.attachments) ? t.attachments : [],
     permission: permissionEnabled,
 

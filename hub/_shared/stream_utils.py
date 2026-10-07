@@ -39,6 +39,10 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+# Wire-protocol version this engine implements — kept in sync with the three
+# SDKs' PROTOCOL_VERSION constants (spec `Versioning`).
+PROTOCOL_VERSION = "0.4"
+
 
 @dataclass
 class EventResult:
@@ -143,6 +147,14 @@ def run_bridge(
     """
     if turn is None:
         turn = _read_turn()
+    turn_version = turn.get("protocol_version")
+    if isinstance(turn_version, str) and turn_version and turn_version != PROTOCOL_VERSION:
+        # Diagnostic only (spec `Versioning`): the turn is processed unchanged.
+        warning = (
+            f'protocol_version "{turn_version}" does not match this hub bridge\'s '
+            f'"{PROTOCOL_VERSION}"; continuing best-effort (fail-soft)'
+        )
+        sys.stderr.write(f"[agentproc hub] {warning}\n")
     message = turn.get("message") if isinstance(turn.get("message"), str) else ""
     session_id = turn.get("session_id") if isinstance(turn.get("session_id"), str) else ""
     env = os.environ

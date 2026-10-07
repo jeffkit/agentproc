@@ -14,7 +14,11 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
   matrix for in-process executors: `auto_approve_flags` (the argv tokens that
   count as auto-approval) and `posture_cases` (per executor: which argv a turn
   must produce, and whether the runner must refuse to spawn at all). See
-  [posture_cases format](#posture_cases-format).
+  [posture_cases format](#posture_cases-format). Finally it carries
+  `partial_role_cases` — the value the runner passes as the `on_partial` /
+  `onPartial` callback's second argument for one `partial` line each, which the
+  `cases` classifications cannot observe. See
+  [partial_role_cases format](#partial_role_cases-format).
 - `scenarios.json` — multi-line stdout sequences paired with the expected
   observable runner output (reply, session_id, error, exit_code, partials).
   Each scenario is a full agent turn (a sequence of NDJSON event lines),
@@ -83,6 +87,9 @@ Both reference SDKs run the same fixtures through their runners:
 - `cases.json` `env_compose` → shared child-env composition:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner._compose_env`
   - Node:   `sdk/node/src/conformance.test.js`    → `runner.composeEnv`
+- `cases.json` `partial_role_cases` → the `on_partial` / `onPartial` second argument:
+  - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.run` (fake bash agent)
+  - Node:   `sdk/node/src/conformance.test.js`    → `runner.run` (fake bash agent)
 - `scenarios.json` → end-to-end `run()`:
   - Python: `sdk/python/tests/test_scenarios.py` → `agentproc.runner.run`
   - Node:   `sdk/node/src/scenarios.test.js`     → `runner.run`
@@ -209,6 +216,32 @@ present and string-typed.
   ]
 }
 ```
+
+### cases.json `partial_role_cases` format
+
+```json
+{
+  "partial_role_cases": [
+    {
+      "name": "<short description>",
+      "line": "{\"type\":\"partial\",\"text\":\"...\",\"role\":\"...\"}",
+      "expect_text": "<the chunk text>",
+      "expect_role": "thinking|plan|null"
+    }
+  ]
+}
+```
+
+Each case is one complete `partial` NDJSON line, run through a real spawn with
+`streaming: true`; `expect_text` / `expect_role` are the two arguments the
+runner must pass to `on_partial` / `onPartial` for that line. `null` means the
+callback's second argument is `None` / `undefined` — the runner MUST NOT
+synthesise `"output"` when the event carries no `role`. A string role is
+forwarded **as-is**, including values outside `output` / `thinking` (the spec
+says unknown values are forwarded as-is), which is what pins all three SDKs to
+the same passthrough rule. The executor path has no `role` on its
+`ParseResult`, so it always passes `null`; these cases cover the spawn path
+only.
 
 ### posture_cases format
 

@@ -17,6 +17,7 @@
     {"line": "{\"type\":\"partial\",\"text\":\"unicode 你好 🚀\"}", "expect": {"kind": "partial", "value": "unicode 你好 🚀"}},
     {"line": "{\"type\":\"partial\",\"text\":\"x\",\"role\":\"thinking\"}", "expect": {"kind": "partial", "value": "x", "role": "thinking"}},
     {"line": "{\"type\":\"partial\",\"text\":\"y\",\"role\":42}", "expect": {"kind": "partial", "value": "y"}},
+    {"line": "{\"type\":\"partial\",\"text\":\"plan chunk\",\"role\":\"plan\"}", "expect": {"kind": "partial", "value": "plan chunk", "role": "plan"}},
     {"line": "{\"type\":\"partial\",\"text\":\"z\",\"session_id\":\"sess-1\"}", "expect": {"kind": "partial", "value": "z", "session_id": "sess-1"}},
 
     {"line": "{\"type\":\"text\",\"text\":\"hello world\"}", "expect": {"kind": "malformed", "value": "{\"type\":\"text\",\"text\":\"hello world\"}"}},
@@ -109,5 +110,10 @@
      "expect": {"error": false, "exit_zero": true, "reply": "ok",
                 "argv_contains": ["--permission-prompt-tool", "stdio"],
                 "argv_excludes": ["--dangerously-skip-permissions", "--yolo", "--always-approve", "--yes-always", "--approve", "--auto"]}}
+  ],
+  "partial_role_cases": [
+    {"name": "string role is delivered as the callback's second argument", "line": "{\"type\":\"partial\",\"text\":\"thinking chunk\",\"role\":\"thinking\"}", "expect_text": "thinking chunk", "expect_role": "thinking"},
+    {"name": "absent role delivers null as the second argument", "line": "{\"type\":\"partial\",\"text\":\"plain chunk\"}", "expect_text": "plain chunk", "expect_role": null},
+    {"name": "unknown role is forwarded as-is", "line": "{\"type\":\"partial\",\"text\":\"plan chunk\",\"role\":\"plan\"}", "expect_text": "plan chunk", "expect_role": "plan"}
   ]
 }

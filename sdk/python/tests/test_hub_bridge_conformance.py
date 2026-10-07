@@ -159,3 +159,42 @@ def test_hub_bridge_conformance(scenario: dict, monkeypatch: pytest.MonkeyPatch,
             assert needle in joined, (
                 f"{scenario['name']}: expected substring {needle!r} in stdout, got {joined!r}"
             )
+
+
+def _run_with_version(
+    version: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> tuple[int, str, str]:
+    def _fake_popen(args, *a, **kw):  # noqa: ANN001 — signature mirrors subprocess.Popen
+        return _FakeProc(['{"type":"result","text":"ok"}'], 0, "")
+
+    monkeypatch.setattr("subprocess.Popen", _fake_popen)
+    exit_code = run_bridge(
+        cli_name="fake-cli",
+        cli_install_hint="install hint",
+        build_args=_identity_build_args,
+        parse_event=_identity_parse_event,
+        turn={"type": "turn", "message": "hi", "session_id": "", "protocol_version": version},
+    )
+    captured = capsys.readouterr()
+    return exit_code, captured.out, captured.err
+
+
+def test_hub_bridge_warns_on_turn_version_mismatch(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    exit_code, out, err = _run_with_version("0.9", monkeypatch, capsys)
+
+    # Diagnostic only: the CLI's result is still relayed, exit code unchanged.
+    assert exit_code == 0, f"exit code changed: {exit_code}"
+    assert [line for line in out.split("\n") if line] == ['{"type":"result","text":"ok"}'], (
+        f"stdout changed: {out!r}"
+    )
+    assert "protocol_version" in err, f"no warning on the bridge side; stderr={err!r}"
+    assert "0.9" in err and "0.4" in err, f"warning must name both versions; stderr={err!r}"
+
+
+def test_hub_bridge_does_not_warn_on_matching_version(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    _, _, err = _run_with_version("0.4", monkeypatch, capsys)
+    assert err == "", f"stderr={err!r}"

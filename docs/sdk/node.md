@@ -135,7 +135,7 @@ const result = await run(
   {
     message: 'what files are here?',
     sessionId: '',              // empty = new session
-    onPartial: (chunk) => process.stdout.write(chunk),
+    onPartial: (chunk, role) => process.stdout.write(chunk),  // role: 'output' | 'thinking' | … | undefined
     onError: (msg) => console.error('agent error:', msg),
   }
 );
@@ -146,6 +146,8 @@ console.log(result.exitCode);   // 0 = success, 1 = error, 124 = timeout
 console.log(result.usage);      // { input_tokens, output_tokens, ... } or null
 ```
 
+`onPartial(text, role)` receives the partial's `role` as its second argument — `'thinking'` for reasoning text, `undefined` when the event carries none (never a synthesised `'output'`). On the in-process executor path the second argument is always `undefined`, because a `ParseResult` has no `role`.
+
 ### Using in-process executors
 
 For profiles backed by a known CLI (claude, codex, gemini, …), set `executor:` to skip the bridge-subprocess fork:
@@ -154,7 +156,7 @@ For profiles backed by a known CLI (claude, codex, gemini, …), set `executor:`
 const result = await run(
   { executor: 'claude-code', timeout_secs: 600, streaming: true,
     env: { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } },
-  { message: 'explain this codebase', onPartial: (c) => process.stdout.write(c) }
+  { message: 'explain this codebase', onPartial: (c, role) => process.stdout.write(c) }
 );
 // result.usage?.input_tokens — token count from claude
 ```

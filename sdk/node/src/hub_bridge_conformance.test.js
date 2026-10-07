@@ -113,3 +113,49 @@ describe('hub bridge engine conformance (hub_bridge.json)', () => {
     });
   }
 });
+
+describe('hub bridge engine protocol_version diagnostic', () => {
+  test('warns on mismatch and stays fail-soft', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-hubbridge-pv-'));
+    const fakeCli = writeFakeCli(tmpDir, ['{"type":"result","text":"ok"}'], 0, '');
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-bin-pv-'));
+    fs.symlinkSync(fakeCli, path.join(binDir, 'fake-cli'));
+
+    try {
+      const result = await runHarness(
+        { PATH: `${binDir}:${process.env.PATH}` },
+        JSON.stringify({ type: 'turn', message: 'hi', session_id: '', protocol_version: '0.9' }) + '\n',
+      );
+
+      // Diagnostic only: the CLI's result is still relayed and the exit code
+      // is unchanged.
+      assert.strictEqual(result.code, 0, `stderr: ${result.stderr}`);
+      assert.deepStrictEqual(result.stdout.split('\n').filter(Boolean),
+        ['{"type":"result","text":"ok"}'], `stdout: ${JSON.stringify(result.stdout)}`);
+      assert.match(result.stderr, /protocol_version/, `stderr: ${JSON.stringify(result.stderr)}`);
+      assert.ok(result.stderr.includes('0.9') && result.stderr.includes('0.4'),
+        `warning must name both versions; stderr=${JSON.stringify(result.stderr)}`);
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      try { fs.rmSync(binDir, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test('does not warn when the version matches', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-hubbridge-pv-ok-'));
+    const fakeCli = writeFakeCli(tmpDir, ['{"type":"result","text":"ok"}'], 0, '');
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-bin-pv-ok-'));
+    fs.symlinkSync(fakeCli, path.join(binDir, 'fake-cli'));
+
+    try {
+      const result = await runHarness(
+        { PATH: `${binDir}:${process.env.PATH}` },
+        JSON.stringify({ type: 'turn', message: 'hi', session_id: '', protocol_version: '0.4' }) + '\n',
+      );
+      assert.strictEqual(result.stderr, '', `stderr: ${JSON.stringify(result.stderr)}`);
+    } finally {
+      try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+      try { fs.rmSync(binDir, { recursive: true, force: true }); } catch {}
+    }
+  });
+});

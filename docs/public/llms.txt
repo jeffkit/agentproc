@@ -14,7 +14,7 @@ AgentProc defines how a **bridge** (the platform adapter for WeChat / Slack / Te
 | `message` | User message text (may be `""`) |
 | `session_id` | Session ID from the previous turn (empty = new session) |
 | `session_name` | Human-readable session name (optional, default `"default"`) |
-| `from_user` | Sender identifier |
+| `from_user` | Sender identifier (optional; absent or `""` = unknown) |
 | `attachments` | Array of `{kind, url, ...}` (optional; the only attachment channel) |
 | `permission` | `true` when the profile enables tool authorization (optional) |
 | `protocol_version` | Protocol version string (currently `"0.4"`); opaque, non-comparable |
@@ -136,7 +136,7 @@ These are pure-P0 re-implementations of what bridge-specific `type:` handlers do
 
 ## Status
 
-Wire protocol `0.4`, document revision `1.6`. See https://agentproc.dev/ for the human-readable site.
+Wire protocol `0.4`, document revision `1.9`. See https://agentproc.dev/ for the human-readable site.
 
 ## License
 

@@ -48,7 +48,7 @@ mod conformance;
 
 pub use error::{protocol_error, ProtocolError, RunnerError};
 pub use protocol::{
-    parse_event, read_turn, Attachment, AgentEvent, PartialRole, PermissionBehavior,
+    parse_event, read_turn, Attachment, AgentEvent, PermissionBehavior,
     PermissionRequest, PermissionResponse, TurnInput, TurnObject, PROTOCOL_VERSION,
 };
 pub use profile::Profile;

@@ -1,6 +1,6 @@
 # 协议规范速查
 
-**线协议：** `0.4` · **文档修订：** `1.8` · **状态：** 稳定
+**线协议：** `0.4` · **文档修订：** `1.9` · **状态：** 稳定
 
 完整规范维护在仓库的 [`spec/protocol.zh.md`](https://github.com/jeffkit/agentproc/blob/main/spec/protocol.zh.md)。本页是快速查阅版。
 
@@ -71,6 +71,7 @@ args: []
 | 字段 | 说明 |
 |------|------|
 | `session_name` | 人类可读的会话名（默认 `"default"`）。 |
+| `from_user` | 平台侧发送者标识。平台已知发送者时 **MAY** 携带；缺省或 `""` = 未知。不需要的 agent **MUST** 忽略它。 |
 | `attachments` | `{kind, url, ...}` 数组（如 `{"kind":"image","url":"https://..."}`）。唯一的附件通道——没有单附件便捷变量。缺省/`[]` = 无。 |
 | `permission` | profile 开启 `permission: true` 时为 `true`；否则缺省/`false`。 |
 

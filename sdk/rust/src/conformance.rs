@@ -44,15 +44,12 @@ struct Classified {
 }
 
 fn classify(line: &str) -> Classified {
-    use crate::protocol::{parse_event, AgentEvent, PartialRole};
+    use crate::protocol::{parse_event, AgentEvent};
     match parse_event(line) {
         Some(AgentEvent::Partial { text, role, session_id }) => Classified {
             kind: "partial".into(),
             value: serde_json::Value::String(text),
-            role: role.map(|r| match r {
-                PartialRole::Output => "output".into(),
-                PartialRole::Thinking => "thinking".into(),
-            }),
+            role,
             session_id,
         },
         Some(AgentEvent::Result { text, session_id, .. }) => Classified {

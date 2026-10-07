@@ -387,6 +387,17 @@ class TestRunViaExecutorNDJSON(unittest.TestCase):
         self.assertEqual(partials, ["hello "])
         self.assertEqual(result.session_id, "s1")
 
+    def test_ndjson_on_partial_role_is_none(self):
+        import json
+        lines = [json.dumps({"type": "partial", "text": "hello "})]
+        ex = self._make_ndjson_executor(lines)
+        seen = []
+        run_via_executor(
+            ex, _make_opts(on_partial=lambda text, role=None: seen.append((text, role)))
+        )
+        # `ParseResult` has no `role` — the second argument is always None here.
+        self.assertEqual(seen, [("hello ", None)])
+
     def test_ndjson_non_streaming_reply_is_final_text(self):
         import json
         lines = [
