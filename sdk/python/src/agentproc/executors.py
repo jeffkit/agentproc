@@ -18,13 +18,23 @@ Each executor is a dict (or object with the same keys) containing:
                   approval channel (default False). The runner refuses to run
                   a profile with `permission: true` against an executor that
                   does not declare it.
+    build_initial_stdin: (message: str, session_id: str) -> str | None
+                  Optional. Called once per turn before spawn. A returned
+                  string makes the runner pipe the CLI's stdin, write it
+                  followed by "\\n", and close it — the way an executor keeps
+                  the user message out of argv. Absent / None leaves the CLI's
+                  stdin on the null device.
     parse_event:  (event: dict) -> ParseResult | None
                   (omitted / irrelevant when plain: True)
-    make_handlers: () -> {"build_args": ..., "parse_event"?: ..., "get_session_id"?: ...}
+    make_handlers: () -> {"build_args": ..., "parse_event"?: ..., "get_session_id"?: ...,
+                          "build_initial_stdin"?: ...}
                   — optional factory for stateful executors (e.g. kimi-code)
                   that need fresh per-turn state shared between build_args and
                   parse_event.  When present, the runner calls make_handlers()
-                  once per turn; the returned dict is used for that turn only.
+                  once per turn; the returned dict is used for that turn only —
+                  build_initial_stdin included: the runner reads it off the
+                  factory result when the factory is used, else off the
+                  executor itself.
                   For plain executors that generate or reuse a session id in
                   build_args, make_handlers may expose a get_session_id()
                   callable.  The runner calls get_session_id() after the process
@@ -44,6 +54,7 @@ ParseResult shape:
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -80,9 +91,12 @@ def _claude_code_build_args(
         if session_id:
             args += ["--resume", session_id]
         return args
+    # Unattended: same stream-json input channel as the permission mode, so
+    # the message never lands in argv (see `_claude_code_build_initial_stdin`).
     args = [
-        "claude", "-p", message,
+        "claude", "--print",
         "--output-format", "stream-json",
+        "--input-format", "stream-json",
         # claude CLI 硬要求：--print + stream-json 必须配 --verbose（rust SDK 已修，此处补齐）
         "--verbose",
         "--dangerously-skip-permissions",
@@ -94,6 +108,25 @@ def _claude_code_build_args(
     if session_id:
         args += ["--resume", session_id]
     return args
+
+
+def _claude_code_build_initial_stdin(message: str, session_id: str) -> str:
+    """The stream-json user turn Claude reads from stdin in both modes.
+
+    The same frame the Node and Rust SDKs build (see `ClaudeCodeTurn`'s
+    `build_initial_stdin`) — JSON object order is not significant to the CLI,
+    the fields are.
+    """
+    return json.dumps(
+        {
+            "type": "user",
+            "message": {"role": "user", "content": message},
+            "parent_tool_use_id": None,
+            "session_id": session_id,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _claude_code_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -123,6 +156,7 @@ CLAUDE_CODE = {
     "plain": False,
     "supports_permission": True,
     "build_args": _claude_code_build_args,
+    "build_initial_stdin": _claude_code_build_initial_stdin,
     "parse_event": _claude_code_parse_event,
 }
 

@@ -21,14 +21,22 @@
  *                  approval channel (default falsy). The runner refuses to run
  *                  a profile with `permission: true` against an executor that
  *                  does not declare it.
+ *     buildInitialStdin: (message: string, sessionId: string) => string | null
+ *                  Optional. Called once per turn before spawn. A returned
+ *                  string makes the runner pipe the CLI's stdin, write it
+ *                  followed by '\n', and close it — the way an executor keeps
+ *                  the user message out of argv. Absent / null leaves the
+ *                  CLI's stdin on the null device.
  *     parseEvent:  (event: object) => ParseResult | null
  *                  (omitted / irrelevant when plain: true)
- *     makeHandlers:  () => { buildArgs, parseEvent?, getSessionId? }
+ *     makeHandlers:  () => { buildArgs, parseEvent?, getSessionId?, buildInitialStdin? }
  *                  — optional factory for stateful executors (e.g. kimi-code,
  *                  cursor) that need fresh per-turn state shared between
  *                  buildArgs and parseEvent. When present, the runner calls
  *                  makeHandlers() once per turn; the returned object is used
- *                  for that turn only.
+ *                  for that turn only — buildInitialStdin included: the runner
+ *                  reads it off the factory result when the factory is used,
+ *                  else off the executor itself.
  *                  For plain executors (plain: true) that generate or reuse a
  *                  session id in buildArgs, makeHandlers may expose a
  *                  getSessionId() method instead of parseEvent. The runner
@@ -84,9 +92,12 @@ const claudeCode = {
       if (sessionId) args.push('--resume', sessionId);
       return args;
     }
+    // Unattended: same stream-json input channel as the permission mode, so
+    // the message never lands in argv (see buildInitialStdin).
     const args = [
-      'claude', '-p', message,
+      'claude', '--print',
       '--output-format', 'stream-json',
+      '--input-format', 'stream-json',
       // claude CLI requires --verbose with --print + stream-json (parity with rust SDK)
       '--verbose',
       '--dangerously-skip-permissions',
@@ -95,6 +106,18 @@ const claudeCode = {
     if (model) args.push('--model', model);
     if (sessionId) args.push('--resume', sessionId);
     return args;
+  },
+
+  // The stream-json user turn Claude reads from stdin in both modes — the
+  // same frame the Python and Rust SDKs build (object order is not
+  // significant to the CLI, the fields are).
+  buildInitialStdin(message, sessionId) {
+    return JSON.stringify({
+      type: 'user',
+      message: { role: 'user', content: message },
+      parent_tool_use_id: null,
+      session_id: sessionId,
+    });
   },
 
   parseEvent(event) {
@@ -521,7 +544,7 @@ const deepseek = {
 // ---------------------------------------------------------------------------
 // dsh
 // ---------------------------------------------------------------------------
-// DeepSeek Harness (`dsh --profile headless <task>`). Plain text.
+// DeepSeek Harness (`dsh --profile headless -- <task>`). Plain text.
 // Unlike the `deepseek` executor (a stateless chat exec), dsh headless boots a
 // one-shot full agent runtime: coding persona, bash/fs/search tools, sandbox,
 // and a persisted session log. stdout is the last non-empty assistant

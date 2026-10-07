@@ -244,13 +244,23 @@ mod executor_scenarios {
     use crate::{run, ParseResult, Profile, RunOptions};
 
     /// `register_executor` takes a plain `fn` factory (no captured state), so
-    /// the scenario currently under test travels through this static.
+    /// the scenario currently under test travels through these statics.
     static LINES: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
+    /// `Some` = the scenario carries `initial_stdin`; the fake CLI then echoes
+    /// the one line it reads on stdin back as a result event (a null stdin
+    /// prints NO_STDIN), making the runner's stdin channel observable.
+    static INITIAL_STDIN: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+    /// Fake CLI for `initial_stdin` scenarios.
+    const STDIN_ECHO: &str =
+        r#"read -r line || line=NO_STDIN; printf '{"type":"result","text":"%s"}' "$line""#;
 
     struct FakeHandlers {
         lines: Vec<serde_json::Value>,
+        initial_stdin: Option<Option<String>>,
     }
 
+    #[async_trait::async_trait]
     impl TurnHandlers for FakeHandlers {
         fn build_args(
             &self,
@@ -258,6 +268,9 @@ mod executor_scenarios {
             _session_id: &str,
             _env: &HashMap<String, String>,
         ) -> Vec<String> {
+            if self.initial_stdin.is_some() {
+                return vec!["/bin/sh".to_string(), "-c".to_string(), STDIN_ECHO.to_string()];
+            }
             let joined = self
                 .lines
                 .iter()
@@ -265,6 +278,15 @@ mod executor_scenarios {
                 .collect::<Vec<_>>()
                 .join("\n");
             vec!["printf".to_string(), "%s\\n".to_string(), joined]
+        }
+
+        async fn build_initial_stdin(
+            &mut self,
+            _message: &str,
+            _session_id: &str,
+            _attachments: &[crate::Attachment],
+        ) -> Option<String> {
+            self.initial_stdin.clone().flatten()
         }
 
         /// The fixture's shared rule table (see `executors.json` `_comment`).
@@ -314,6 +336,7 @@ mod executor_scenarios {
         fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
             Box::new(FakeHandlers {
                 lines: LINES.lock().unwrap().clone(),
+                initial_stdin: INITIAL_STDIN.lock().unwrap().clone(),
             })
         }
     }
@@ -344,6 +367,13 @@ mod executor_scenarios {
             let name = sc["name"].as_str().unwrap_or("?");
             let exp = &sc["expect"];
             *LINES.lock().unwrap() = sc["lines"].as_array().cloned().unwrap_or_default();
+            // `initial_stdin: null` is meaningful (a hook that returns no
+            // payload), so absent and null must stay distinguishable.
+            *INITIAL_STDIN.lock().unwrap() = if sc.get("initial_stdin").is_none() {
+                None
+            } else {
+                Some(sc["initial_stdin"].as_str().map(str::to_string))
+            };
 
             let mut profile = Profile::default();
             profile.executor = Some("conformance-fake-exec".to_string());
@@ -412,5 +442,107 @@ mod executor_scenarios {
             "Rust executor path diverges from executors.json:\n  {}",
             divergences.join("\n  ")
         );
+    }
+}
+
+/// Executor stdin channel (spec "Message delivery and argv"): a payload
+/// returned by `build_initial_stdin` must reach the CLI's stdin, and a `None`
+/// return must leave the CLI's stdin on the null device. The fake CLI echoes
+/// what it read on stdin back as a result event, so delivery is observable in
+/// `RunResult.reply`. Mirrors `test_executors.py::TestClaudeStdinDelivery` and
+/// `executors.test.js` "message via stdin".
+#[cfg(feature = "executors")]
+mod executor_stdin_channel {
+    use std::collections::HashMap;
+
+    use crate::executors::{register_executor, Executor, TurnCtx, TurnHandlers};
+    use crate::{run, ParseResult, Profile, RunOptions};
+
+    /// Reads one line from stdin and prints it as `result.text`; a null stdin
+    /// (or a short read) prints `NO_STDIN` instead.
+    const ECHO: &str = r#"read -r line || line=NO_STDIN; printf '{"type":"result","text":"%s"}' "$line""#;
+
+    struct EchoTurn {
+        payload: Option<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHandlers for EchoTurn {
+        fn build_args(
+            &self,
+            _message: &str,
+            _session_id: &str,
+            _env: &HashMap<String, String>,
+        ) -> Vec<String> {
+            vec!["/bin/sh".to_string(), "-c".to_string(), ECHO.to_string()]
+        }
+
+        fn parse_event(&mut self, event: serde_json::Value) -> Option<ParseResult> {
+            if event.get("type").and_then(|v| v.as_str()) != Some("result") {
+                return None;
+            }
+            let text = event.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            Some(ParseResult::final_text(text))
+        }
+
+        async fn build_initial_stdin(
+            &mut self,
+            _message: &str,
+            _session_id: &str,
+            _attachments: &[crate::Attachment],
+        ) -> Option<String> {
+            self.payload.clone()
+        }
+    }
+
+    struct EchoExecutor;
+    struct NoStdinExecutor;
+
+    impl Executor for EchoExecutor {
+        fn cli_name(&self) -> &str {
+            "echo-stdin"
+        }
+        fn install_hint(&self) -> &str {
+            ""
+        }
+        fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
+            Box::new(EchoTurn { payload: Some("frame:hello".to_string()) })
+        }
+    }
+
+    impl Executor for NoStdinExecutor {
+        fn cli_name(&self) -> &str {
+            "no-stdin"
+        }
+        fn install_hint(&self) -> &str {
+            ""
+        }
+        fn make_turn(&self, _ctx: &TurnCtx) -> Box<dyn TurnHandlers> {
+            Box::new(EchoTurn { payload: None })
+        }
+    }
+
+    async fn run_fake(name: &str) -> crate::RunResult {
+        let mut profile = Profile::default();
+        profile.executor = Some(name.to_string());
+        profile.streaming = false;
+        run(&profile, RunOptions::new("hello")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn build_initial_stdin_payload_reaches_the_cli() {
+        register_executor("conformance-echo-stdin", || Box::new(EchoExecutor));
+        let result = run_fake("conformance-echo-stdin").await;
+        assert_eq!(result.error, "", "run failed: {}", result.error);
+        assert_eq!(result.reply, "frame:hello");
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn no_payload_leaves_the_cli_on_the_null_device() {
+        register_executor("conformance-no-stdin", || Box::new(NoStdinExecutor));
+        let result = run_fake("conformance-no-stdin").await;
+        assert_eq!(result.error, "", "run failed: {}", result.error);
+        assert_eq!(result.reply, "NO_STDIN");
     }
 }

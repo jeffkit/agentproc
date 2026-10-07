@@ -3,7 +3,7 @@
 AgentProc bridge for the DeepSeek Harness CLI `dsh` (wire 0.4).
 
 JSON mode (dsh >= 0.1.6-alpha.1, feature-detected via `--profile headless
---help` advertising --json) runs `dsh --profile headless --json "<task>"` and
+--help` advertising --json) runs `dsh --profile headless --json -- "<task>"` and
 translates the newline-delimited run-event stream:
 
     {"type":"session","sessionId":...}      opening frame — session id source
@@ -24,7 +24,7 @@ stamped from the opening frame and later turns resume the persisted Session.
 Adoption is strict upstream (same cwd, no subagent/fork, no agent preset);
 mismatches surface as error events.
 
-Plain fallback (older dsh): `dsh --profile headless "<task>"` prints the final
+Plain fallback (older dsh): `dsh --profile headless -- "<task>"` prints the final
 assistant message to stdout; errors go to stderr with a non-zero exit code.
 Stateless on the wire.
 

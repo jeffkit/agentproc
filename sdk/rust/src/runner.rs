@@ -735,10 +735,17 @@ async fn run_via_executor(
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    // permission mode needs a writable stdin (initial user message + permission
-    // responses); unattended mode closes stdin after argv delivery.
+    // Optional stdin channel (spec "Message delivery and argv"): an executor
+    // whose CLI reads its prompt from stdin returns the payload here, keeping
+    // the user message out of argv. None ⇒ the CLI gets the null device.
+    let initial_stdin = handlers
+        .build_initial_stdin(&opts.message, &session_id, &opts.attachments)
+        .await;
+    // Permission mode needs a writable stdin kept open afterwards (initial
+    // user message + permission responses); a one-shot payload needs one too,
+    // closed right after the write. Otherwise the CLI reads the null device.
     let permission_mode = profile.permission && !exec.plain();
-    cmd.stdin(if permission_mode {
+    cmd.stdin(if permission_mode || initial_stdin.is_some() {
         Stdio::piped()
     } else {
         Stdio::null()
@@ -756,21 +763,23 @@ async fn run_via_executor(
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
 
-    // In permission mode, write the initial user message (e.g. Claude
-    // SDKUserMessage) to stdin before the stdout loop starts.
-    let mut child_stdin = if permission_mode {
-        let stdin = child.stdin.take().expect("stdin piped");
-        if let Some(initial) = handlers
-            .build_initial_stdin(&opts.message, &session_id, &opts.attachments)
-            .await
-        {
-            let mut stdin = stdin;
+    // Write the initial user message (e.g. Claude SDKUserMessage) to stdin
+    // before the stdout loop starts. In permission mode the pipe stays open
+    // for the permission channel; a one-shot payload closes it (EOF) so the
+    // CLI starts working without waiting for more input.
+    let mut child_stdin = if permission_mode || initial_stdin.is_some() {
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        if let Some(initial) = initial_stdin {
             use tokio::io::AsyncWriteExt;
             let _ = stdin.write_all(initial.as_bytes()).await;
             let _ = stdin.write_all(b"\n").await;
+            let _ = stdin.flush().await;
+        }
+        if permission_mode {
             Some(stdin)
         } else {
-            Some(stdin)
+            drop(stdin);
+            None
         }
     } else {
         None

@@ -81,14 +81,39 @@ describe('EXECUTORS registry', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildArgs — claude-code', () => {
-  const { buildArgs } = EXECUTORS['claude-code'];
+  const { buildArgs, buildInitialStdin } = EXECUTORS['claude-code'];
 
   test('new session — no --resume', () => {
     const args = buildArgs('hello', '', {});
     assert.ok(args.includes('claude'));
-    assert.ok(args.includes('-p'));
-    assert.ok(args.includes('hello'));
+    assert.ok(args.includes('--print'));
+    assert.ok(args.includes('--input-format'));
     assert.ok(!args.includes('--resume'), 'should not include --resume for empty sessionId');
+  });
+
+  test('the message never reaches argv', () => {
+    // It travels on stdin (buildInitialStdin), so ps(1) cannot read the turn
+    // and the OS argv-length limit does not apply.
+    const args = buildArgs('secret-message', '', {});
+    assert.ok(!args.includes('secret-message'), `argv: ${args}`);
+    assert.ok(!args.join(' ').includes('secret-message'), `argv: ${args}`);
+  });
+
+  test('buildInitialStdin is the stream-json user turn', () => {
+    assert.deepStrictEqual(JSON.parse(buildInitialStdin('hello', 'sess-1')), {
+      type: 'user',
+      message: { role: 'user', content: 'hello' },
+      parent_tool_use_id: null,
+      session_id: 'sess-1',
+    });
+  });
+
+  test('the stdin frame is the compact stream-json turn', () => {
+    assert.strictEqual(
+      buildInitialStdin('hi', 's'),
+      '{"type":"user","message":{"role":"user","content":"hi"},'
+        + '"parent_tool_use_id":null,"session_id":"s"}',
+    );
   });
 
   test('resume session — includes --resume <id>', () => {
@@ -666,5 +691,79 @@ echo '{"type":"result","result":"ok","session_id":"sess-1"}'
     assert.ok(!argv.includes('--dangerously-skip-permissions'), `argv: ${argv}`);
     assert.strictEqual(result.error, '');
     assert.strictEqual(result.exitCode, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Message delivery: claude-code reads the turn from stdin, never argv
+// ---------------------------------------------------------------------------
+
+describe('message via stdin — executor path', () => {
+  const STDIN_SHIM = `#!/usr/bin/env bash
+printf '%s\\n' "$@" > {argvFile}
+cat > {stdinFile}
+echo '{"type":"result","result":"ok","session_id":"sess-1"}'
+`;
+
+  /** Run with a fake CLI that records argv and captures its stdin. */
+  async function runWithStdinShim(executorName, message, { permission } = {}) {
+    const cliName = EXECUTORS[executorName].cliName;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-stdin-'));
+    const argvFile = path.join(dir, 'argv.txt');
+    const stdinFile = path.join(dir, 'stdin.txt');
+    fs.writeFileSync(
+      path.join(dir, cliName),
+      STDIN_SHIM.replace('{argvFile}', argvFile).replace('{stdinFile}', stdinFile),
+      { mode: 0o755 },
+    );
+
+    const savedPath = process.env.PATH;
+    process.env.PATH = `${dir}${path.delimiter}${savedPath}`;
+    const profile = { executor: executorName };
+    if (permission !== undefined) profile.permission = permission;
+    let result;
+    try {
+      result = await run(profile, { message });
+    } finally {
+      process.env.PATH = savedPath;
+    }
+    return {
+      result,
+      argv: fs.existsSync(argvFile) ? fs.readFileSync(argvFile, 'utf8').split('\n').filter(Boolean) : null,
+      stdin: fs.existsSync(stdinFile) ? fs.readFileSync(stdinFile, 'utf8') : null,
+    };
+  }
+
+  test('the message arrives on stdin and not in argv', async () => {
+    const { result, argv, stdin } = await runWithStdinShim('claude-code', 'hello from the user');
+    assert.ok(argv, `claude was never spawned: ${result.error}`);
+    assert.ok(!argv.includes('hello from the user'), `argv: ${argv}`);
+    assert.strictEqual(result.reply, 'ok');
+    assert.strictEqual(result.exitCode, 0);
+    const frame = JSON.parse(stdin);
+    assert.strictEqual(frame.type, 'user');
+    assert.deepStrictEqual(frame.message, { role: 'user', content: 'hello from the user' });
+  });
+
+  test('permission mode also delivers the message on stdin', async () => {
+    const { result, argv, stdin } = await runWithStdinShim('claude-code', 'approve me', { permission: true });
+    assert.ok(argv, `claude was never spawned: ${result.error}`);
+    assert.ok(argv.includes('--permission-prompt-tool'), `argv: ${argv}`);
+    assert.ok(!argv.includes('approve me'), `argv: ${argv}`);
+    assert.strictEqual(JSON.parse(stdin).message.content, 'approve me');
+  });
+
+  test('a 200 KiB message is not capped by the argv limit', async () => {
+    const message = 'x'.repeat(200 * 1024);
+    const { result, argv, stdin } = await runWithStdinShim('claude-code', message);
+    assert.ok(argv, `claude was never spawned: ${result.error}`);
+    assert.strictEqual(result.reply, 'ok');
+    assert.ok(stdin.includes(message));
+  });
+
+  test('an executor without the hook sees the null device, not the message', async () => {
+    const { result, stdin } = await runWithStdinShim('opencode', 'hello');
+    assert.strictEqual(result.error, '', 'opencode shim did not run');
+    assert.strictEqual(stdin, '');
   });
 });

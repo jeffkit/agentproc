@@ -3,7 +3,7 @@
 /**
  * AgentProc bridge for the DeepSeek Harness CLI `dsh` (wire 0.4).
  *
- *   dsh --profile headless --json "<task>"
+ *   dsh --profile headless --json -- "<task>"
  *
  * dsh headless is a one-shot, full agent runtime: it boots the headless
  * bundle (coding persona + bash/fs/search tools + sandbox), runs the task to

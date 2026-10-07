@@ -145,10 +145,6 @@ stdout 每一行都是一个以 `\n` 结尾的 JSON 对象，带 `type` 字段�
 
 通过 profile `permission: true` 开启。不是通用 HIL——仅工具授权。在 in-process executor 路径上，只有声明了审批通道的 executor（今仅 `claude-code`）才接受 `permission: true`；其余 executor 一律拒绝运行——`error` 事件 + 非零退出码，永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。未请求权限的 profile 仍带这些自动批准 flag；`AGENTPROC_AUTO_APPROVE=0` / `false` 会让它们也变成同样的拒绝。
 
-### In-process executor 的 argv
-
-在 spawn 路径上消息只走 stdin，永不进 argv。in-process executor 驱动的是第三方 CLI，而这类 CLI 大多只接受把 prompt 作为命令行参数——因此 executor 路径是一处**明文豁免**：`buildArgs` 可以把消息放进目标 CLI 的 argv。该 argv 可被同用户的任意进程经 `ps(1)` 读取，受 OS 参数长度上限约束（Linux ≈128 KiB，Windows ~32 K 字符），且当消息以 `-` 开头时可能被误当作 flag。当消息是位置参数时，executor **必须**在它前面紧邻放置 `--`，并把所有 flag 放在 `--` 之前；目标 CLI 能从 stdin 读 prompt 的 executor 应让消息留在 argv 之外。executor 路径的 bridge 请跑在独占宿主、容器或 VM 上。细节见完整规范。
-
 ```
 {"type":"permission_request","request_id":"1","tool_name":"Bash","input":{"command":"echo ok > f.txt"}}
 ```
@@ -160,6 +156,12 @@ stdout 每一行都是一个以 `\n` 结尾的 JSON 对象，带 `type` 字段�
 ```
 
 stdin 保持打开规则、超时与字段定义见完整规范。
+
+### In-process executor 的 argv
+
+在 spawn 路径上消息只走 stdin，永不进 argv。in-process executor 驱动的是第三方 CLI，因此只有当该 CLI 能从 stdin 读 prompt 时才能遵守此规则：这时 executor **必须**让消息留在 argv 之外，并通过可选的 `buildInitialStdin(message, sessionId)` 钩子返回 CLI 的 stdin 载荷，由 runner 写入 CLI 的 stdin。`claude-code` 的两种模式都这样做（`claude --print --input-format stream-json`，一行 stream-json 用户消息走 stdin）。
+
+只接受把 prompt 作为命令行参数传入的 CLI 属于**明文豁免**：`buildArgs` 可以把消息放进目标 CLI 的 argv。该 argv 可被同用户的任意进程经 `ps(1)` 读取，受 OS 参数长度上限约束（Linux ≈128 KiB，Windows ~32 K 字符），且当消息以 `-` 开头时可能被误当作 flag。当消息是位置参数时，executor **必须**在它前面紧邻放置 `--`，并把所有 flag 放在 `--` 之前。这类 executor 请跑在独占宿主、容器或 VM 上。细节见完整规范。
 
 ---
 

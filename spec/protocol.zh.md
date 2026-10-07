@@ -222,20 +222,25 @@ executor 是 **SDK 特定**的。识别的名称集合以及注册新 executor �
 | `buildArgs` | `(message, sessionId, env, ctx) -> string[]` | 构建目标 CLI 的 argv。`message` 是本轮用户消息；`sessionId` 是上一轮的会话 id（空串 = 新会话）；`env` 是组合后的子进程环境（infra 集 + profile `env` 经 `${VAR}` 展开和 `env_allowlist` 过滤后的结果）；`ctx` 为 `{ "permission": bool }`，即本 turn 的 profile `permission` 值。返回的 argv **不**经 shell 直接传给 `execve`。返回空数组是硬错误。 |
 | `supportsPermission` | boolean | `true` = 该 executor 具有 turn 中审批通道，能够兑现 `permission: true`。缺省 `false`。由 runner 在 spawn **之前**读取（见 [Runner 契约](#runner-契约)），`buildArgs` 本身不读它。 |
 | `parseEvent` | `(event) -> ParseResult \| null` | 将 CLI stdout 的一行解码后的 JSON 对象翻译为 `ParseResult`。对不识别的事件返回 `null`（runner 记日志并忽略该行）。`plain: true` 时省略 / 不使用。 |
-| `makeHandlers` | `() -> { buildArgs, parseEvent, getSessionId? }` | 可选工厂，用于**有状态** executor——需要在 `buildArgs` 和 `parseEvent` 之间共享 per-turn 状态（例如 `buildArgs` 生成的会话 id 在 `parseEvent` 中返回）。存在时，runner **每 turn 调用一次** `makeHandlers()`，仅在该 turn 使用返回的 handlers。缺省时，runner 直接使用 `buildArgs` / `parseEvent`，且它们**必须**无状态、可重入。 |
+| `makeHandlers` | `() -> { buildArgs, parseEvent, getSessionId?, buildInitialStdin? }` | 可选工厂，用于**有状态** executor——需要在 `buildArgs` 和 `parseEvent` 之间共享 per-turn 状态（例如 `buildArgs` 生成的会话 id 在 `parseEvent` 中返回）。存在时，runner **每 turn 调用一次** `makeHandlers()`，仅在该 turn 使用返回的 handlers——`buildInitialStdin` 同样如此：使用工厂时取工厂返回的，否则取 executor 自身的。缺省时，runner 直接使用 `buildArgs` / `parseEvent` / `buildInitialStdin`，且它们**必须**无状态、可重入。 |
 | `getSessionId` | `() -> string` | 可选。本轮 `buildArgs` 铸造或复用的会话 id（例如 `agy --conversation <id>`）。runner 在 `plain: true` 路径上于 CLI 进程退出后每轮读取一次；当该值满足线协议 `session_id` 规则、且此前未学到其它 id 时，作为 `RunResult.sessionId` 返回（首个非空值规则不变）。缺省 → 由 host 持久化自己发出的 id（见[事件上的 `session_id`](#事件上的-session_id)）。 |
+| `buildInitialStdin` | `(message, sessionId) -> string \| null` | 可选。runner 在 **spawn 前的每轮调用一次**。返回非 `null` 时，runner 为 CLI 的 stdin 建管道、写入该字符串 + 一个 `\n` 后关闭管道——这是接口把用户消息排除在 argv 之外的方式（见[消息传递与 argv](#消息传递与-argv)）。返回 `null` / 缺省时，CLI 的 stdin 接到空设备；executor 路径不向 stdin 写任何其它内容。`permission: true` 模式下，runner 若在该路径上服务审批通道，则在该写入之后保持管道打开以承载 `permission_response` 流量；executor 路径没有审批通道的 runner 会在写入后关闭管道，CLI 的审批请求得不到应答（见[消息传递与 argv](#消息传递与-argv)）。 |
 
-`buildArgs` 和 `parseEvent`（或 `makeHandlers` 返回的 handlers）构成一个 turn 内闭合的契约：runner 在 spawn 前调用一次 `buildArgs`，随后对每行 stdout 调用 `parseEvent` 直到 EOF。executor **不得**假设 CLI 自身保证之外的事件顺序。
+`buildArgs`、`parseEvent`（或 `makeHandlers` 返回的 handlers）与 `buildInitialStdin` 构成一个 turn 内闭合的契约：runner 在 spawn 前调用一次 `buildArgs` 和 `buildInitialStdin`，随后对每行 stdout 调用 `parseEvent` 直到 EOF。executor **不得**假设 CLI 自身保证之外的事件顺序。
 
 #### 消息传递与 argv
 
-在 spawn 路径上，消息只走 stdin，永不替换进 argv（见[设计原则](#设计原则)）。in-process executor 一般无法遵守该规则：它驱动的是一个*第三方 CLI*，而这类 CLI 大多只接受把 prompt 作为命令行参数传入。因此 executor 的 `buildArgs` **可以**把消息（或由它拼出的 task 字符串）放进目标 CLI 的 argv。这是一处刻意且范围有限的豁免——只涉及 executor 自己构建的那份 argv；采用 executor 路径的部署需接受三个后果。
+在 spawn 路径上，消息只走 stdin，永不替换进 argv（见[设计原则](#设计原则)）。in-process executor 路径有两种遵守该规则的方式，按优先级排列。
 
-- **`ps(1)` 暴露。** 同用户的任何本地进程都能读到 `argv`。在共享或多租户宿主上，任何本地账户都能读到当前用户的消息原文——其中常含源码、内部 URL 或粘贴的密钥。使用 executor 路径的 bridge **应当**跑在**独占宿主、容器或 VM** 上，不要与不受信任的本地用户共处。这与仓库 `SECURITY.md` 已声明的协议共处假设一致。
-- **操作系统参数长度上限。** 单个 argv token 有 OS 上限（Linux ≈128 KiB，Windows ~32 K 字符）。超过上限的消息会导致 spawn 失败；接受长文本的宿主**应当**在 CLI 允许时优先走 stdin。
+**1. 消息走 stdin** —— 当目标 CLI 能从 stdin 读取 prompt 时，executor **必须**把消息排除在 argv 之外，并通过 `buildInitialStdin` 返回该 CLI 的 stdin 载荷。runner 把它写入 CLI 的 stdin 并关闭管道；`argv`（以及 `ps(1)`）永远看不到消息。`claude-code` 是仓库内的示例：它的两种模式都运行 `claude --print --input-format stream-json --output-format stream-json`，用户 turn 以一行 stream-json `{"type":"user",…}` 从 stdin 传入（`permission: true` 模式下管道随后保持打开以承载审批通道）。
+
+**2. 否则消息进 argv** —— in-process executor 驱动的是一个*第三方 CLI*，而这类 CLI 很多只接受把 prompt 作为命令行参数传入。对没有 stdin 通道的 executor，`buildArgs` **可以**把消息（或由它拼出的 task 字符串）放进目标 CLI 的 argv。这是一处刻意且范围有限的豁免——只涉及 executor 自己构建的那份 argv；使用这些 executor 的部署需接受三个后果。
+
+- **`ps(1)` 暴露。** 同用户的任何本地进程都能读到 `argv`。在共享或多租户宿主上，任何本地账户都能读到当前用户的消息原文——其中常含源码、内部 URL 或粘贴的密钥。使用这类 executor 的 bridge **应当**跑在**独占宿主、容器或 VM** 上，不要与不受信任的本地用户共处。这与仓库 `SECURITY.md` 已声明的协议共处假设一致。
+- **操作系统参数长度上限。** 单个 argv token 有 OS 上限（Linux ≈128 KiB，Windows ~32 K 字符）。超过上限的消息会导致 spawn 失败；接受长文本的宿主**应当**在 CLI 允许时优先走 stdin 通道。
 - **参数注入。** 以 `-` 开头的消息可能被当作 flag 解析。当消息作为**位置参数**传入时，executor **必须**在它前面紧邻放置约定的选项终止符 `--`，并且**必须**把所有 flag 放在 `--` **之前**，使消息永远无法改变 CLI 实际使用的选项。
 
-目标 CLI 能从 stdin 读取 prompt 的 executor **应当**把消息排除在 argv 之外、改从 stdin 传递。`claude-code` 的 permission 模式 argv 是仓库内的示例：`--input-format stream-json` 配 `--permission-prompt-tool stdio` 从 stdin 取用户消息，而非 argv。
+**审批通道。** 正是那条保持打开的管道让 `permission: true` 在这条路径上可用：runner 从 stdout 读取 CLI 的审批请求、询问 host，并把匹配的 `permission_response` 写回。因此 executor 的 `supportsPermission` 只有在 runner 于该路径上服务该通道时才有意义——Rust SDK 的 executor 路径会服务；Python 与 Node SDK 的 executor 路径不会，所以这两者上的 `permission: true` `claude-code` 轮次会带 `--permission-prompt-tool stdio` 起进程，随后一直阻塞到该轮超时。两种情形都无 wire 变更。
 
 #### `ParseResult`
 
@@ -749,7 +754,7 @@ bridge 存储并转发会话 ID，但从不解释它。agent 进程拥有其会�
 0.3 按用途分离三条输入路径：
 
 - **stdin** —— 动态的每轮请求（turn 对象）。携带任意结构：`attachments` 数组、嵌套字段、JSON 能表达的任何东西。
-- **argv** —— 通过 `{{SESSION_ID}}` / `{{PROFILE_DIR}}` 注入启动参数。消息有意排除在 argv 之外：argv 在 `ps(1)` 中可见，有操作系统级别的长度限制，且把用户输入置于非 stdin 的位置——使信任边界难以推理。（in-process executor 路径是明文豁免——见[消息传递与 argv](#消息传递与-argv)。）
+- **argv** —— 通过 `{{SESSION_ID}}` / `{{PROFILE_DIR}}` 注入启动参数。消息有意排除在 argv 之外：argv 在 `ps(1)` 中可见，有操作系统级别的长度限制，且把用户输入置于非 stdin 的位置——使信任边界难以推理。（在 in-process executor 路径上，只要被包装的 CLI 能从 stdin 读 prompt 就同样成立；只接受命令行参数传入的 CLI 是明文豁免——见[消息传递与 argv](#消息传递与-argv)。）
 - **env** —— 密钥与配置（profile `env` 块），刻意留在 env 中，使其不作为 turn 载荷被记录。
 
 可调试性几乎不变：`AGENT_MESSAGE="hello" ./agent.sh` 变成 `echo '{"type":"turn","message":"hello","session_id":"","protocol_version":"0.4"}' | ./agent`——仍是一行，只是不再是 env 赋值。
@@ -862,7 +867,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
-- **doc 1.10** —— In-process executor 下新增[消息传递与 argv](#消息传递与-argv)小节：executor 路径是「消息永不入 argv」规则的明文、有限豁免——因为大多数被包装的 CLI 只接受把 prompt 作为命令行参数。该节记录三个后果（消息可经 `ps(1)` 读到；OS argv 长度上限；以 `-` 开头的消息被当作 flag 解析）与部署前提（独占宿主 / 容器 / VM）。新增规范性规则：当消息是位置参数时，`--` **必须**紧邻其前，且所有 flag **必须**置于 `--` 之前。目标 CLI 能从 stdin 读 prompt 的 executor **应当**让消息留在 argv 之外。设计原则中的 argv 条目现指向该豁免。无 wire 变更。
+- **doc 1.10** —— In-process executor 下新增[消息传递与 argv](#消息传递与-argv)小节，分两部分。(a) 当被包装的 CLI 能从 stdin 读 prompt 时，消息 **MUST** 留在 argv 之外；[Executor 接口](#executor-接口)新增可选的 `buildInitialStdin(message, sessionId) -> string | null`，runner 在 spawn 前每轮调用一次，返回非 `null` 时写入 CLI 的 stdin 并关闭管道。它属于 turn 内闭合契约，也属于 `makeHandlers()` 工厂返回值；同一小节记录：`permission: true` 模式下管道保持打开，只在该 runner 于这条路径上服务审批通道时成立（今为 Rust——Python 与 Node 的 executor 路径没有审批通道，那里 `permission: true` 的轮次会阻塞到超时）。`claude-code` 的**两种**模式都改为这样做（`claude --print --input-format stream-json`，一行 stream-json 用户消息走 stdin），不再把 `<message>` 放进 argv。(b) 对只接受把 prompt 作为命令行参数传入的 CLI，executor 路径仍是明文、有限豁免；该节记录三个后果（消息可经 `ps(1)` 读到；OS argv 长度上限；以 `-` 开头的消息被当作 flag 解析）与部署前提（独占宿主 / 容器 / VM）。规范性规则：当消息是位置参数时，`--` **必须**紧邻其前，且所有 flag **必须**置于 `--` 之前。设计原则中的 argv 条目现指向该豁免。无 wire 变更。
 - **doc 1.9** —— 对实现本已携带的字段做一次卫生整理：把 `from_user`（平台发送者标识）记为 turn 的**可选**字段——它属于应用层关注点，bridge **MAY** 发送，缺省或 `""` 表示未知；[Executor 接口](#executor-接口)表新增 `getSessionId`（`plain` executor 的会话 id，在 `buildArgs` 中铸造、进程退出后由 runner 读取），同时消除 [`plain` executor](#plain-executor) 小节里与之矛盾的表述——纯文本 CLI executor 的会话连续性在**接口内**完成，而非另建 run 循环。版本治理新增 SHOULD：读取到 `protocol_version` 与自身版本不同的 turn 时，实现向 stderr 写一条同时含两个版本字符串的诊断并 best-effort 继续（永不作为兼容闸门，永不改变行为）。SDK 侧：三个 SDK 的 `on_partial` / `onPartial` 回调第二参统一为 partial 的 `role`（缺省 = 无 role）。无线协议变更——stdin/stdout 上的字节不变。
 - **doc 1.8** —— 回复拼装对两条路径明文化：`streaming: true` 且已转发至少一个 `partial` 时，终态 `result` 携带空正文（正文已送达——不得重复）；否则回复为首个 `result` 事件的 `finalText`（显式空串同样生效；后续 `result` 事件被忽略）。executor 路径的 `usage` 对象**必须**写入 `RunResult.usage`（首个非空值生效）；`error` 事件使该轮失败（即使 CLI 退出码为 0）；无 error 且无正文的轮次为成功。共享 conformance 套件新增驱动 executor 路径（`spec/conformance/executors.json`）。无线协议变更。
 - **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。自行注入自动批准默认值的 hub 桥（今仅 `hub/dsh`）在该旋钮关闭时 MUST NOT 注入。无 wire 变更；spawn 路径语义不变。

@@ -695,14 +695,43 @@ async function runViaExecutor(profile, options, executor) {
     return result;
   }
 
+  // Optional stdin channel: an executor whose CLI reads its prompt from stdin
+  // returns the payload here, keeping the user message out of argv (see spec
+  // "Message delivery and argv"). null / absent ⇒ the CLI's stdin is the null
+  // device — the executor path writes nothing else.
+  let initialStdin = null;
+  if (typeof handlers.buildInitialStdin === 'function') {
+    initialStdin = handlers.buildInitialStdin(options.message, sessionId);
+    if (initialStdin != null && typeof initialStdin !== 'string') {
+      result.error = `${executor.cliName} buildInitialStdin returned a non-string`;
+      result.exitCode = EXIT_ERROR;
+      if (options.onError) options.onError(result.error);
+      return result;
+    }
+  }
+
   let child;
   try {
-    child = spawn(args[0], args.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(args[0], args.slice(1), {
+      cwd,
+      env,
+      stdio: [initialStdin != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    });
   } catch (err) {
     result.error = `${executor.cliName} CLI not found. ${executor.installHint}`;
     result.exitCode = EXIT_ERROR;
     if (options.onError) options.onError(result.error);
     return result;
+  }
+
+  if (initialStdin != null && child.stdin) {
+    // The CLI may exit before reading (one-shot CLIs that ignore stdin); an
+    // EPIPE would otherwise be an unhandled 'error' event on the stream.
+    child.stdin.on('error', () => {});
+    try {
+      child.stdin.write(initialStdin + '\n');
+      child.stdin.end();
+    } catch { /* child already gone */ }
   }
 
   child.on('error', (err) => {

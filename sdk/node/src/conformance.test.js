@@ -175,7 +175,26 @@ function parseEvent(event) {
   return null;
 }
 
-function fakeExecutor(lines) {
+// Fake CLI for `initial_stdin` scenarios: echo the one line read on stdin back
+// as a result event; a null stdin (or a short read) prints NO_STDIN.
+const STDIN_ECHO =
+  '#!/usr/bin/env bash\n'
+  + 'read -r line || line=NO_STDIN\n'
+  + 'printf \'{"type":"result","text":"%s"}\' "$line"\n';
+
+function fakeExecutor(scenario) {
+  const { lines } = scenario;
+  if ('initial_stdin' in scenario) {
+    const cli = tmpScript(STDIN_ECHO);
+    return {
+      cliName: 'mock-stdin',
+      installHint: '',
+      plain: false,
+      buildArgs: () => [cli],
+      buildInitialStdin: () => scenario.initial_stdin,
+      parseEvent,
+    };
+  }
   const body = lines.map((l) => `echo ${JSON.stringify(JSON.stringify(l))}`).join('\n');
   const cli = tmpScript(`#!/usr/bin/env bash\n${body}\n`);
   return {
@@ -244,7 +263,7 @@ for (const sc of scenarios) {
     const r = await runViaExecutor(
       normalizeProfile({ command: 'dummy', executor: 'test' }),
       { message: 'hi', streaming: sc.streaming, onPartial: (p) => partials.push(p) },
-      fakeExecutor(sc.lines),
+      fakeExecutor(sc),
     );
     assert.deepStrictEqual(r.reply, exp.reply, 'reply');
     assert.deepStrictEqual(r.sessionId, exp.session_id, 'sessionId');

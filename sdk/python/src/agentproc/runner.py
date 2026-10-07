@@ -738,11 +738,16 @@ def _iter_pipe_lines(stream: Any, writer_gone: Callable[[], bool]) -> Iterator[s
     writing in the interval between the two is indistinguishable from the
     child, so its bytes are read as part of this turn (they can flip ``reply``
     to empty through ``partials_forwarded``, or have a ``session_id``
-    adopted). What is guaranteed is the other direction — once the boundary is
-    observed the drain is over, so no callback fires after ``run()`` returns.
+    adopted). That window is not one probe interval wide: the probe is only
+    consulted while the pipe is idle, so a straggler that keeps writing keeps
+    this loop reading until the caller's join backstop gives up on the drain
+    thread (1 s per pipe). What is guaranteed is the other direction — once
+    the boundary is observed the drain is over, so no callback fires after
+    ``run()`` returns.
 
     ``writer_gone`` therefore MUST only become true once ``proc.wait()`` has
-    returned. Lines are decoded exactly like ``text=True, errors="replace"``
+    returned — or, on the kill/cancel paths, given up after its last timed
+    wait expired. Lines are decoded exactly like ``text=True, errors="replace"``
     iteration: universal newlines, replacement characters for malformed UTF-8,
     a final unterminated fragment yielded as-is (never at the boundary above —
     an unterminated fragment there belongs to whatever wrote after the child).
@@ -927,6 +932,29 @@ def run_via_executor(
             options.on_error(result.error)
         return result
 
+    # Optional stdin channel: an executor whose CLI reads its prompt from stdin
+    # returns the payload here, keeping the user message out of argv (see spec
+    # "Message delivery and argv"). None / absent ⇒ the CLI's stdin is the
+    # null device — the executor path writes nothing else.
+    build_stdin_fn = (
+        handlers.get("build_initial_stdin") if isinstance(handlers, dict)
+        else getattr(handlers, "build_initial_stdin", None)
+    )
+    initial_stdin: Optional[str] = None
+    if callable(build_stdin_fn):
+        try:
+            initial_stdin = build_stdin_fn(options.message or "", options.session_id or "")
+        except Exception as exc:
+            result.error = f"executor '{cli_name}' build_initial_stdin raised: {exc}"
+            if options.on_error:
+                options.on_error(result.error)
+            return result
+        if initial_stdin is not None and not isinstance(initial_stdin, str):
+            result.error = f"executor '{cli_name}' build_initial_stdin returned a non-string"
+            if options.on_error:
+                options.on_error(result.error)
+            return result
+
     refusal = _posture_refusal(
         cli_name,
         bool(executor.get("supports_permission")),
@@ -955,7 +983,7 @@ def run_via_executor(
     try:
         proc = subprocess.Popen(
             argv,
-            stdin=subprocess.PIPE,
+            stdin=subprocess.PIPE if initial_stdin is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1017,13 +1045,14 @@ def run_via_executor(
     stdout_thread = threading.Thread(target=_pump_stdout, daemon=True)
     stdout_thread.start()
 
-    try:
-        assert proc.stdin is not None
-        proc.stdin.write((options.message or "") + "\n")
-        proc.stdin.flush()
-        proc.stdin.close()
-    except (BrokenPipeError, ValueError, OSError):
-        pass
+    if initial_stdin is not None:
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(initial_stdin + "\n")
+            proc.stdin.flush()
+            proc.stdin.close()
+        except (BrokenPipeError, ValueError, OSError):
+            pass
 
     # NDJSON state
     parse_event_fn = None

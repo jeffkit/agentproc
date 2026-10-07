@@ -6,7 +6,7 @@ wire 0.4).
 recursive emits its lifecycle as NDJSON `AgentEvent` objects when run with
 `--json`. This bridge wraps:
 
-    recursive --json --stream ... run <message>                    # turn 1
+    recursive --json --stream ... run -- <message>                 # turn 1
     recursive --json --stream ... resume --from-file <session-dir> \\
         -p <message>                                               # turn N+
 

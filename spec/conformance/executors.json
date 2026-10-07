@@ -1,5 +1,5 @@
 {
-  "_comment": "Executor (in-process) path scenarios (issue #12). Each scenario feeds the listed NDJSON event objects to a fake CLI via a fake executor (build_args returns an argv that prints the lines; parse_event maps per the embedded rules table) and asserts the full RunResult: {reply, session_id, error, exit_code, usage, partials}. Shared parse rules (identical in all three SDKs' tests): {type:'partial',text} -> partial_text; {type:'result',text?,session_id?,usage?} -> final_text/session_id/usage (text may be ''); {type:'error',message,session_id?,usage?} -> error/session_id/usage; any other type -> ignored. Python, Node, and Rust MUST match.",
+  "_comment": "Executor (in-process) path scenarios (issue #12). Each scenario feeds the listed NDJSON event objects to a fake CLI via a fake executor (build_args returns an argv that prints the lines; parse_event maps per the embedded rules table) and asserts the full RunResult: {reply, session_id, error, exit_code, usage, partials}. Shared parse rules (identical in all three SDKs' tests): {type:'partial',text} -> partial_text; {type:'result',text?,session_id?,usage?} -> final_text/session_id/usage (text may be ''); {type:'error',message,session_id?,usage?} -> error/session_id/usage; any other type -> ignored. A scenario may instead carry 'initial_stdin' (string, or null): the fake executor then implements the optional buildInitialStdin/build_initial_stdin hook with that value and the fake CLI echoes the one line it reads on stdin back as a result event, so the runner's stdin channel is asserted through 'reply' (a null payload prints NO_STDIN). Python, Node, and Rust MUST match.",
   "scenarios": [
     {
       "name": "usage passthrough: result event usage lands on RunResult verbatim",
@@ -116,6 +116,20 @@
         {"type": "result", "text": "b", "usage": {"input_tokens": 2, "output_tokens": 2}}
       ],
       "expect": {"reply": "a", "session_id": "", "error": "", "exit_code": 0, "usage": {"input_tokens": 1, "output_tokens": 1}, "partials": []}
+    },
+    {
+      "name": "stdin channel: the buildInitialStdin payload reaches the CLI, not argv",
+      "streaming": true,
+      "initial_stdin": "frame-from-stdin",
+      "lines": [],
+      "expect": {"reply": "frame-from-stdin", "session_id": "", "error": "", "exit_code": 0, "usage": null, "partials": []}
+    },
+    {
+      "name": "stdin channel: an executor without the hook gets a null stdin",
+      "streaming": true,
+      "initial_stdin": null,
+      "lines": [],
+      "expect": {"reply": "NO_STDIN", "session_id": "", "error": "", "exit_code": 0, "usage": null, "partials": []}
     }
   ]
 }

@@ -85,11 +85,41 @@ class TestClaudeCodeBuildArgs(unittest.TestCase):
     def test_basic_args(self):
         args = self._build("hello")
         self.assertIn("claude", args)
-        self.assertIn("-p", args)
-        self.assertIn("hello", args)
+        self.assertIn("--print", args)
         self.assertIn("--output-format", args)
         self.assertIn("stream-json", args)
+        self.assertIn("--input-format", args)
         self.assertIn("--dangerously-skip-permissions", args)
+
+    def test_message_never_reaches_argv(self):
+        # The message travels on stdin (`build_initial_stdin`); argv carries
+        # none of it, so `ps(1)` cannot read the turn and the argv-length
+        # limit does not apply.
+        args = self._build("secret-message")
+        self.assertNotIn("secret-message", args)
+        self.assertNotIn("secret-message", " ".join(args))
+
+    def test_initial_stdin_is_a_stream_json_user_turn(self):
+        import json
+
+        frame = EXECUTORS["claude-code"]["build_initial_stdin"]("hello", "sess-1")
+        self.assertEqual(
+            json.loads(frame),
+            {
+                "type": "user",
+                "message": {"role": "user", "content": "hello"},
+                "parent_tool_use_id": None,
+                "session_id": "sess-1",
+            },
+        )
+
+    def test_initial_stdin_frame_is_the_compact_stream_json_turn(self):
+        frame = EXECUTORS["claude-code"]["build_initial_stdin"]("hi", "s")
+        self.assertEqual(
+            frame,
+            '{"type":"user","message":{"role":"user","content":"hi"},'
+            '"parent_tool_use_id":null,"session_id":"s"}',
+        )
 
     def test_resume_when_session_id_present(self):
         args = self._build("hi", "my-session")
@@ -606,6 +636,82 @@ class TestPermissionPosture(unittest.TestCase):
                 )
                 self.assertIsNone(argv, f"{value!r} did not fail closed: {argv}")
                 self.assertNotEqual(result.exit_code, 0)
+
+
+# ---------------------------------------------------------------------------
+# Message delivery: claude-code reads the turn from stdin, never argv
+# ---------------------------------------------------------------------------
+
+# Fake CLI: record argv, capture everything on stdin, report a clean turn.
+_STDIN_SHIM = """#!/usr/bin/env bash
+printf '%s\\n' "$@" > {argv_file}
+cat > {stdin_file}
+echo '{{"type":"result","result":"ok","session_id":"sess-1"}}'
+"""
+
+
+class TestClaudeStdinDelivery(unittest.TestCase):
+    """The turn must reach the CLI on stdin and must not appear in argv."""
+
+    def _run(self, message="hello", permission=False):
+        from agentproc.runner import run
+        with tempfile.TemporaryDirectory(prefix="ap-stdin-") as tmpdir:
+            argv_file = Path(tmpdir) / "argv.txt"
+            stdin_file = Path(tmpdir) / "stdin.txt"
+            shim = Path(tmpdir) / "claude"
+            shim.write_text(_STDIN_SHIM.format(argv_file=str(argv_file), stdin_file=str(stdin_file)))
+            shim.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": tmpdir + os.pathsep + os.environ["PATH"]}, clear=False):
+                result = run({"executor": "claude-code", "permission": permission},
+                             RunOptions(message=message))
+            argv = argv_file.read_text().splitlines() if argv_file.exists() else None
+            got_stdin = stdin_file.read_text() if stdin_file.exists() else None
+        return result, argv, got_stdin
+
+    def test_message_arrives_on_stdin_and_not_in_argv(self):
+        import json
+
+        result, argv, got_stdin = self._run("hello from the user")
+        self.assertIsNotNone(argv, f"claude was never spawned: {result.error}")
+        self.assertNotIn("hello from the user", argv)
+        self.assertEqual(result.reply, "ok")
+        self.assertEqual(result.exit_code, 0)
+        frame = json.loads(got_stdin)
+        self.assertEqual(frame["type"], "user")
+        self.assertEqual(frame["message"], {"role": "user", "content": "hello from the user"})
+
+    def test_permission_mode_also_delivers_the_message_on_stdin(self):
+        import json
+
+        result, argv, got_stdin = self._run("approve me", permission=True)
+        self.assertIsNotNone(argv, f"claude was never spawned: {result.error}")
+        self.assertIn("--permission-prompt-tool", argv)
+        self.assertNotIn("approve me", argv)
+        self.assertEqual(json.loads(got_stdin)["message"]["content"], "approve me")
+
+    def test_long_message_is_not_capped_by_the_argv_limit(self):
+        # 200 KiB single line: far past Linux's ~128 KiB MAX_ARG_STRLEN.
+        message = "x" * (200 * 1024)
+        result, argv, got_stdin = self._run(message)
+        self.assertIsNotNone(argv, f"claude was never spawned: {result.error}")
+        self.assertEqual(result.reply, "ok")
+        self.assertIn(message, got_stdin)
+
+    def test_executor_without_the_hook_sees_no_stdin(self):
+        # Executors that keep the message in argv are handed the null device,
+        # not the message — the CLI must not be fed the prompt twice.
+        from agentproc.runner import run
+        with tempfile.TemporaryDirectory(prefix="ap-stdin-") as tmpdir:
+            stdin_file = Path(tmpdir) / "stdin.txt"
+            shim = Path(tmpdir) / "opencode"
+            shim.write_text(_STDIN_SHIM.format(argv_file=str(Path(tmpdir) / "argv.txt"),
+                                               stdin_file=str(stdin_file)))
+            shim.chmod(0o755)
+            with patch.dict(os.environ, {"PATH": tmpdir + os.pathsep + os.environ["PATH"]}, clear=False):
+                result = run({"executor": "opencode"}, RunOptions(message="hello"))
+            got_stdin = stdin_file.read_text() if stdin_file.exists() else None
+        self.assertEqual(result.error, "", "opencode shim did not run")
+        self.assertEqual(got_stdin, "")
 
 
 if __name__ == "__main__":

@@ -60,7 +60,13 @@ Cross-implementation conformance fixtures for the AgentProc protocol (wire 0.4).
   streaming reply dedup, non-streaming final-only assembly,
   empty-reply-is-success, error mid-stream, usage arriving on a later event or
   on an `error` event, first-non-empty `usage`, missing / conflicting /
-  invalid `session_id`, and second-`result` suppression.
+  invalid `session_id`, and second-`result` suppression. A scenario may also
+  carry `initial_stdin` (a string, or `null` for "the hook returns no
+  payload"): the fake executor then implements the optional
+  `buildInitialStdin` / `build_initial_stdin` hook with that value and spawns a
+  CLI that echoes the one line it reads on stdin back as a `result` event, so
+  the runner's stdin channel (spec "Message delivery and argv") is asserted
+  through `reply` — a payload echoes back, `null` prints `NO_STDIN`.
 
 ## Wire 0.4 in one paragraph
 

@@ -7,7 +7,7 @@
  * Parity implementation of hub/recursive/bridge.py. See that file for the
  * full design rationale; this file mirrors it in behaviour.
  *
- *   recursive --json --stream ... run <message>                       // turn 1
+ *   recursive --json --stream ... run -- <message>                    // turn 1
  *   recursive --json --stream ... resume --from-file <session-dir> \
  *       -p <message>                                                   // turn N+
  *

@@ -123,14 +123,20 @@ pub trait TurnHandlers: Send {
         None
     }
 
-    // ----- permission channel (optional, only when profile.permission = true) -----
-
-    /// When `profile.permission` is true and the runner takes the in-process
-    /// path, this is written to the CLI's stdin once, before the stdout loop
-    /// starts. CLIs that drive tool-authorisation via a bidirectional stream
-    /// (e.g. Claude `--input-format stream-json`) need this to deliver the
-    /// user's message. Returns `None` for CLIs that take the message via argv
-    /// (the common case) — the runner then writes nothing.
+    /// Optional stdin channel. The runner calls this once per turn, before
+    /// spawn. `Some(payload)` makes the runner pipe the CLI's stdin, write the
+    /// payload followed by `\n`, and — outside permission mode — close it
+    /// (EOF). `None` leaves the CLI's stdin on the null device.
+    ///
+    /// This is how an executor keeps the user message out of argv (spec
+    /// "Message delivery and argv"): CLIs that read the prompt from stdin
+    /// (e.g. Claude `--input-format stream-json`) return their user-turn frame
+    /// here. Executors whose CLI only takes the prompt as an argument — the
+    /// common case — return `None` and are covered by the documented argv
+    /// exception.
+    ///
+    /// In permission mode the payload is the initial user turn, and the pipe
+    /// stays open afterwards for permission responses.
     ///
     /// `attachments` lets the executor format multimodal content blocks
     /// (image/document base64) when the CLI expects them in the initial
@@ -409,10 +415,12 @@ impl ClaudeCodeTurn {
 impl TurnHandlers for ClaudeCodeTurn {
     fn build_args(
         &self,
-        message: &str,
+        _message: &str,
         session_id: &str,
         env: &HashMap<String, String>,
     ) -> Vec<String> {
+        // The message never reaches argv in either mode — it is delivered on
+        // stdin via `build_initial_stdin`.
         if self.permission {
             // Bidirectional stream-json + permission tool. The user message is
             // delivered via stdin (build_initial_stdin), not argv.
@@ -444,12 +452,14 @@ impl TurnHandlers for ClaudeCodeTurn {
             }
             args
         } else {
-            // Unattended: message via argv, skip permissions.
+            // Unattended: same stream-json input channel as permission mode, so
+            // the message never lands in argv (see `build_initial_stdin`).
             let mut args: Vec<String> = vec![
                 ClaudeCodeExecutor.cli_name().to_string(),
-                "-p".into(),
-                message.to_string(),
+                "--print".into(),
                 "--output-format".into(),
+                "stream-json".into(),
+                "--input-format".into(),
                 "stream-json".into(),
                 "--dangerously-skip-permissions".into(),
                 "--verbose".into(),
@@ -519,7 +529,7 @@ impl TurnHandlers for ClaudeCodeTurn {
         }
     }
 
-    // ----- permission channel (permission mode only) -----
+    // ----- stdin channel (both modes) -----
 
     async fn build_initial_stdin(
         &mut self,
@@ -527,9 +537,8 @@ impl TurnHandlers for ClaudeCodeTurn {
         session_id: &str,
         attachments: &[crate::Attachment],
     ) -> Option<String> {
-        if !self.permission {
-            return None;
-        }
+        // Both modes drive `--input-format stream-json`: the user turn is the
+        // CLI's stdin payload, in argv in neither mode.
         // Text-only turn → plain string content. Multimodal → array of
         // content blocks (text + image/document base64).
         let content: serde_json::Value = if attachments.is_empty() {
@@ -1739,13 +1748,19 @@ mod tests {
     fn codex_build_args_first_turn() {
         let ex = CodexExecutor;
         let h = ex.make_turn(&TurnCtx::default());
-        let env = HashMap::new();
+        let mut env = HashMap::new();
+        env.insert("CODEX_MODEL".to_string(), "gpt-5".to_string());
         let args = h.build_args("hi", "", &env);
         assert_eq!(args[0], "codex");
         assert!(args.iter().any(|a| a == "exec"));
-        assert!(args.iter().any(|a| a == "hi"));
         assert!(args.iter().any(|a| a == "--json"));
         assert!(!args.iter().any(|a| a == "resume"));
+        // The message is the token immediately after "--"; nothing follows the
+        // separator, and every flag — the model override included — precedes it.
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args[sep + 1], "hi");
+        assert_eq!(sep + 2, args.len());
+        assert!(args.iter().position(|a| a == "-c").unwrap() < sep);
     }
 
     #[test]
@@ -1858,20 +1873,35 @@ mod tests {
         assert!(args.iter().any(|a| a == "--verbose"));
     }
 
-    #[tokio::test]
-    async fn claude_code_build_initial_stdin_only_in_permission_mode() {
-        // Unattended: no initial stdin.
-        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
-        assert_eq!(h.build_initial_stdin("hi", "", &[]).await, None);
+    #[test]
+    fn claude_code_message_never_reaches_argv() {
+        // Both modes carry the turn on stdin, so ps(1) cannot read it and the
+        // OS argv-length limit does not apply.
+        let env = HashMap::new();
+        for ctx in [TurnCtx::default(), TurnCtx { permission: true }] {
+            let h = ClaudeCodeExecutor.make_turn(&ctx);
+            let args = h.build_args("secret-message", "", &env);
+            assert!(!args.iter().any(|a| a == "secret-message"), "argv: {args:?}");
+            assert!(args.iter().any(|a| a == "--input-format"));
+        }
+    }
 
-        // Permission: SDKUserMessage JSON line.
-        let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx { permission: true });
-        let line = h.build_initial_stdin("hi", "sess-1", &[]).await.unwrap();
-        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(v["type"], "user");
-        assert_eq!(v["message"]["role"], "user");
-        assert_eq!(v["message"]["content"], "hi");
-        assert_eq!(v["session_id"], "sess-1");
+    #[tokio::test]
+    async fn claude_code_build_initial_stdin_in_both_modes() {
+        for ctx in [TurnCtx::default(), TurnCtx { permission: true }] {
+            let mut h = ClaudeCodeExecutor.make_turn(&ctx);
+            // One SDKUserMessage JSON line — the frame the Python and Node
+            // SDKs build too (their key order differs; JSON order is not
+            // significant to the CLI).
+            let line = h.build_initial_stdin("hi", "sess-1", &[]).await.unwrap();
+            assert!(!line.contains('\n'), "frame must be one line: {line}");
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(v["type"], "user");
+            assert_eq!(v["message"]["role"], "user");
+            assert_eq!(v["message"]["content"], "hi");
+            assert_eq!(v["parent_tool_use_id"], serde_json::Value::Null);
+            assert_eq!(v["session_id"], "sess-1");
+        }
     }
 
     #[test]
@@ -1943,7 +1973,9 @@ mod tests {
     #[tokio::test]
     async fn claude_code_permission_methods_noop_in_unattended_mode() {
         let mut h = ClaudeCodeExecutor.make_turn(&TurnCtx::default());
-        assert_eq!(h.build_initial_stdin("hi", "", &[]).await, None);
+        // The stdin channel is not permission-specific: both modes deliver the
+        // turn on stdin. Only the approval channel is permission-mode-only.
+        assert!(h.build_initial_stdin("hi", "", &[]).await.is_some());
         let event = json!({"type": "control_request", "request_id": "r", "request": {"subtype": "can_use_tool"}});
         // request detection is independent of mode (it inspects the event),
         // but write_permission_response returns None in unattended mode.
@@ -2157,6 +2189,17 @@ mod tests {
     // ----- opencode -----
 
     #[test]
+    fn opencode_build_args_message_after_separator() {
+        let h = OpencodeExecutor.make_turn(&TurnCtx::default());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        // Message is the token immediately after "--"; no flag follows it.
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args[sep + 1], "hi");
+        assert_eq!(sep + 2, args.len());
+    }
+
+    #[test]
     fn opencode_parse_text_partial() {
         let mut h = OpencodeExecutor.make_turn(&TurnCtx::default());
         let r = h.parse_event(json!({
@@ -2191,6 +2234,17 @@ mod tests {
         let sid = h.get_session_id();
         assert!(sid.is_some());
         assert_eq!(sid.unwrap().len(), 36);
+    }
+
+    #[test]
+    fn agy_build_args_message_after_separator() {
+        let h = AgyExecutor.make_turn(&TurnCtx::default());
+        let env = HashMap::new();
+        let args = h.build_args("hi", "", &env);
+        // Message is the token immediately after "--"; no flag follows it.
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(args[sep + 1], "hi");
+        assert_eq!(sep + 2, args.len());
     }
 
     #[test]

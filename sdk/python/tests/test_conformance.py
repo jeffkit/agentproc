@@ -39,6 +39,15 @@ CASES_PATH = CONFORMANCE_DIR / "cases.json"
 CASES_DATA = json.loads(CASES_PATH.read_text(encoding="utf-8"))
 EXECUTORS_PATH = CONFORMANCE_DIR / "executors.json"
 
+# Sentinel: `initial_stdin: null` in the fixture is a *meaningful* value (an
+# executor that returns no payload), so a scenario without the key must be
+# distinguishable from one that carries null.
+_MISSING = object()
+
+# Fake CLI for `initial_stdin` scenarios: echo the one line read on stdin back
+# as a result event; a null stdin (or a short read) prints NO_STDIN.
+_STDIN_ECHO = """read -r line || line=NO_STDIN; printf '{"type":"result","text":"%s"}' "$line\""""
+
 
 def _load_cases():
     return [pytest.param(c["line"], c["expect"], id=c["line"][:60]) for c in CASES_DATA["cases"]]
@@ -149,13 +158,29 @@ def test_posture_conformance(case: dict) -> None:
         assert token not in argv, f"{case['name']}: {token} present in {argv}"
 
 
-def _fake_executor(lines):
-    """printf-backed fake CLI emitting one NDJSON line per scenario entry,
-    plus the fixture's shared rule-table parse_event."""
+def _fake_executor(scenario):
+    """Fake CLI plus the fixture's shared rule-table parse_event.
+
+    Default: printf-backed, emitting one NDJSON line per `lines` entry. A
+    scenario carrying `initial_stdin` instead spawns a CLI that echoes the one
+    line it reads on stdin back as a `result` event — so the runner's stdin
+    channel is observable in `reply` (a null stdin prints `NO_STDIN`).
+    """
+    lines = scenario["lines"]
+    initial_stdin = scenario.get("initial_stdin", _MISSING)
     joined = "\n".join(json.dumps(l) for l in lines)
 
-    def build_args(message, session_id, env, ctx):
-        return ["printf", "%s\\n", joined]
+    if initial_stdin is not _MISSING:
+        def build_args(message, session_id, env, ctx):
+            return ["/bin/sh", "-c", _STDIN_ECHO]
+
+        def build_initial_stdin(message, session_id):
+            return initial_stdin
+    else:
+        def build_args(message, session_id, env, ctx):
+            return ["printf", "%s\\n", joined]
+
+        build_initial_stdin = None
 
     def parse_event(event):
         t = event.get("type")
@@ -177,13 +202,16 @@ def _fake_executor(lines):
             return out
         return None
 
-    return {
+    executor = {
         "cli_name": "fake-cli",
         "install_hint": "",
         "plain": False,
         "build_args": build_args,
         "parse_event": parse_event,
     }
+    if build_initial_stdin is not None:
+        executor["build_initial_stdin"] = build_initial_stdin
+    return executor
 
 
 def _make_opts(**kwargs):
@@ -215,7 +243,7 @@ def test_executor_path_conformance(scenario: dict) -> None:
     exp = scenario["expect"]
     partials = []
     result = run_via_executor(
-        _fake_executor(scenario["lines"]),
+        _fake_executor(scenario),
         _make_opts(streaming=scenario["streaming"], on_partial=partials.append),
     )
     assert result.reply == exp["reply"], "reply"
