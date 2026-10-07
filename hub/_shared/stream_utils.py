@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -42,6 +43,62 @@ from typing import Any, Callable, Dict, Optional
 # Wire-protocol version this engine implements — kept in sync with the three
 # SDKs' PROTOCOL_VERSION constants (spec `Versioning`).
 PROTOCOL_VERSION = "0.4"
+
+#: Grace between the polite SIGTERM and the SIGKILL escalation on a
+#: bridge-side timeout.
+KILL_GRACE_SECS = 5
+
+
+def _signal_process_group(proc: "subprocess.Popen", sig: int) -> None:
+    """Sign the CLI's whole process group; fall back to the direct child."""
+    if hasattr(os, "killpg"):
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        proc.send_signal(sig)
+    except (ProcessLookupError, PermissionError, ValueError):
+        pass
+
+
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """SIGKILL the CLI's process group and reap the direct child."""
+    _signal_process_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=KILL_GRACE_SECS)
+    except (subprocess.TimeoutExpired, ValueError):
+        pass
+
+
+def _forward_kill(proc: "subprocess.Popen", signum: int) -> None:
+    """Relay a runner-side termination to the CLI's own process group."""
+    _kill_process_group(proc)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def spawn_cli_session(args: list, **popen_kwargs) -> "subprocess.Popen":
+    """Spawn the wrapped CLI in its own session/process group.
+
+    A bridge-side timeout (``run_plain_cli`` / dsh's ``DSH_TIMEOUT``) must clear
+    the CLI's *whole* subtree, and only a group signal can do that — so the CLI
+    leads its own group instead of sharing the bridge's. The price is that the
+    runner's own group kill (the runner puts the *bridge* in a new session) can
+    no longer reach the CLI, so the bridge forwards an incoming SIGTERM/SIGINT
+    to the CLI group before exiting. ``run_bridge`` imposes no timeout of its
+    own and therefore keeps using a plain ``Popen``: its CLI stays in the
+    bridge's group, which is exactly what lets the runner's group kill reach it.
+    """
+    proc = subprocess.Popen(args, start_new_session=True, **popen_kwargs)
+    if threading.current_thread() is threading.main_thread():
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(signum, lambda s, _frame, _p=proc: _forward_kill(_p, s))
+            except (ValueError, OSError):
+                pass
+    return proc
 
 
 @dataclass
@@ -298,31 +355,41 @@ def run_plain_cli(
     args = build_args(message)
     timeout = int(os.environ.get(timeout_env, str(default_timeout)))
     try:
-        proc = subprocess.run(
+        proc = spawn_cli_session(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
         )
     except FileNotFoundError:
         emit_error(f"{cli_name} CLI not found. {cli_install_hint}")
         return 1
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        # Two-step on the CLI's own process group: killing the direct child
+        # alone leaves the CLI's grandchildren alive with the credentials.
+        _signal_process_group(proc, signal.SIGTERM)
+        try:
+            stdout, stderr = proc.communicate(timeout=KILL_GRACE_SECS)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            stdout, stderr = proc.communicate()
         emit_error(f"{cli_name} timed out")
         return 124
+    returncode = proc.returncode
 
-    if proc.returncode != 0:
-        msg = f"{cli_name} exited with {proc.returncode}"
-        stderr = (proc.stderr or "").strip()
+    if returncode != 0:
+        msg = f"{cli_name} exited with {returncode}"
+        stderr = (stderr or "").strip()
         if stderr:
             msg += f": {stderr[:500]}"
         emit_error(msg)
         return 1
 
-    text = (proc.stdout or "").strip()
+    text = (stdout or "").strip()
     if text:
         emit_result(text)
         return 0

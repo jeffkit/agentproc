@@ -57,12 +57,13 @@
 
 const path = require('node:path');
 const readline = require('node:readline');
-const { spawn, spawnSync } = require('node:child_process');
+const { spawnSync } = require('node:child_process');
 const {
   readTurn,
   emitPartial,
   emitResult,
   emitError,
+  spawnCliGroup,
 } = require(path.join(__dirname, '..', '_shared', 'stream_utils.js'));
 
 const CLI_NAME = 'dsh';
@@ -359,11 +360,13 @@ async function main() {
   const support = probeSupport();
   const args = buildArgs(composeTask(message, turn), inboundSession, support);
   let child;
+  let spawned;
   try {
-    child = spawn(args[0], args.slice(1), {
+    spawned = spawnCliGroup(args[0], args.slice(1), {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv(),
     });
+    child = spawned.child;
   } catch {
     emitError(`${CLI_NAME} CLI not found. ${INSTALL_HINT}`);
     process.exit(1);
@@ -381,8 +384,8 @@ async function main() {
   let killer = null;
   const timer = setTimeout(() => {
     timedOut = true;
-    child.kill('SIGTERM');
-    killer = setTimeout(() => child.kill('SIGKILL'), KILL_GRACE_SECS * 1000);
+    spawned.killTree('SIGTERM');
+    killer = setTimeout(() => spawned.killTree('SIGKILL'), KILL_GRACE_SECS * 1000);
   }, timeoutSecs * 1000);
 
   let outcome = null;

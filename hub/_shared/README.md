@@ -57,6 +57,27 @@ It reads the turn, runs the CLI with a timeout, and emits the trimmed stdout as
 a single `{"type":"result"}` event (or `{"type":"error"}` on failure). The bridge
 only supplies `build_args(message)`.
 
+## Process tree on timeout
+
+The runner puts the bridge in its own session and kills the bridge's process
+group on timeout / Ctrl-C. `run_bridge` / `runBridge` impose no timeout of their
+own and leave the CLI in the bridge's group, so that single group signal already
+reaches the CLI and its helpers — nothing extra is needed there.
+
+The plain-text path and `hub/dsh` are different: they impose a CLI-level timeout
+of their own (`CLI_TIMEOUT` / `DSH_TIMEOUT`), which can fire *before* the
+runner's. Signalling only the direct child there would leave the CLI's
+grandchildren (a shell tool call, a sub-agent) running with the credentials they
+inherited, behind a turn that already reported an outcome. So those paths spawn
+the CLI through `spawn_cli_session()` / `spawnCliGroup()`:
+
+- the CLI leads **its own** process group, so the CLI-level timeout can clear
+  the whole subtree (SIGTERM → grace → SIGKILL on that group);
+- because the CLI has left the bridge's group, the bridge forwards an incoming
+  SIGTERM/SIGINT to the group and exits `128 + signum` — it escalates straight
+  to SIGKILL, since the runner's own SIGKILL step can no longer reach that group
+  once the bridge is gone.
+
 ## When NOT to use it
 
 CLIs that need cross-turn transcript state the shared helper does not model
@@ -69,6 +90,10 @@ opt-in helper, not a mandatory base class.
 |------|---------|
 | `stream_utils.py` | Python: `EventResult` dataclass + `run_bridge()` / `main_entry()` / `run_plain_cli()` + emit helpers + `read_turn()` |
 | `stream_utils.js` | Node: `runBridge()` / `runPlainCli()` + emit helpers + `readTurn()` |
+
+The process-group spawn used by the timeout-imposing paths is exported as
+`spawn_cli_session()` (Python) / `spawnCliGroup()` (Node, returns
+`{ child, killTree }`); `_shared` keeps the two implementations at parity.
 
 ## Design note: `partial_text` vs `final_text`
 

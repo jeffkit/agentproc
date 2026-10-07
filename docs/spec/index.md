@@ -185,11 +185,15 @@ When the process exits non-zero without emitting an `error` event, bridges SHOUL
 
 When the turn's effective limit is reached — `timeout_secs`, or whichever of `budget_secs` / `deadline` expires first:
 
-1. Bridge sends `SIGTERM`.
+1. Bridge sends `SIGTERM` to the agent's whole **process group**.
 2. Bridge waits `kill_grace_secs` (default 5) for the process to exit.
-3. If still running, bridge sends `SIGKILL`.
+3. If still running, bridge sends `SIGKILL` to the same group.
 
 Already-received `partial` events are forwarded. The agent SHOULD handle `SIGTERM` by flushing buffered partials and exiting promptly.
+
+Killing the *tree* matters: agents spawn helpers (shell tool calls, builds, sub-agents) that inherit the agent's credentials and workspace write access, so signalling only the direct child leaves them running with nobody left to reap them. The same group signal applies to a cooperative cancel, Ctrl-C, and a bridge-internal CLI timeout that fires before the bridge's own limit; a bridge whose CLI has its own process group must forward an incoming termination to that group. Windows has no process groups and degrades to terminating the direct process.
+
+A bridge MUST NOT wait unboundedly for the agent's inherited stdio after the direct child exits: those pipes only reach EOF when every holder is gone, so a surviving helper would keep the turn open forever. The bridge drains for a short bounded window (1 s in the reference runners), then abandons the pipes and finishes the turn with what it has.
 
 ### Observability
 

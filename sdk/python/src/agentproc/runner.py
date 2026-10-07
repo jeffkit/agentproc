@@ -682,13 +682,16 @@ def is_valid_session_id(value: Any) -> bool:
 def _signal_process_group(proc: subprocess.Popen, sig: int) -> None:
     """对 agent 的整个进程组发信号（子进程用 start_new_session 脱离本组时尽力而为）。"""
     import os
-    try:
-        os.killpg(os.getpgid(proc.pid), sig)
-    except (ProcessLookupError, PermissionError, OSError):
+    if hasattr(os, "killpg"):
         try:
-            proc.send_signal(sig)
-        except (ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(proc.pid), sig)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        proc.send_signal(sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _kill_process_group(
@@ -749,8 +752,10 @@ def _iter_pipe_lines(stream: Any, writer_gone: Callable[[], bool]) -> Iterator[s
     returned — or, on the kill/cancel paths, given up after its last timed
     wait expired. Lines are decoded exactly like ``text=True, errors="replace"``
     iteration: universal newlines, replacement characters for malformed UTF-8,
-    a final unterminated fragment yielded as-is (never at the boundary above —
-    an unterminated fragment there belongs to whatever wrote after the child).
+    a final unterminated fragment yielded as-is — including at the boundary
+    above, where the writer is gone and the fragment is the child's own tail.
+    (A straggler mid-line across the boundary is indistinguishable from the
+    child and is yielded the same way.)
 
     ``poll`` rather than ``select`` because ``select`` cannot watch a pipe fd
     at or above ``FD_SETSIZE`` (a bridge run with a raised ``RLIMIT_NOFILE``
@@ -786,6 +791,10 @@ def _iter_pipe_lines(stream: Any, writer_gone: Callable[[], bool]) -> Iterator[s
             # Re-probe the pipe *after* observing the reaped child: it may
             # have written between the probe above and its exit.
             if writer_gone() and not poller.poll(0):
+                # Nothing left to read and the writer is gone: an
+                # unterminated fragment here is the child's own last line.
+                if pending:
+                    yield pending
                 return
             continue
         chunk = os.read(fd, _PIPE_CHUNK)
@@ -1017,12 +1026,17 @@ def run_via_executor(
         options.streaming if options.streaming is not None else profile["streaming"]
     )
 
+    # Set once the direct child has been reaped: every byte it wrote is then
+    # already in the pipes, so the pumps can end at the "writer gone and pipe
+    # drained" probe instead of blocking on a grandchild that inherited the
+    # write end (see _iter_pipe_lines) — the same boundary as the spawn path.
+    child_gone = threading.Event()
     stderr_parts: List[str] = []
 
     def _pump_stderr() -> None:
         assert proc.stderr is not None
         try:
-            for line in proc.stderr:
+            for line in _iter_pipe_lines(proc.stderr, child_gone.is_set):
                 stderr_parts.append(line)
         except (ValueError, OSError):
             pass
@@ -1035,12 +1049,12 @@ def run_via_executor(
     def _pump_stdout() -> None:
         assert proc.stdout is not None
         try:
-            for line in proc.stdout:
+            for line in _iter_pipe_lines(proc.stdout, child_gone.is_set):
                 line_queue.put(line)
         except (ValueError, OSError):
             pass
         finally:
-            line_queue.put(None)  # EOF marker
+            line_queue.put(None)  # end-of-turn marker
 
     stdout_thread = threading.Thread(target=_pump_stdout, daemon=True)
     stdout_thread.start()
@@ -1138,6 +1152,11 @@ def run_via_executor(
         if timeout_secs and timeout_secs > 0 else None
     )
     eof = False
+    # Bounded window for the pumps to reach the probe boundary after the direct
+    # child is reaped; a straggler that keeps the pipe busy must not hold the
+    # turn open once the child is gone (same 1 s bound as the spawn path's join
+    # backstop and Node's DRAIN_GRACE_MS / Rust's DRAIN_GRACE).
+    drain_deadline: Optional[float] = None
     while not eof:
         # 协作式取消：每轮轮询 cancel_event，命中即分级击杀进程组（与超时
         # 同构但语义不同——取消是控制面意图，宿主据 cancelled 判非错误）。
@@ -1156,6 +1175,9 @@ def run_via_executor(
                 _handle_line(item)
             if not eof:
                 _kill_process_group(proc, on_warning=options.on_stderr)
+                # 子进程已回收：泵线程改在“写端已去 + 管道已空”的探针边界
+                # 结束，不再等继承写端的孙进程（与 spawn 路径同构）。
+                child_gone.set()
                 salvage_deadline = time.monotonic() + 2.0
                 while time.monotonic() < salvage_deadline:
                     try:
@@ -1168,6 +1190,7 @@ def run_via_executor(
                         eof = True
                         break
                     _handle_line(item)
+            child_gone.set()
             break
         remaining = None
         if deadline is not None:
@@ -1190,6 +1213,9 @@ def run_via_executor(
                     _handle_line(item)
                 if not eof:
                     _kill_process_group(proc, on_warning=options.on_stderr)
+                    # 子进程已回收：泵线程改在“写端已去 + 管道已空”的探针
+                    # 边界结束，不再等继承写端的孙进程（与 spawn 路径同构）。
+                    child_gone.set()
                     # Salvage: drain lines the child already wrote (its pipe
                     # buffer + anything the pump thread still holds).
                     salvage_deadline = time.monotonic() + 2.0
@@ -1204,7 +1230,24 @@ def run_via_executor(
                             eof = True
                             break
                         _handle_line(item)
+                child_gone.set()
                 break
+        # Direct-child reap detection — the no-timeout case aside, this is the
+        # moment the child exits on its own. The pumps can now stop at the
+        # probe boundary instead of waiting for a pipe EOF a surviving
+        # grandchild holds open; the drain window below bounds the wait when a
+        # straggler keeps the pipe busy.
+        if not child_gone.is_set() and proc.poll() is not None:
+            child_gone.set()
+            drain_deadline = time.monotonic() + 1.0
+        if drain_deadline is not None and time.monotonic() >= drain_deadline:
+            if options.on_stderr:
+                options.on_stderr(
+                    "[agentproc runner] warning: agent exited but its "
+                    "stdout/stderr pipe is still open (held by a surviving "
+                    "grandchild); abandoning the drain"
+                )
+            break
         try:
             item = line_queue.get(timeout=min(0.5, remaining) if remaining else 0.5)
         except queue.Empty:
@@ -1230,6 +1273,26 @@ def run_via_executor(
             exit_code = EXIT_TIMEOUT
     else:
         exit_code = _normalise_exit_code(proc.wait())
+
+    # The direct child is gone (reaped, or the kill path gave up): its output
+    # is all in the pipes, so the pumps finish at the probe boundary instead of
+    # waiting for a grandchild that inherited the write end. The 1 s join is a
+    # backstop for a straggler that keeps writing; the read ends are then
+    # released either way so a straggler cannot leak an fd per turn.
+    child_gone.set()
+    stdout_thread.join(timeout=1)
+    stderr_thread.join(timeout=1)
+    for th, stream in ((stdout_thread, proc.stdout), (stderr_thread, proc.stderr)):
+        if th.is_alive() and options.on_stderr:
+            options.on_stderr(
+                f"[agentproc runner] warning: {th.name} still alive; "
+                "closing pipe read end to unblock"
+            )
+        try:
+            if stream is not None and not stream.closed:
+                stream.close()
+        except OSError:
+            pass
 
     # Reply assembly (spec protocol.md: result.text may be '' when the body
     # was already delivered via partials — partials are never concatenated
@@ -1874,17 +1937,21 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
         else:
             exit_code = _normalise_exit_code(proc.wait())
     except KeyboardInterrupt:
-        # SIGINT only exists on POSIX. On Windows we fall back to terminate().
+        # Ctrl-C must clear the whole agent subtree: a surviving grandchild
+        # keeps the agent's credentials and the workspace write access, and the
+        # run lock is cleared right after this — which would make the orphan
+        # invisible to the next preflight's stale-run sweep (issue #8).
         if hasattr(signal, "SIGINT"):
-            try:
-                proc.send_signal(signal.SIGINT)
-            except (ProcessLookupError, PermissionError):
-                pass
+            _signal_process_group(proc, signal.SIGINT)
         else:
             try:
                 proc.terminate()
             except (ProcessLookupError, PermissionError):
                 pass
+        try:
+            proc.wait(timeout=profile["kill_grace_secs"])
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc, on_warning=options.on_stderr)
         exit_code = _normalise_exit_code(proc.wait())
 
     _close_stdin()

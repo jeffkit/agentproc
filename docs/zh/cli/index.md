@@ -192,7 +192,7 @@ CLI 是 SDK `run()` 函数（[`sdk/node/src/runner.js`](https://github.com/jeffk
 - **Turn 输入（stdin）**：向 agent 的 stdin 写入一行 `{"type":"turn",...}` NDJSON（`message`、`session_id`、`session_name`、`attachments`、`permission`、`protocol_version`），随后 EOF——除非 `permission: true`，此时 stdin 保持打开以收 `{"type":"permission_response"}` 帧。单轮请求**不**走环境变量。
 - **env 注入**：profile 的 `env` 块（`${VAR}` 展开受 `env_allowlist` 约束），外加固定的 infra 集合（`PATH`/`HOME`/`TERM`/…）。`--env KEY=VALUE` 追加运行期额外变量。
 - **stdout 分类**：每一行是按 `type` 派发的 JSON 对象——`{"type":"partial"}`（`streaming: true` 时转发）、`{"type":"result"}`（终端回复正文；可选 `session_id` / `usage`）、`{"type":"error"}`（使本轮失败）。`session_id` 是事件上的字段（持久化第一个非空值；早期可省略；一旦已知 SHOULD 带上）。非 JSON / 未知 `type` 的行记日志并忽略。
-- **超时处理**：SIGTERM → `kill_grace_secs`（默认 5 秒）→ SIGKILL。退出码 124。限额本身取 profile 的 `timeout_secs`、`budget_secs`、`deadline` 三者中最早到期者。
+- **超时处理**：SIGTERM → `kill_grace_secs`（默认 5 秒）→ SIGKILL，三者都针对 agent 的整个**进程组**（CLI 派生的 shell 工具调用或 sub-agent 会随之一起死），而非仅直接子进程。退出码 124。限额本身取 profile 的 `timeout_secs`、`budget_secs`、`deadline` 三者中最早到期者。若 agent 已退出而某个助手仍持有其 stdout/stderr，该轮仍会结束：管道获得 1 秒 drain 窗口后被放弃（并写 stderr 警告），而不是让该轮挂死。
 - **退出码**：0 成功 · 1 错误（包括出现 `{"type":"error"}` 事件的情况）· 124 超时。
 
 如果你在用别的语言写自己的 bridge，[`runner.js`](https://github.com/jeffkit/agentproc/blob/main/sdk/node/src/runner.js) 就是协议的代码化形式。

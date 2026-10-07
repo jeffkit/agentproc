@@ -38,6 +38,37 @@ const readline = require('node:readline');
 // SDKs' PROTOCOL_VERSION constants (spec `Versioning`).
 const PROTOCOL_VERSION = '0.4';
 
+const KILL_GRACE_MS = 5000;
+
+/**
+ * Spawn the wrapped CLI in its own process group so a bridge-side timeout can
+ * clear the CLI's whole subtree with one group signal (a grandchild that
+ * survives holds the agent's credentials — issue #8). Leaving the bridge's
+ * group means the runner's own group kill no longer reaches the CLI, so the
+ * bridge forwards an incoming SIGTERM/SIGINT to the CLI group before exiting.
+ */
+function spawnCliGroup(command, args, opts = {}) {
+  const detached = process.platform !== 'win32';
+  const child = spawn(command, args, { ...opts, detached });
+  const killTree = (signal) => {
+    if (detached && child.pid) {
+      try { process.kill(-child.pid, signal); return; } catch { /* group already gone */ }
+    }
+    try { child.kill(signal); } catch { /* already dead */ }
+  };
+  if (detached) {
+    const forward = (signum) => () => {
+      // SIGKILL, not SIGTERM: the runner's grace window is about to expire and
+      // its SIGKILL step cannot reach this group once we are gone.
+      killTree('SIGKILL');
+      process.exit(128 + signum);
+    };
+    process.once('SIGTERM', forward(15));
+    process.once('SIGINT', forward(2));
+  }
+  return { child, killTree };
+}
+
 function emitObj(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
@@ -212,7 +243,7 @@ async function runPlainCli({ cliName, cliInstallHint, buildArgs, timeoutEnv = 'C
   }
 
   const args = buildArgs(message);
-  const child = spawn(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
+  const { child, killTree } = spawnCliGroup(args[0], args.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
   let stderr = '';
   let spawnError = null;
@@ -221,15 +252,24 @@ async function runPlainCli({ cliName, cliInstallHint, buildArgs, timeoutEnv = 'C
   child.stderr.on('data', d => { stderr += d.toString(); });
 
   const timeoutSecs = parseInt(process.env[timeoutEnv] || String(defaultTimeout), 10);
+  let timedOut = false;
+  let killer = null;
   const timer = setTimeout(() => {
-    child.kill('SIGTERM');
-    emitError(`${cliName} timed out`);
-    process.exit(124);
+    timedOut = true;
+    // Two-step on the CLI's own process group: the direct child alone would
+    // leave the CLI's grandchildren running with the credentials.
+    killTree('SIGTERM');
+    killer = setTimeout(() => killTree('SIGKILL'), KILL_GRACE_MS);
   }, timeoutSecs * 1000);
 
   const code = await new Promise(resolve => child.on('close', resolve));
   clearTimeout(timer);
+  if (killer) clearTimeout(killer);
 
+  if (timedOut) {
+    emitError(`${cliName} timed out`);
+    process.exit(124);
+  }
   if (spawnError) {
     const notFound = spawnError.code === 'ENOENT';
     const msg = notFound ? `${cliName} CLI not found. ${cliInstallHint}` : spawnError.message;
@@ -256,6 +296,7 @@ async function runPlainCli({ cliName, cliInstallHint, buildArgs, timeoutEnv = 'C
 module.exports = {
   runBridge,
   runPlainCli,
+  spawnCliGroup,
   readTurn,
   emit,
   emitPartial,

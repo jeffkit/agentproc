@@ -52,6 +52,7 @@ const PROTOCOL_VERSION = '0.4';
 
 const DEFAULT_TIMEOUT_SECS = 1800;
 const DEFAULT_KILL_GRACE_SECS = 5;
+const DRAIN_GRACE_MS = 1000;
 // Exit codes per spec
 const EXIT_SUCCESS = 0;
 const EXIT_ERROR = 1;
@@ -305,6 +306,54 @@ function signalProcessGroup(child, signal) {
     } catch { /* group already gone — fall back to the direct child */ }
   }
   try { child.kill(signal); } catch { /* already dead */ }
+}
+
+/**
+ * Resolve when the direct child has exited *and* its inherited stdio pipes
+ * have drained, giving the pipes a bounded window after exit. The pipes only
+ * reach EOF when every process holding the write end is gone; an agent that
+ * exits while a grandchild still holds them would otherwise keep `close`
+ * (and therefore run()) pending forever. Mirrors the Python runner's
+ * `join(timeout=1)` drain backstop.
+ */
+function waitForExit(child, { onAbandoned, onError } = {}) {
+  return new Promise(resolve => {
+    let done = false;
+    let code = null;
+    let signal = null;
+    let timer = null;
+    const settle = (value) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      child.removeListener('exit', onExit);
+      child.removeListener('close', onClose);
+      child.removeListener('error', onErr);
+      resolve(value);
+    };
+    const startDrainTimer = () => {
+      timer = setTimeout(() => {
+        if (onAbandoned) onAbandoned();
+        try { if (child.stdout) child.stdout.destroy(); } catch { /* already gone */ }
+        try { if (child.stderr) child.stderr.destroy(); } catch { /* already gone */ }
+        settle(normaliseExit(code, signal));
+      }, DRAIN_GRACE_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+    };
+    const onExit = (c, s) => { code = c; signal = s; startDrainTimer(); };
+    const onClose = (c, s) => settle(normaliseExit(c, s));
+    const onErr = (err) => settle(onError ? onError(err) : EXIT_ERROR);
+    child.on('exit', onExit);
+    child.on('close', onClose);
+    child.on('error', onErr);
+    // The child may already be gone (e.g. the read loop above consumed stdout
+    // to EOF first): 'exit'/'close' are past-tense events and will not fire.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      code = child.exitCode;
+      signal = child.signalCode;
+      startDrainTimer();
+    }
+  });
 }
 
 function expandPath(p) {
@@ -715,6 +764,7 @@ async function runViaExecutor(profile, options, executor) {
     child = spawn(args[0], args.slice(1), {
       cwd,
       env,
+      detached: process.platform !== 'win32',
       stdio: [initialStdin != null ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     });
   } catch (err) {
@@ -757,23 +807,25 @@ async function runViaExecutor(profile, options, executor) {
   const timeoutMs = timeoutSecs * 1000;
   const gracePeriodMs = killGraceSecs * 1000;
 
-  function killChild(signal) {
-    try { child.kill(signal); } catch { /* already dead */ }
-  }
-
   const timeoutHandle = setTimeout(() => {
     result.timedOut = true;
     killed = true;
-    killChild('SIGTERM');
-    killTimer = setTimeout(() => killChild('SIGKILL'), gracePeriodMs);
+    signalProcessGroup(child, 'SIGTERM');
+    killTimer = setTimeout(() => signalProcessGroup(child, 'SIGKILL'), gracePeriodMs);
   }, timeoutMs);
+
+  const abandonedDrainWarning = (opts) => () => {
+    if (opts.onStderr) {
+      opts.onStderr('[agentproc runner] warning: agent exited but its stdout/stderr pipe is still open (held by a surviving grandchild); abandoning the drain');
+    }
+  };
 
   // Plain-text mode: read all stdout, use as reply.
   if (executor.plain) {
     let stdout = '';
     child.stdout.on('data', (d) => { stdout += d.toString(); });
 
-    const exitCode = await new Promise(resolve => child.on('close', (code, signal) => resolve(normaliseExit(code, signal))));
+    const exitCode = await waitForExit(child, { onAbandoned: abandonedDrainWarning(options) });
     clearTimeout(timeoutHandle);
     if (killTimer) clearTimeout(killTimer);
 
@@ -823,6 +875,15 @@ async function runViaExecutor(profile, options, executor) {
 
   const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 
+  const exitPromise = waitForExit(child, {
+    onAbandoned: () => {
+      // Unblock `for await`: the agent is gone and only a surviving
+      // grandchild is holding the pipe open.
+      abandonedDrainWarning(options)();
+      try { rl.close(); } catch { /* already closed */ }
+    },
+  });
+
   for await (const rawLine of rl) {
     const line = rawLine.replace(/\r$/, '');
     if (!line) continue;
@@ -861,7 +922,7 @@ async function runViaExecutor(profile, options, executor) {
     }
   }
 
-  const exitCode = await new Promise(resolve => child.on('close', (code, signal) => resolve(normaliseExit(code, signal))));
+  const exitCode = await exitPromise;
   clearTimeout(timeoutHandle);
   if (killTimer) clearTimeout(killTimer);
 
@@ -1340,9 +1401,13 @@ async function run(profileRaw, options) {
   }
 
   // ---- wait for exit ----
-  const exitCode = await new Promise(resolve => {
-    child.on('close', (code, signal) => resolve(normaliseExit(code, signal)));
-    child.on('error', err => {
+  const exitCode = await waitForExit(child, {
+    onAbandoned: () => {
+      if (options.onStderr) {
+        options.onStderr('[agentproc runner] warning: agent exited but its stdout/stderr pipe is still open (held by a surviving grandchild); abandoning the drain');
+      }
+    },
+    onError: (err) => {
       // spawn error — usually ENOENT. Node attributes it to argv[0]
       // regardless of whether it was the command or a referenced file that
       // wasn't found, so disambiguate for the user.
@@ -1357,8 +1422,8 @@ async function run(profileRaw, options) {
         options.onError(`failed to start agent: ${msg}`);
       }
       if (!result.error) result.error = tip || err.message;
-      resolve(EXIT_ERROR);
-    });
+      return EXIT_ERROR;
+    },
   });
 
   if (timer) clearTimeout(timer);

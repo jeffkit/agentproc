@@ -185,11 +185,15 @@ stdin 保持打开规则、超时与字段定义见完整规范。
 
 到达该轮的有效限额时——`timeout_secs`，或 `budget_secs` / `deadline` 中最早到期者：
 
-1. bridge 发送 `SIGTERM`。
+1. bridge 向 agent 的整个**进程组**发送 `SIGTERM`。
 2. bridge 等待 `kill_grace_secs`（默认 5）让进程退出。
-3. 若仍在运行，bridge 发送 `SIGKILL`。
+3. 若仍在运行，bridge 向同一进程组发送 `SIGKILL`。
 
 已收到的 `partial` 事件仍会转发。agent SHOULD 在收到 `SIGTERM` 时冲刷缓冲的 partial 并尽快退出。
+
+杀进程**树**很关键：agent 会派生子进程（shell 工具调用、构建、sub-agent），它们继承 agent 的凭据与 workspace 写权限，只对直接子进程发信号会让它们继续运行且无人回收。同一套组信号也适用于协作式取消、Ctrl-C，以及先于 bridge 自身限额到期的 bridge 内部 CLI 超时；CLI 拥有自己进程组的 bridge 必须把收到的终止信号转发给该组。Windows 无进程组，退化为终止直接进程。
+
+直接子进程退出后，bridge **MUST NOT** 无界等待 agent 继承来的 stdio：那些管道只有在每一个持有者都消失后才到 EOF，存活的助手进程会让该轮永远挂起。bridge 只 drain 一个短暂有界的窗口（参考 runner 取 1 秒），随后放弃管道并以已收到的输出结束该轮。
 
 ### 可观测性
 

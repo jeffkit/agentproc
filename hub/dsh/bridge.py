@@ -58,7 +58,14 @@ _HUB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _HUB_DIR not in sys.path:
     sys.path.insert(0, _HUB_DIR)
 
-from _shared.stream_utils import emit_error, emit_partial, emit_result  # noqa: E402
+from _shared.stream_utils import (  # noqa: E402
+    _kill_process_group,
+    _signal_process_group,
+    emit_error,
+    emit_partial,
+    emit_result,
+    spawn_cli_session,
+)
 
 CLI_NAME = "dsh"
 INSTALL_HINT = "Install: npm install -g @deepseek-ai/dsh"
@@ -240,7 +247,11 @@ def run_json(child: subprocess.Popen, timeout_secs: int) -> dict:
 
     def _on_timeout():
         state["timed_out"] = True
-        child.send_signal(signal.SIGTERM)
+        _signal_process_group(child, signal.SIGTERM)
+        state["killer"] = threading.Timer(
+            KILL_GRACE_SECS, lambda: _kill_process_group(child)
+        )
+        state["killer"].start()
 
     timer = threading.Timer(timeout_secs, _on_timeout)
     timer.start()
@@ -284,8 +295,11 @@ def run_json(child: subprocess.Popen, timeout_secs: int) -> dict:
 
     child.wait()
     timer.cancel()
+    killer = state.get("killer")
+    if killer is not None:
+        killer.cancel()
     if state["timed_out"] and child.poll() is None:
-        child.kill()
+        _kill_process_group(child)
         child.wait()
     if child.stderr:
         child.stderr.close()
@@ -333,11 +347,11 @@ def finish_plain(child: subprocess.Popen, timeout_secs: int) -> int:
     try:
         stdout, stderr = child.communicate(timeout=timeout_secs)
     except subprocess.TimeoutExpired:
-        child.send_signal(signal.SIGTERM)
+        _signal_process_group(child, signal.SIGTERM)
         try:
             child.communicate(timeout=KILL_GRACE_SECS)
         except subprocess.TimeoutExpired:
-            child.kill()
+            _kill_process_group(child)
             child.communicate()
         emit_error(f"{CLI_NAME} timed out after {timeout_secs}s")
         return 124
@@ -371,7 +385,7 @@ def main() -> int:
     args = build_args(compose_task(message, turn), inbound_session, support)
     timeout_secs = int(os.environ.get("DSH_TIMEOUT") or DEFAULT_TIMEOUT_SECS)
     try:
-        child = subprocess.Popen(
+        child = spawn_cli_session(
             args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

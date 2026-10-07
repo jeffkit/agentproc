@@ -676,15 +676,29 @@ agent **MAY** 为 UI / 策略包含的可选字段：
 
 当到达 `timeout_secs` 而进程未退出时：
 
-1. bridge 向进程发 `SIGTERM`。
+1. bridge 向 agent 的**进程组**发 `SIGTERM`（见下文「杀进程树，而不只是进程」）。
 2. bridge 等待 `kill_grace_secs`（默认 5）让进程退出。
-3. 若仍在运行，bridge 发 `SIGKILL`。
+3. 若仍在运行，bridge 向同一进程组发 `SIGKILL`。
 
 已收到的 `partial` 事件转发给用户。bridge **SHOULD** 随后向用户发送超时错误回复。
 
 agent **SHOULD** 通过刷新任何缓冲的 partial 输出并 promptly 退出来处理 `SIGTERM`。
 
 **Windows 注意事项。** `SIGTERM` 与 `SIGKILL` 在 Windows 上不作为可投递信号存在。Windows 上的 bridge **MUST** 仍尊重两步意图——先「礼貌」终止请求（Windows 上 `TerminateProcess` 是唯一可用杠杆，故宽限期坍缩为零），然后在 `kill_grace_secs` 后进程仍存活时硬终止。POSIX bridge 实现完整 SIGTERM → 宽限 → SIGKILL 序列。需要在关闭时刷新的 agent 无法在 Windows 上依赖收到信号，**SHOULD** 改用 `atexit` 式钩子或显式的退出前刷新纪律。
+
+### 杀进程树，而不只是进程
+
+agent 惯常会派生自己的助手进程——一次 shell 工具调用、一次构建、一个 sub-agent——而这些助手继承 agent 的凭据与它对 workspace 的写权限。只对直接子进程发信号，它们会继续运行且再无回收者。
+
+- bridge 侧每一次终止都 **MUST** 针对 agent 的整个**进程组**：上面的超时、协作式取消、中断（Ctrl-C），以及先于 bridge 自身限额到期的 bridge 内部 CLI 超时。把 agent CLI 跑在自己进程里的 bridge，**MUST** 先把该 CLI 放进它自己的进程组（`setsid` / `start_new_session` / `detached`）再对该组发信号；CLI 与 bridge 共组的 bridge，则由其调用方发给 bridge 的组信号覆盖——前提是 bridge 转发该信号。
+- 在无进程组的平台（Windows）上，bridge 退化为终止直接进程——与上文两步序列的注意事项相同。
+- 自行维护孤儿记录的实现（例如 Python SDK 的 workspace run lock）**MUST** 只在组击杀**之后**清除该记录，否则存活的进程树对下一轮 turn 的 stale 孤儿清扫不可见。
+
+### 永不无界等待继承来的 stdio
+
+agent 的 stdout/stderr 管道只有在**每一个**持有该管道写端的进程都退出后才到 EOF。因此，agent 已退出而某个助手仍持有写端时，bridge 的读取循环会永远挂起——尽管该轮 turn 本身早已结束。
+
+直接子进程退出后，bridge **MAY** 再 drain 一个短暂且**有界**的窗口（参考 runner 取 1 秒），此后 **MUST** 放弃这些管道并以已收到的输出结束该轮——一轮永不结束的对话比截断的调试日志更糟。bridge **MUST NOT** 把 turn 的结束系于并非自己派生的进程的 stdio EOF。
 
 ### 时间预算与绝对截止时刻（可选 profile 字段）
 
@@ -867,7 +881,7 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
 
-- **doc 1.10** —— In-process executor 下新增[消息传递与 argv](#消息传递与-argv)小节，分两部分。(a) 当被包装的 CLI 能从 stdin 读 prompt 时，消息 **MUST** 留在 argv 之外；[Executor 接口](#executor-接口)新增可选的 `buildInitialStdin(message, sessionId) -> string | null`，runner 在 spawn 前每轮调用一次，返回非 `null` 时写入 CLI 的 stdin 并关闭管道。它属于 turn 内闭合契约，也属于 `makeHandlers()` 工厂返回值；同一小节记录：`permission: true` 模式下管道保持打开，只在该 runner 于这条路径上服务审批通道时成立（今为 Rust——Python 与 Node 的 executor 路径没有审批通道，那里 `permission: true` 的轮次会阻塞到超时）。`claude-code` 的**两种**模式都改为这样做（`claude --print --input-format stream-json`，一行 stream-json 用户消息走 stdin），不再把 `<message>` 放进 argv。(b) 对只接受把 prompt 作为命令行参数传入的 CLI，executor 路径仍是明文、有限豁免；该节记录三个后果（消息可经 `ps(1)` 读到；OS argv 长度上限；以 `-` 开头的消息被当作 flag 解析）与部署前提（独占宿主 / 容器 / VM）。规范性规则：当消息是位置参数时，`--` **必须**紧邻其前，且所有 flag **必须**置于 `--` 之前。设计原则中的 argv 条目现指向该豁免。无 wire 变更。
+- **doc 1.10** —— In-process executor 下新增[消息传递与 argv](#消息传递与-argv)小节，分两部分。(a) 当被包装的 CLI 能从 stdin 读 prompt 时，消息 **MUST** 留在 argv 之外；[Executor 接口](#executor-接口)新增可选的 `buildInitialStdin(message, sessionId) -> string | null`，runner 在 spawn 前每轮调用一次，返回非 `null` 时写入 CLI 的 stdin 并关闭管道。它属于 turn 内闭合契约，也属于 `makeHandlers()` 工厂返回值；同一小节记录：`permission: true` 模式下管道保持打开，只在该 runner 于这条路径上服务审批通道时成立（今为 Rust——Python 与 Node 的 executor 路径没有审批通道，那里 `permission: true` 的轮次会阻塞到超时）。`claude-code` 的**两种**模式都改为这样做（`claude --print --input-format stream-json`，一行 stream-json 用户消息走 stdin），不再把 `<message>` 放进 argv。(b) 对只接受把 prompt 作为命令行参数传入的 CLI，executor 路径仍是明文、有限豁免；该节记录三个后果（消息可经 `ps(1)` 读到；OS argv 长度上限；以 `-` 开头的消息被当作 flag 解析）与部署前提（独占宿主 / 容器 / VM）。规范性规则：当消息是位置参数时，`--` **必须**紧邻其前，且所有 flag **必须**置于 `--` 之前。设计原则中的 argv 条目现指向该豁免。无 wire 变更。「超时处理」现在写明**对谁**发信号、bridge **可以等多久**。两步击杀（以及 bridge 侧其余每一次终止——协作式取消、Ctrl-C、先于限额到期的 bridge 内部 CLI 超时）针对 agent 的整个**进程组**，而非直接子进程：agent 的助手进程（shell 工具调用、构建、sub-agent）继承 agent 的凭据与 workspace 写权限，此前会被留下继续运行且无人回收。把 CLI 跑在自己进程里的 bridge **MUST** 先把该 CLI 放进它自己的进程组再对组发信号；CLI 与 bridge 共组的 bridge，则由调用方的组信号覆盖——前提是它转发该信号。自行维护孤儿记录的实现（Python SDK 的 run lock）**MUST** 只在组击杀之后清除该记录。继承 stdio 新增规则：agent 的 stdout/stderr 只有在每一个持有者都退出后才到 EOF，故存活的助手进程可能让该轮 turn 永远挂起——直接子进程退出后，bridge **MAY** 再 drain 一个短暂有界的窗口（参考 runner 取 1 秒），此后 **MUST** 放弃管道并以已收到的输出结束该轮。无线协议变更——stdin/stdout 上的字节不变；无新增退出码或事件。
 - **doc 1.9** —— 对实现本已携带的字段做一次卫生整理：把 `from_user`（平台发送者标识）记为 turn 的**可选**字段——它属于应用层关注点，bridge **MAY** 发送，缺省或 `""` 表示未知；[Executor 接口](#executor-接口)表新增 `getSessionId`（`plain` executor 的会话 id，在 `buildArgs` 中铸造、进程退出后由 runner 读取），同时消除 [`plain` executor](#plain-executor) 小节里与之矛盾的表述——纯文本 CLI executor 的会话连续性在**接口内**完成，而非另建 run 循环。版本治理新增 SHOULD：读取到 `protocol_version` 与自身版本不同的 turn 时，实现向 stderr 写一条同时含两个版本字符串的诊断并 best-effort 继续（永不作为兼容闸门，永不改变行为）。SDK 侧：三个 SDK 的 `on_partial` / `onPartial` 回调第二参统一为 partial 的 `role`（缺省 = 无 role）。无线协议变更——stdin/stdout 上的字节不变。
 - **doc 1.8** —— 回复拼装对两条路径明文化：`streaming: true` 且已转发至少一个 `partial` 时，终态 `result` 携带空正文（正文已送达——不得重复）；否则回复为首个 `result` 事件的 `finalText`（显式空串同样生效；后续 `result` 事件被忽略）。executor 路径的 `usage` 对象**必须**写入 `RunResult.usage`（首个非空值生效）；`error` 事件使该轮失败（即使 CLI 退出码为 0）；无 error 且无正文的轮次为成功。共享 conformance 套件新增驱动 executor 路径（`spec/conformance/executors.json`）。无线协议变更。
 - **doc 1.7** —— In-process executor：`buildArgs` 新增第 4 个 `ctx` 参数，携带 profile 的 `permission` 值；新增 `supportsPermission` 能力位；Runner 契约在 `permission: true` 遇到无审批通道的 executor 时拒绝 spawn，并新增 bridge 侧 `AGENTPROC_AUTO_APPROVE` 旋钮（`0` / `false`）使 runner 拒绝一切自动批准 argv。两种拒绝都是 `error` 事件 + 非零退出码——永不静默回落到 `--dangerously-skip-permissions` / `--yolo`。自行注入自动批准默认值的 hub 桥（今仅 `hub/dsh`）在该旋钮关闭时 MUST NOT 注入。无 wire 变更；spawn 路径语义不变。

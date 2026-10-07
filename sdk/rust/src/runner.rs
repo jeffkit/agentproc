@@ -33,6 +33,13 @@ use crate::error::RunnerError;
 use crate::executors::{lookup, TurnHandlers};
 use crate::protocol::{parse_event, AgentEvent, TurnObject};
 
+/// How long the runner keeps draining the agent's inherited stdio after the
+/// direct child has exited. The pipes only reach EOF once every process
+/// holding the write end is gone — an agent that leaves a grandchild behind
+/// would otherwise keep the turn pending forever. Mirrors the Python runner's
+/// `thread.join(timeout=1)` drain backstop.
+const DRAIN_GRACE: Duration = Duration::from_secs(1);
+
 /// Normalise a finished child's status into the spec exit code.
 ///
 /// A signal death reports `128 + signal number` (SIGINT → 130, SIGTERM →
@@ -318,7 +325,9 @@ async fn run_via_spawn(
     // Read stdout and enforce the wall-clock timeout concurrently: an agent
     // that stalls without exiting must still hit the timeout (and the
     // two-step SIGTERM/SIGKILL kill inside wait_with_timeout).
+    let mut result = RunResult::default();
     let mut stdout_fut = Box::pin(process_stdout(
+        &mut result,
         BufReader::new(stdout),
         process_opts(&opts, &cfg),
         partial_tx.clone(),
@@ -330,26 +339,32 @@ async fn run_via_spawn(
         profile.kill_grace_secs,
     ));
 
-    let (result, status, stderr_output) = tokio::select! {
+    let status = tokio::select! {
         r = &mut stdout_fut => {
-            let status = wait_fut.await;
-            let stderr_output = stderr_task.await.unwrap_or_default();
-            (r, status, Ok::<_, tokio::task::JoinError>(stderr_output))
+            r?;
+            wait_fut.await
         }
         s = &mut wait_fut => {
-            // Timeout fired while stdout was still open: wait_with_timeout
-            // already killed the child; now drain whatever stdout produced
-            // before the pipe closed.
-            let result = stdout_fut.await;
-            let stderr_output = stderr_task.await.unwrap_or_default();
-            #[allow(clippy::let_and_return)]
-            (result, s, Ok(stderr_output))
+            // The agent process is gone; its inherited pipes are not
+            // necessarily at EOF (a grandchild may still hold them).
+            drain_stdout_bounded(&mut stdout_fut, &opts).await;
+            s
         }
     };
+    drop(stdout_fut);
     let _ = partial_tx.send(None);
 
-    let stderr_output = stderr_output.unwrap_or_default();
-    let mut result = result?;
+    let mut stderr_task = stderr_task;
+    let stderr_output = match timeout(DRAIN_GRACE, &mut stderr_task).await {
+        Ok(joined) => joined.unwrap_or_default(),
+        Err(_) => {
+            // A grandchild is holding stderr open: stop waiting and release
+            // the read end so the turn can finish.
+            stderr_task.abort();
+            String::new()
+        }
+    };
+
     let exit_code = match status {
         Ok(s) => exit_code_from_status(&s),
         Err(RunnerError::Timeout { .. }) => {
@@ -404,15 +419,34 @@ pub(crate) fn is_valid_session_id(sid: &str) -> bool {
             .any(|c| c == '/' || c == '\\' || (c as u32) < 0x20)
 }
 
+/// Give the agent's stdout a bounded window to reach EOF after the direct
+/// child exited, then stop waiting and (implicitly) drop the pipe read end.
+/// The result accumulated so far stays readable by the caller.
+async fn drain_stdout_bounded<F>(stdout_fut: &mut std::pin::Pin<Box<F>>, opts: &RunOptions)
+where
+    F: std::future::Future<Output = Result<(), RunnerError>> + ?Sized,
+{
+    match timeout(DRAIN_GRACE, stdout_fut.as_mut()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {}
+        Err(_) => {
+            if let Some(cb) = &opts.on_stderr {
+                cb("[agentproc runner] warning: agent exited but its stdout pipe is still open (held by a surviving grandchild); abandoning the drain");
+            }
+        }
+    }
+}
+
 /// Read NDJSON lines from the agent's stdout, classify them, invoke callbacks,
 /// and accumulate the RunResult.
 async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
+    result: &mut RunResult,
     mut reader: R,
     po: ProcessOpts,
     _partial_tx: watch::Sender<Option<String>>,
     mut stdin: Option<tokio::process::ChildStdin>,
-) -> Result<RunResult, RunnerError> {
-    let mut result = RunResult::default();
+) -> Result<(), RunnerError> {
+
     let mut saw_error = false;
     let mut line = String::new();
 
@@ -432,7 +466,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
                     continue;
                 }
                 if let Some(sid) = session_id.as_deref() {
-                    note_session(&mut result, sid, &po.on_session);
+                    note_session(result, sid, &po.on_session);
                 }
                 if po.streaming {
                     if let Some(cb) = &po.on_partial {
@@ -443,7 +477,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
             }
             AgentEvent::Result { text, session_id, usage } => {
                 if let Some(sid) = session_id.as_deref() {
-                    note_session(&mut result, sid, &po.on_session);
+                    note_session(result, sid, &po.on_session);
                 }
                 if let Some(u) = usage {
                     result.usage = Some(u);
@@ -455,7 +489,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
             }
             AgentEvent::Error { message, session_id, usage } => {
                 if let Some(sid) = session_id.as_deref() {
-                    note_session(&mut result, sid, &po.on_session);
+                    note_session(result, sid, &po.on_session);
                 }
                 if let Some(u) = usage {
                     result.usage = Some(u);
@@ -507,7 +541,7 @@ async fn process_stdout<R: tokio::io::AsyncBufRead + Unpin>(
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 fn note_session(
@@ -796,26 +830,48 @@ async fn run_via_executor(
         None
     };
 
-    let result = if exec.plain() {
-        process_plain(BufReader::new(stdout)).await
+    let mut result = RunResult::default();
+    let mut stdout_fut: std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(), RunnerError>> + '_>,
+    > = if exec.plain() {
+        Box::pin(process_plain(&mut result, BufReader::new(stdout)))
     } else {
-        process_executor_stdout(
+        Box::pin(process_executor_stdout(
+            &mut result,
             BufReader::new(stdout),
             handlers,
             &cfg,
             &opts,
             child_stdin.take(),
-        )
-        .await
+        ))
+    };
+    let mut wait_fut = Box::pin(wait_with_timeout(
+        child,
+        cfg.timeout_secs,
+        profile.kill_grace_secs,
+    ));
+
+    let status = tokio::select! {
+        r = &mut stdout_fut => {
+            r?;
+            wait_fut.await
+        }
+        s = &mut wait_fut => {
+            drain_stdout_bounded(&mut stdout_fut, &opts).await;
+            s
+        }
+    };
+    drop(stdout_fut);
+
+    let mut stderr_task = stderr_task;
+    let stderr_output = match timeout(DRAIN_GRACE, &mut stderr_task).await {
+        Ok(joined) => joined.unwrap_or_default(),
+        Err(_) => {
+            stderr_task.abort();
+            String::new()
+        }
     };
 
-    let (status, stderr_output) = tokio::join!(
-        wait_with_timeout(child, cfg.timeout_secs, profile.kill_grace_secs),
-        stderr_task,
-    );
-    let stderr_output = stderr_output.unwrap_or_default();
-
-    let mut result = result?;
     let exit_code = match status {
         Ok(s) => exit_code_from_status(&s),
         Err(RunnerError::Timeout { .. }) => {
@@ -848,14 +904,14 @@ async fn run_via_executor(
 
 #[cfg(feature = "executors")]
 async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
+    result: &mut RunResult,
     mut reader: R,
     mut handlers: Box<dyn TurnHandlers>,
     cfg: &ResolvedConfig,
     opts: &RunOptions,
     mut stdin: Option<tokio::process::ChildStdin>,
-) -> Result<RunResult, RunnerError> {
+) -> Result<(), RunnerError> {
     use tokio::io::AsyncWriteExt;
-    let mut result = RunResult::default();
     let mut saw_error = false;
     let mut result_seen = false;
     let mut final_text: Option<String> = None;
@@ -951,18 +1007,16 @@ async fn process_executor_stdout<R: tokio::io::AsyncBufRead + Unpin>(
             result.reply = text;
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 #[cfg(feature = "executors")]
 async fn process_plain<R: tokio::io::AsyncRead + Unpin>(
+    result: &mut RunResult,
     mut reader: R,
-) -> Result<RunResult, RunnerError> {
+) -> Result<(), RunnerError> {
     let mut buf = Vec::new();
     reader.read_to_end(&mut buf).await?;
-    let text = String::from_utf8_lossy(&buf).trim().to_string();
-    Ok(RunResult {
-        reply: text,
-        ..Default::default()
-    })
+    result.reply = String::from_utf8_lossy(&buf).trim().to_string();
+    Ok(())
 }

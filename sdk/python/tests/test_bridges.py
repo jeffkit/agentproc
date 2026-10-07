@@ -20,6 +20,8 @@ import importlib.util
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 from pathlib import Path
 from typing import List
@@ -89,13 +91,50 @@ class _FakeProc:
         return self.returncode
 
 
-class _FakeCompletedProcess:
-    """Fake subprocess.run return value for run_plain_cli."""
+class _FakePlainProc:
+    """Fake Popen return value for run_plain_cli (communicate + group kill).
 
-    def __init__(self, stdout: str, returncode: int, stderr: str = ""):
+    ``pid`` is above the kernel's pid_max, so the real
+    ``_signal_process_group`` can never reach a live group through it —
+    ``send_signal`` is the observable fallback.
+    """
+
+    _DEAD_PID = 1 << 30
+
+    def __init__(
+        self,
+        stdout: str = "",
+        returncode: int = 0,
+        stderr: str = "",
+        timeouts: int = 0,
+    ):
         self.stdout = stdout
         self.stderr = stderr
         self.returncode = returncode
+        self.pid = self._DEAD_PID
+        # Number of leading communicate() calls that time out before the CLI
+        # reports an exit (models a CLI that ignores SIGTERM past the grace).
+        self._timeouts_left = timeouts
+        self.sent_signals: List[int] = []
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        if self._timeouts_left > 0:
+            self._timeouts_left -= 1
+            raise subprocess.TimeoutExpired(self.pid, timeout)
+        return self.stdout, self.stderr
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def send_signal(self, sig):
+        self.sent_signals.append(sig)
+
+    def kill(self):
+        self.killed = True
 
 
 def _events_to_ndjson(events) -> List[str]:
@@ -158,17 +197,25 @@ def _run_bridge(mod, events, *, returncode=0, session_id="", message="hi", attac
     return rc, captured
 
 
-def _run_plain_cli(mod, *, message="hi", fake_result=None):
-    """Run a plain-CLI bridge (run_plain_cli) with subprocess.run mocked."""
+def _run_plain_cli(mod, *, message="hi", fake_result=None, proc=None):
+    """Run a plain-CLI bridge (run_plain_cli) with subprocess.Popen faked.
+
+    ``spawn_cli_session`` installs SIGTERM/SIGINT forwarders in this process
+    (the pytest main thread), so the previous handlers are restored here —
+    otherwise a later test in the same session would forward a real signal to
+    a fake proc.
+    """
     import _shared.stream_utils as su
 
     captured: List[dict] = []
     real_emit_obj = su._emit_obj
-    real_run = su.subprocess.run
+    real_popen = su.subprocess.Popen
     saved_stdin = sys.stdin
+    saved_handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    fake_proc = proc if proc is not None else _FakePlainProc(**(fake_result or {}))
 
     su._emit_obj = lambda obj: captured.append(obj)
-    su.subprocess.run = lambda args, **kw: _FakeCompletedProcess(**(fake_result or {}))
+    su.subprocess.Popen = lambda args, **kw: fake_proc
     sys.stdin = io.StringIO(_make_turn(message=message) + "\n")
     try:
         rc = su.run_plain_cli(
@@ -180,7 +227,9 @@ def _run_plain_cli(mod, *, message="hi", fake_result=None):
         )
     finally:
         su._emit_obj = real_emit_obj
-        su.subprocess.run = real_run
+        su.subprocess.Popen = real_popen
+        for signum, handler in saved_handlers.items():
+            signal.signal(signum, handler)
         sys.stdin = saved_stdin
 
     return rc, captured
@@ -940,7 +989,7 @@ class TestAgyBridge:
         args = self.mod.build_args("hello")
         assert "--model" in args and "gpt-4o" in args
 
-    # ── full bridge (subprocess.run mocked) ──────────────────────────────────
+    # ── full bridge (subprocess.Popen faked) ─────────────────────────────────
 
     def test_success_emits_reply_body(self):
         rc, out = _run_plain_cli(
@@ -977,6 +1026,30 @@ class TestAgyBridge:
         parsed = _classify_output(out)
         assert rc == 1
         assert parsed["error"]
+
+
+def test_run_plain_cli_timeout_kills_cli_process_group(monkeypatch):
+    """A bridge-side timeout must clear the CLI's *whole* process group: a
+    SIGTERM to the group, then SIGKILL when the grace window expires. Signalling
+    only the direct child leaves the CLI's grandchildren alive with the agent's
+    credentials (issue #8)."""
+    import _shared.stream_utils as su
+
+    mod = _load_bridge("agy")
+    # Two leading timeouts: the polite SIGTERM grace also expires → escalation.
+    proc = _FakePlainProc(timeouts=2)
+    signalled: List[tuple] = []
+    monkeypatch.setattr(
+        su, "_signal_process_group", lambda p, s: signalled.append((p.pid, s))
+    )
+
+    rc, out = _run_plain_cli(mod, proc=proc)
+
+    assert rc == 124
+    parsed = _classify_output(out)
+    assert "timed out" in parsed["error"]
+    assert [sig for _, sig in signalled] == [signal.SIGTERM, signal.SIGKILL]
+    assert {pid for pid, _ in signalled} == {proc.pid}
 
 
 # ---------------------------------------------------------------------------

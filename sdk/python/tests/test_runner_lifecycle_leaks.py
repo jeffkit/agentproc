@@ -124,6 +124,78 @@ def test_2b_turn_ends_at_child_reap_not_at_pipe_eof(tmp_path):
     subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
 
 
+# Executor-path counterpart: the CLI is spawned by the in-process executor
+# path (run_via_executor), which reads its stdout into a queue rather than
+# classifying lines inline. A grandchild holding the pipes must not stretch
+# the turn past the "child reaped and pipe drained" boundary either.
+_EXECUTOR_LEAKY_AGENT = r"""
+import json, subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+print(json.dumps({"type": "result", "text": "done"}), flush=True)
+sys.exit(0)
+"""
+
+
+def test_2c_executor_path_turn_ends_at_child_reap_not_at_pipe_eof(tmp_path, monkeypatch):
+    """Executor-path counterpart of test_2b. With ``timeout_secs: 0`` there is
+    no timer at all, so only the bounded drain can rescue the turn: pre-fix
+    the main loop waited on the queue's EOF marker and never returned."""
+    import agentproc.runner as runner_mod
+
+    script = tmp_path / "exec_leaky_agent.py"
+    script.write_text(_EXECUTOR_LEAKY_AGENT)
+    monkeypatch.setitem(runner_mod.EXECUTORS, "leaky-exec", {
+        "cli_name": "leaky-exec",
+        "plain": False,
+        "build_args": lambda message, session_id, env, ctx: [sys.executable, str(script)],
+        "parse_event": lambda event: (
+            {"final_text": event.get("text", "")}
+            if event.get("type") == "result" else None
+        ),
+    })
+
+    start = time.monotonic()
+    result = run({"executor": "leaky-exec", "timeout_secs": 0}, RunOptions(message="hi"))
+    elapsed = time.monotonic() - start
+    assert result.reply == "done"
+    assert result.error == ""
+    assert result.exit_code == 0
+    # Pre-fix the turn waited out the grandchild (30 s). The fix ends it at the
+    # reaped-child boundary (~0.5 s: one poll cadence), so a 5 s ceiling still
+    # separates the two without making the test load-sensitive.
+    assert elapsed < 5.0, f"turn waited on the grandchild-held pipe ({elapsed:.2f}s)"
+    subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
+
+
+# A child whose last line has no trailing newline: at the "child reaped and
+# pipe drained" boundary the fragment still buffered is the child's own tail
+# and must be delivered, not dropped.
+_UNTERMINATED_TAIL_AGENT = r"""
+import json, subprocess, sys
+subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+sys.stdout.write(json.dumps({"type": "result", "text": "done"}))  # no newline
+sys.stdout.flush()
+sys.exit(0)
+"""
+
+
+def test_2d_child_tail_without_newline_is_delivered(tmp_path):
+    """The boundary probe must flush the unterminated fragment it holds: it is
+    the child's own last line, written before it exited."""
+    script = tmp_path / "unterminated_tail_agent.py"
+    script.write_text(_UNTERMINATED_TAIL_AGENT)
+    start = time.monotonic()
+    result = run(
+        {"command": sys.executable, "args": [str(script)], "timeout_secs": 0},
+        RunOptions(message="hi"),
+    )
+    elapsed = time.monotonic() - start
+    assert result.reply == "done"
+    assert result.error == ""
+    assert elapsed < 5.0, f"turn waited on the grandchild-held pipe ({elapsed:.2f}s)"
+    subprocess.run(["pkill", "-f", "time.sleep(30)"], check=False)
+
+
 def test_3_kill_process_group_reaps_zombie(tmp_path, monkeypatch):
     """_kill_process_group must reap the child even when its communicate()
     backstop times out — the child must not be left as a zombie with

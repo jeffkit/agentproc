@@ -1170,3 +1170,166 @@ describe('time budget and traceability', () => {
     assert.strictEqual(r.reply, 'ok');
   });
 });
+
+// ---------------------------------------------------------------------------
+// issue #8 — process-tree kill + bounded stdio drain
+//
+// An agent that exits while a grandchild still holds the inherited
+// stdout/stderr write ends leaves the pipes without EOF, so `close` (and with
+// it run()) would stay pending forever. And a timeout must signal the agent's
+// whole process group: a surviving grandchild keeps the agent's credentials
+// and the workspace write access.
+// ---------------------------------------------------------------------------
+
+const isPosix = process.platform !== 'win32';
+
+// A distinctive sleep duration: the cleanup below matches with `pkill -f`, and
+// `node --test` runs the SDK's test files concurrently — a bare `sleep 30`
+// pattern would also reap the sleeping agents of the timeout tests in
+// scenarios.test.js / this file.
+const STRAY_SLEEP = 'sleep 4823';
+
+/** Reap the background sleep the issue-#8 fixtures leak by design. */
+function reapStraySleep() {
+  const { spawnSync } = require('node:child_process');
+  spawnSync('pkill', ['-f', STRAY_SLEEP]);
+}
+
+/**
+ * Shadow an executor's CLI name on PATH with a fake script (the same trick
+ * conformance.test.js uses for its posture cases). `scriptFor(dir)` builds the
+ * script body so a fixture can reference files inside the fake CLI's own dir.
+ */
+async function withFakeExecutorCli(cliName, scriptFor, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-issue8-'));
+  fs.writeFileSync(path.join(dir, cliName), scriptFor(dir), { mode: 0o755 });
+  const savedPath = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${savedPath}`;
+  try {
+    return await fn(dir);
+  } finally {
+    process.env.PATH = savedPath;
+  }
+}
+
+// `codex` is used for the executor-path cases: its cliName is a plain `codex`
+// (no auto-approve flag in argv, so no AGENTPROC_AUTO_APPROVE knob is needed)
+// and its parseEvent takes the emitted NDJSON event at face value.
+const EXECUTOR_FOR_ISSUE_8 = 'codex';
+const executors = require('./executors.js').EXECUTORS;
+
+test('issue #8: spawn path does not hang on a surviving grandchild', { skip: !isPosix }, async () => {
+  const agent = writeScript(
+    '#!/usr/bin/env bash\n' +
+    `${STRAY_SLEEP} &\n` +
+    'printf \'%s\\n\' \'{"type":"result","text":"done"}\'\n' +
+    'exit 0\n',
+  );
+  const stderrLines = [];
+  const t0 = Date.now();
+  try {
+    // timeout_secs 0 = no timer at all: only the bounded drain can rescue the
+    // turn, since the grandchild keeps the agent's stdout/stderr open.
+    const r = await run(
+      { command: agent, timeout_secs: 0 },
+      { message: 'hi', onStderr: (line) => stderrLines.push(line) },
+    );
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed < 8000, `turn took ${elapsed}ms — the stdio drain was not bounded`);
+    assert.strictEqual(r.reply, 'done');
+    assert.strictEqual(r.exitCode, 0);
+    assert.ok(
+      stderrLines.join('\n').includes('abandoning the drain'),
+      `expected an abandoned-drain warning, got: ${JSON.stringify(stderrLines)}`,
+    );
+  } finally {
+    reapStraySleep();
+  }
+});
+
+test('issue #8: executor path does not hang on a surviving grandchild', { skip: !isPosix }, async () => {
+  const cliName = executors[EXECUTOR_FOR_ISSUE_8].cliName;
+  const stderrLines = [];
+  const partials = [];
+  const t0 = Date.now();
+  try {
+    const r = await withFakeExecutorCli(
+      cliName,
+      () => '#!/usr/bin/env bash\n' +
+        `${STRAY_SLEEP} &\n` +
+        'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\'\n' +
+        'exit 0\n',
+      () => run(
+        { executor: EXECUTOR_FOR_ISSUE_8, timeout_secs: 30 },
+        {
+          message: 'hi',
+          streaming: true,
+          onPartial: (text) => partials.push(text),
+          onStderr: (line) => stderrLines.push(line),
+        },
+      ),
+    );
+    const elapsed = Date.now() - t0;
+    // Pre-fix this hangs until the 30 s timeout: `close` waits for the pipes,
+    // which the grandchild holds open.
+    assert.ok(elapsed < 10000, `turn took ${elapsed}ms — the stdio drain was not bounded`);
+    assert.strictEqual(r.error, '');
+    assert.strictEqual(r.exitCode, 0);
+    assert.deepStrictEqual(partials, ['done']);
+    assert.ok(
+      stderrLines.join('\n').includes('abandoning the drain'),
+      `expected an abandoned-drain warning, got: ${JSON.stringify(stderrLines)}`,
+    );
+  } finally {
+    reapStraySleep();
+  }
+});
+
+test('issue #8: executor-path timeout kills the whole process group', { skip: !isPosix }, async () => {
+  const cliName = executors[EXECUTOR_FOR_ISSUE_8].cliName;
+  try {
+    const outcome = await withFakeExecutorCli(
+      cliName,
+      (dir) => '#!/usr/bin/env bash\n' +
+        `echo $$ > ${JSON.stringify(path.join(dir, 'cli.pid'))}\n` +
+        "trap '' TERM\n" +
+        `${STRAY_SLEEP} &\n` +
+        'wait\n',
+      async (dir) => {
+        const r = await run(
+          { executor: EXECUTOR_FOR_ISSUE_8, timeout_secs: 1, kill_grace_secs: 1 },
+          { message: 'hi' },
+        );
+        return { r, dir };
+      },
+    );
+    const { r, dir } = outcome;
+    assert.strictEqual(r.timedOut, true, `expected timedOut, got ${JSON.stringify(r)}`);
+    assert.strictEqual(r.exitCode, 124);
+
+    const pidFile = path.join(dir, 'cli.pid');
+    assert.ok(fs.existsSync(pidFile), 'the fake CLI never recorded its pid');
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    assert.ok(Number.isInteger(pid) && pid > 1, `unusable pid recorded: ${pid}`);
+
+    // The shell ignores SIGTERM and holds a sleep child: only a group kill
+    // clears it, so a surviving group means the escalation is missing.
+    let alive = true;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(-pid, 0);
+      } catch (err) {
+        if (err.code === 'ESRCH') { alive = false; break; }
+        throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (alive) {
+      try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ }
+      assert.fail(`process group ${pid} survived the executor timeout`);
+    }
+  } finally {
+    reapStraySleep();
+  }
+});
