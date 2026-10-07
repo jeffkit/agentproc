@@ -4,9 +4,17 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.8`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.18.2` (unreleased); the Rust crate is on its own track currently `0.13.2`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.18.3` (unreleased); the Rust crate is on its own track currently `0.13.2`. Includes runner/CLI/SDK behaviour changes.
 
 ## Released
+
+### Spec / SDK 0.18.3 — unreleased
+
+**Python SDK: run lock records the spawning worker pid and refuses takeover while it lives (#9)**
+
+- `agentproc/run_lock.py`: the tombstone record gains `spawner` — the pid of the process that called `write_run_lock`, i.e. the worker that spawned the agent (not `getppid()`, which points at the runner's parent). `write_run_lock(key, pid, argv, *, spawner=None)` defaults to `os.getpid()`; both runner spawn points are unchanged.
+- `cleanup_stale_run`: after the existing double-factor identity check, a live agent pid is only killed when its recorded `spawner` is confirmed dead (`action: killed`, `reason: spawner-gone`). A live spawner raises `RunLockBusy` without `killpg` and without deleting the lock — previously a healthy agent of a still-running worker was SIGKILLed and the worker saw exit 137 / a mutual-kill loop. Records without a `spawner` field (pre-0.18.3 tombstones) are treated as unverifiable and also raise `RunLockBusy`; the rule and the operator remedy (confirm the pid is gone, then delete the lock file) are stated in the module docstring. Check order: `unsupported` → `clean` → `corrupt` → `pid-gone` → ps-unavailable busy → `pid-reused` → spawner check.
+- Tests: `test_run_lock.py` gains the live-spawner and dead-spawner directions plus the legacy-record cases (12 → 17); the `[wip]` repro file is merged in and deleted. Wire protocol stays `0.4`; not spec-relevant, not tagged, not published.
 
 ### Spec / SDK 0.18.2 — unreleased
 

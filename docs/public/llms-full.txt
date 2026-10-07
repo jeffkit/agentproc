@@ -2,7 +2,7 @@
 
 > Single-file dump of all AgentProc documentation, suitable for ingestion by language models. Human-readable site: https://agentproc.dev
 
-> Protocol version: 0.4 · Package version: 0.18.2 · Generated from commit in repo.
+> Protocol version: 0.4 · Package version: 0.18.3 · Generated from commit in repo.
 
 
 ## Table of contents
