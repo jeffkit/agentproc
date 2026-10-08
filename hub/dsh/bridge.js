@@ -53,6 +53,17 @@
  *                       workspace-write | read-only
  *   DSH_TOOLS_MODE      optional dsh Code Mode opt-in passthrough
  *   DSH_TIMEOUT         process timeout in seconds (default: 1800)
+ *
+ * Host compatibility — the bridge speaks two host wires. When stdin carries
+ * a turn object (agentproc wire >= 0.4) it replies with typed NDJSON events.
+ * Legacy ilink-hub-bridge hosts (<= 0.2.x) close stdin and pass the message
+ * in AGENT_MESSAGE (SEC-011-sanitized: CR/LF collapse to spaces); there the
+ * bridge replies in plain text, reports failures on stderr with a non-zero
+ * exit, streams `AGENT_PARTIAL:` lines only when the host set
+ * AGENT_STREAMING=1, and echoes `AGENT_SESSION:<id>` as the first stdout
+ * line when DSH_IM_SESSION_ECHO=1 (pair it with the host's
+ * `cli_session_first_line_prefix: "AGENT_SESSION:"` so the host strips the
+ * line and round-trips the id back as AGENT_SESSION_ID).
  */
 
 const path = require('node:path');
@@ -249,7 +260,7 @@ function stderrHint(stderr) {
  * an error-reasoned turn still writes `final`, and a SIGTERM'd dsh exits 0
  * without one.
  */
-async function runJson(child, support) {
+async function runJson(child, support, sink) {
   const rl = readline.createInterface({ input: child.stdout });
   let stderr = '';
   child.stderr.on('data', (d) => { stderr += d.toString(); });
@@ -276,7 +287,7 @@ async function runJson(child, support) {
           if (frame.phase === 'step_end') usage = addStep(usage, frame.usage);
           break;
         case 'text':
-          if (typeof frame.text === 'string' && frame.text) emitPartial(frame.text, sessionId);
+          if (typeof frame.text === 'string' && frame.text) sink.partial(frame.text, sessionId);
           break;
         case 'final':
           if (typeof frame.text === 'string') finalText = frame.text;
@@ -296,64 +307,110 @@ async function runJson(child, support) {
   return { code, stderr, sessionId, finalText, errorMsg, usage: mapped };
 }
 
-function finishJson({ code, stderr, sessionId, finalText, errorMsg, usage }, timedOut, timeoutSecs) {
+function finishJson(sink, { code, stderr, sessionId, finalText, errorMsg, usage }, timedOut, timeoutSecs) {
   if (timedOut) {
-    emitError(`${CLI_NAME} timed out after ${timeoutSecs}s`, sessionId, usage);
+    sink.error(`${CLI_NAME} timed out after ${timeoutSecs}s`, sessionId, usage);
     process.exit(124);
   }
   if (errorMsg) {
-    emitError(errorMsg, sessionId, usage);
+    sink.error(errorMsg, sessionId, usage);
     process.exit(1);
   }
   if (finalText !== null) {
     if (code === 0) {
-      emitResult(finalText, sessionId, usage);
+      sink.result(finalText, sessionId, usage);
       process.exit(0);
     }
     // The turn ended in an error reason after committing text; stderr has
     // the actionable "dsh: CODE: message" diagnostic.
     const hint = stderrHint(stderr);
     const msg = hint ? `${CLI_NAME}: ${hint}` : `${CLI_NAME} turn ended with an error (exit ${code})`;
-    emitError(msg, sessionId, usage);
+    sink.error(msg, sessionId, usage);
     process.exit(1);
   }
   // No final: killed mid-run (dsh maps SIGTERM to exit 0) or crashed early.
   const hint = stderrHint(stderr);
   let msg = `${CLI_NAME} exited with ${code} without a final message`;
   if (hint) msg += `: ${hint}`;
-  emitError(msg, sessionId, usage);
+  sink.error(msg, sessionId, usage);
   process.exit(1);
 }
 
 /** Plain fallback: stateless one-shot, exactly the pre-0.1.6 behavior. */
-function finishPlain({ code, stdout, stderr }, timedOut, timeoutSecs) {
+function finishPlain(sink, { code, stdout, stderr }, timedOut, timeoutSecs) {
   if (timedOut) {
-    emitError(`${CLI_NAME} timed out after ${timeoutSecs}s`);
+    sink.error(`${CLI_NAME} timed out after ${timeoutSecs}s`);
     process.exit(124);
   }
   if (code !== 0) {
     let msg = `${CLI_NAME} exited with ${code}`;
     const hint = stderrHint(stderr);
     if (hint) msg += `: ${hint}`;
-    emitError(msg);
+    sink.error(msg);
     process.exit(1);
   }
   const text = stdout.trim();
   if (!text) {
-    emitError(`${CLI_NAME} returned empty output (task completed with no assistant message)`);
+    sink.error(`${CLI_NAME} returned empty output (task completed with no assistant message)`);
     process.exit(1);
   }
-  emitResult(text);
+  sink.result(text);
   process.exit(0);
+}
+
+/**
+ * Reply sinks. The wire sink emits typed NDJSON events (agentproc >= 0.4);
+ * the legacy sink speaks the ilink-hub-bridge <= 0.2.x plain-text dialect.
+ * Both share the same call shape so the finish paths stay host-agnostic.
+ */
+function wireSink() {
+  return { partial: emitPartial, result: emitResult, error: emitError };
+}
+
+function legacySink() {
+  const streaming = process.env.AGENT_STREAMING === '1';
+  const echoSession = process.env.DSH_IM_SESSION_ECHO === '1';
+  return {
+    partial(text) {
+      if (streaming && text) process.stdout.write(`AGENT_PARTIAL:${JSON.stringify(text)}\n`);
+    },
+    result(text, sessionId) {
+      // Session echo rides only on successful turns: on failure the host
+      // bails before splitting the first line, so an echo there would leak
+      // into the error reply body.
+      if (echoSession && sessionId) process.stdout.write(`AGENT_SESSION:${sessionId}\n`);
+      process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+    },
+    error(message) {
+      // Legacy hosts surface stderr on the non-zero-exit path.
+      process.stderr.write(`${message}\n`);
+    },
+  };
+}
+
+/** Whether the stdin turn object carries user content (wire 0.4 rule). */
+function hasTurnContent(turn) {
+  return (
+    (typeof turn.message === 'string' && turn.message.length > 0) ||
+    (Array.isArray(turn.attachments) && turn.attachments.length > 0)
+  );
 }
 
 async function main() {
   const turn = await readTurn();
-  const message = typeof turn.message === 'string' ? turn.message : '';
-  const inboundSession = typeof turn.session_id === 'string' ? turn.session_id : '';
-  const hasAtt = Array.isArray(turn.attachments) && turn.attachments.length > 0;
+  // Host sniff: legacy hosts always define AGENT_MESSAGE (even when empty);
+  // a wire host identifies itself by delivering a turn object on stdin.
+  const legacy = !hasTurnContent(turn) && typeof process.env.AGENT_MESSAGE === 'string';
+  const sink = legacy ? legacySink() : wireSink();
+  const message = legacy
+    ? process.env.AGENT_MESSAGE
+    : typeof turn.message === 'string' ? turn.message : '';
+  const inboundSession = legacy
+    ? String(process.env.AGENT_SESSION_ID || '')
+    : typeof turn.session_id === 'string' ? turn.session_id : '';
+  const hasAtt = !legacy && Array.isArray(turn.attachments) && turn.attachments.length > 0;
   if (!message && !hasAtt) {
-    emitError('turn.message is required (or include turn.attachments)');
+    sink.error('turn.message is required (or include turn.attachments)');
     process.exit(1);
   }
 
@@ -368,14 +425,14 @@ async function main() {
     });
     child = spawned.child;
   } catch {
-    emitError(`${CLI_NAME} CLI not found. ${INSTALL_HINT}`);
+    sink.error(`${CLI_NAME} CLI not found. ${INSTALL_HINT}`);
     process.exit(1);
   }
   child.on('error', (err) => {
     const msg = err && err.code === 'ENOENT'
       ? `${CLI_NAME} CLI not found. ${INSTALL_HINT}`
       : (err && err.message) || 'failed to start';
-    emitError(msg);
+    sink.error(msg);
     process.exit(1);
   });
 
@@ -390,7 +447,7 @@ async function main() {
 
   let outcome = null;
   if (support.jsonMode) {
-    outcome = await runJson(child, support);
+    outcome = await runJson(child, support, sink);
   } else {
     let stdout = '';
     let stderr = '';
@@ -401,8 +458,8 @@ async function main() {
   }
   clearTimeout(timer);
   if (killer) clearTimeout(killer);
-  if (support.jsonMode) finishJson(outcome, timedOut, timeoutSecs);
-  else finishPlain(outcome, timedOut, timeoutSecs);
+  if (support.jsonMode) finishJson(sink, outcome, timedOut, timeoutSecs);
+  else finishPlain(sink, outcome, timedOut, timeoutSecs);
 }
 
 if (require.main === module) {
@@ -412,4 +469,15 @@ if (require.main === module) {
   });
 }
 
-module.exports = { composeTask, buildArgs, detectSupport, addStep, toUsage, probeSupport, childEnv };
+module.exports = {
+  composeTask,
+  buildArgs,
+  detectSupport,
+  addStep,
+  toUsage,
+  probeSupport,
+  childEnv,
+  hasTurnContent,
+  wireSink,
+  legacySink,
+};
