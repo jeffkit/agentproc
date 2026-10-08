@@ -125,6 +125,19 @@ class TestRunnerIntegration:
         assert result.error == ""
         assert not run_lock.lock_path_for(key).exists()
 
+    def test_write_failure_does_not_clear_other_writer(self, lock_dir, monkeypatch):
+        """世代未知（写锁失败）时不得无条件清锁——会删掉在飞写者的遗言。"""
+        self._register_plain_executor("test-lock-nowrite", ["sh", "-c", "echo hi"])
+        key = "/ws/nowrite"
+        run_lock.write_run_lock(key, 111, ["/usr/bin/env", "other"])  # 在飞的另一写者
+        monkeypatch.setattr(run_lock, "write_run_lock", lambda *a, **k: None)
+        result = run({"executor": "test-lock-nowrite"},
+                     RunOptions(message="hi", run_lock_key=key))
+        assert result.error == ""
+        path = run_lock.lock_path_for(key)
+        assert path.exists(), "unknown-generation clear removed a live writer's lock"
+        assert json.loads(path.read_text())["pid"] == 111
+
     def test_timeout_leak_self_heals(self, lock_dir):
         """超时路径不显式清锁（自愈设计）：残留锁 pid 已死，preflight 判 stale。"""
         self._register_plain_executor("test-lock-slow", ["sleep", "30"])

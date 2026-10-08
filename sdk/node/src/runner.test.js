@@ -1047,6 +1047,21 @@ describe('run() — concurrency', () => {
       run(nodeProfile(fastAgent()), { message: 'm', timeoutSecs: 30 })));
     assert.ok(rs.every((r) => !r.error));
   });
+
+  test('a different config in flight does not evict the saturated gate', async () => {
+    const holding = run(nodeProfile(sleepAgent(450)),
+      { message: 'm', maxConcurrent: 1, onSaturated: 'reject', timeoutSecs: 30 });
+    await new Promise((r) => setTimeout(r, 150)); // let it take the slot
+    const other = await run(nodeProfile(fastAgent()),
+      { message: 'm', maxConcurrent: 2, timeoutSecs: 30 });
+    assert.strictEqual(other.error, '');
+    const rejected = await run(nodeProfile(fastAgent()),
+      { message: 'm', maxConcurrent: 1, onSaturated: 'reject', timeoutSecs: 30 });
+    const first = await holding;
+    assert.strictEqual(first.error, '');
+    assert.ok(rejected.error.includes('agentproc: concurrency limit'),
+      `gate was replaced by the other config: ${rejected.error}`);
+  });
 });
 
 describe('concurrency primitives', () => {
@@ -1091,6 +1106,26 @@ describe('concurrency primitives', () => {
       active--;
     });
     await Promise.all([job(), job(), job()]);
+    assert.strictEqual(peak, 1);
+  });
+
+  test('ConcurrencyGate never over-admits on a same-tick re-acquire', async () => {
+    const gate = new ConcurrencyGate(1);
+    let holders = 0;
+    let peak = 0;
+    const hold = async () => {
+      await gate.acquire();
+      holders++;
+      peak = Math.max(peak, holders);
+      await new Promise((r) => setTimeout(r, 5));
+      holders--;
+      gate.release();
+    };
+    await gate.acquire(); // A holds the only slot
+    const waiter = hold(); // B queues behind A
+    gate.release(); // A leaves — the slot is handed to B
+    await hold(); // C must wait for B, not slip into a just-decremented counter
+    await waiter;
     assert.strictEqual(peak, 1);
   });
 

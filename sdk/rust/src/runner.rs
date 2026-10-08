@@ -19,6 +19,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use once_cell::sync::Lazy;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -26,15 +27,14 @@ use tokio::time::timeout;
 
 use crate::env::{build_base_env, expand_env_ref_with_allowlist, substitute, SubstCtx};
 use crate::error::RunnerError;
-use crate::concurrency::{ConcurrencyGate, SessionSerializer};
+use crate::concurrency::{gate_for, SessionSerializer};
 #[cfg(feature = "executors")]
 use crate::executors::{lookup, TurnHandlers};
 use crate::protocol::{parse_event, AgentEvent, TurnObject};
 
 /// Module-level per-key serializer: concurrent `run` calls sharing a
 /// `session_key` must serialize across invocations.
-static _SESSION_SERIALIZER: std::sync::LazyLock<SessionSerializer> =
-    std::sync::LazyLock::new(SessionSerializer::new);
+static SESSION_SERIALIZER: Lazy<SessionSerializer> = Lazy::new(SessionSerializer::new);
 
 /// Callbacks and inputs for a single [`run`] call.
 pub struct RunOptions {
@@ -163,23 +163,33 @@ pub async fn run(profile: &crate::Profile, opts: RunOptions) -> Result<RunResult
     // Concurrency (spec "Concurrency" section): per-session serialization and
     // the global gate, both evaluated before any spawn. Rejection terminates
     // the turn via the existing error channel with the fixed marker.
+    // `_serializer_guard` and `_permit` are held for the whole run — dropping
+    // either early would let the next turn start while this one is still live.
+    if opts.max_concurrent == Some(0) {
+        // Parity with Python (ValueError) / Node (throw): a zero cap is a
+        // caller bug — never a silent "queue forever".
+        return Err(RunnerError::InvalidProfile(
+            "max_concurrent must be >= 1 or None".to_string(),
+        ));
+    }
     let key = opts.session_key.clone();
-    let serializer_guard = _SESSION_SERIALIZER.lock(key.as_deref()).await;
-    let gate = ConcurrencyGate::new(opts.max_concurrent, opts.on_saturated);
-    let permit = match gate.acquire().await {
-        Ok(p) => p,
-        Err(msg) => {
-            if let Some(on_error) = &opts.on_error {
-                on_error(&msg);
+    let _serializer_guard = SESSION_SERIALIZER.lock(key.as_deref()).await;
+    let _permit = match gate_for(opts.max_concurrent, opts.on_saturated) {
+        Some(gate) => match gate.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(msg) => {
+                if let Some(on_error) = &opts.on_error {
+                    on_error(&msg);
+                }
+                return Ok(RunResult {
+                    error: msg,
+                    exit_code: 1,
+                    ..Default::default()
+                });
             }
-            return Ok(RunResult {
-                error: msg,
-                exit_code: 1,
-                ..Default::default()
-            });
-        }
+        },
+        None => None,
     };
-    let _ = (serializer_guard, permit);
     let started = std::time::Instant::now();
     let cfg = ResolvedConfig::from(profile, &opts)?;
 

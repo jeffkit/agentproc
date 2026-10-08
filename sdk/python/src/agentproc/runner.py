@@ -40,7 +40,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from . import run_lock as _run_lock
 from .concurrency import ConcurrencyLimitError, ConcurrencyGate, SessionSerializer
@@ -694,7 +694,9 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             import sys as _sys
             print(f"[DEBUG plain] on_protocol_line falsy | stdout={stdout[:80]!r}",
                   file=_sys.stderr)
-        if options.run_lock_key:
+        # 只在知道自己世代时清锁：写锁失败（generation 未知）时无条件 unlink
+        # 会删掉另一个仍在跑的写者的遗言锁。
+        if options.run_lock_key and run_lock_generation is not None:
             _run_lock.clear_run_lock(options.run_lock_key, run_lock_generation)
         return result
 
@@ -753,7 +755,8 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
             options.on_error(result.error)
         return result
     result.exit_code = EXIT_SUCCESS
-    if options.run_lock_key:
+    # 世代未知（写锁失败）则不清：无条件 unlink 会误删在飞写者的锁。
+    if options.run_lock_key and run_lock_generation is not None:
         _run_lock.clear_run_lock(options.run_lock_key, run_lock_generation)
     return result
 
@@ -761,26 +764,34 @@ def run_via_executor(executor: Dict[str, Any], options: RunOptions) -> RunResult
 # run() — the main entry point
 # ---------------------------------------------------------------------------
 
+# 并发原语为模块级（= 每 runner 实例一份）：同 session_key 的锁、以及同一
+# 配置的并发闸，必须跨 run() 调用共享才有效。闸按 (max_concurrent,
+# on_saturated) 分别缓存——不同配置同时在飞时互不覆盖。
+_SESSION_SERIALIZER = SessionSerializer()
+_NO_GATE = ConcurrencyGate(None)
+_GATE_GUARD = threading.Lock()
+_GATES: Dict[Tuple[Optional[int], str], ConcurrencyGate] = {}
+
+
+def _gate_for(options: RunOptions) -> ConcurrencyGate:
+    if options.max_concurrent is None:
+        return _NO_GATE
+    key = (options.max_concurrent, options.on_saturated)
+    with _GATE_GUARD:
+        gate = _GATES.get(key)
+        if gate is None:
+            gate = ConcurrencyGate(*key)
+            _GATES[key] = gate
+        return gate
+
+
 def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     """Run an agent process per the AgentProc spec."""
     # 并发闸在 spawn 之前判定（spec Concurrency 章节）；reject 产协议 error
     # 终态，文案含固定标记 agentproc: concurrency limit。
-    # serializer 为模块级：同 key 的锁必须跨 run() 调用共享才有效。
-    global _default_gate
-    serializer = _SESSION_SERIALIZER
-    if options.max_concurrent is None:
-        gate = _NO_GATE
-    else:
-        with _GATE_GUARD:
-            if _default_gate is None or (
-                _default_gate.max_concurrent != options.max_concurrent
-                or _default_gate.on_saturated != options.on_saturated
-            ):
-                _default_gate = ConcurrencyGate(options.max_concurrent, options.on_saturated)
-            gate = _default_gate
-    with serializer.serialize(options.session_key):
+    with _SESSION_SERIALIZER.serialize(options.session_key):
         try:
-            with gate.slot():
+            with _gate_for(options).slot():
                 return _run_inner(profile_raw, options)
         except ConcurrencyLimitError as exc:
             result = RunResult(exit_code=EXIT_ERROR)
@@ -788,12 +799,6 @@ def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
             if options.on_error:
                 options.on_error(result.error)
             return result
-
-
-_SESSION_SERIALIZER = SessionSerializer()
-_NO_GATE = ConcurrencyGate(None)
-_GATE_GUARD = threading.Lock()
-_default_gate = None
 
 
 def _run_inner(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
@@ -1269,6 +1274,7 @@ def _run_inner(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     else:
         result.exit_code = exit_code
 
-    if options.run_lock_key:
+    # 同上：世代未知则不清，避免误删仍在跑的写者的遗言锁。
+    if options.run_lock_key and run_lock_generation is not None:
         _run_lock.clear_run_lock(options.run_lock_key, run_lock_generation)
     return result

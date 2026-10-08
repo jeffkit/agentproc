@@ -72,15 +72,20 @@ class ConcurrencyGate {
     if (this.onSaturated === 'reject') {
       throw new ConcurrencyLimitError(this.maxConcurrent);
     }
-    await new Promise((resolve) => this._waiters.push(resolve)); // FIFO
-    this._active++;
+    // FIFO; the slot is handed over on release, so the counter never dips
+    await new Promise((resolve) => this._waiters.push(resolve));
   }
 
   release() {
     if (this.maxConcurrent == null) return;
-    this._active = Math.max(0, this._active - 1);
     const next = this._waiters.shift();
-    if (next) next();
+    if (next) {
+      // Hand the slot straight to the waiter: a synchronous acquire() in the
+      // same tick must not see a free slot before the waiter resumes.
+      next();
+      return;
+    }
+    this._active = Math.max(0, this._active - 1);
   }
 
   /**

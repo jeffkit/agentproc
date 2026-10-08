@@ -51,6 +51,10 @@ __all__ = [
     "EXECUTORS",
     "executor_names",
     "run_via_executor",
+    "CONCURRENCY_LIMIT_MARKER",
+    "ConcurrencyGate",
+    "ConcurrencyLimitError",
+    "SessionSerializer",
 ]
 
 
@@ -84,6 +88,12 @@ __version__ = _read_version()
 # `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
 from .runner import PROTOCOL_VERSION, is_valid_session_id, run_via_executor  # noqa: E402
 from .executors import EXECUTORS, executor_names  # noqa: E402
+from .concurrency import (  # noqa: E402
+    CONCURRENCY_LIMIT_MARKER,
+    ConcurrencyGate,
+    ConcurrencyLimitError,
+    SessionSerializer,
+)
 
 
 class ProtocolError(Exception):

@@ -52,6 +52,19 @@ class TestRunLockGeneration:
         run_lock.clear_run_lock("/ws/a", gen_b)
         assert not record_path.exists()
 
+    def test_generation_survives_clear(self):
+        """write→clear→write：世代号不得回退——回退后先写者的收尾会误清后来者。"""
+        _p, gen1 = run_lock.write_run_lock("/ws/r", 111, ["/usr/bin/env", "x"])  # T1
+        _p, gen2 = run_lock.write_run_lock("/ws/r", 222, ["/usr/bin/env", "x"])  # T2
+        run_lock.clear_run_lock("/ws/r", gen2)  # T2 是短回合：先结束，锁文件消失
+        assert not run_lock.lock_path_for("/ws/r").exists()
+        _p, gen3 = run_lock.write_run_lock("/ws/r", 333, ["/usr/bin/env", "x"])  # T3
+        assert gen3 > gen2, f"generation reset after clear: {gen2} -> {gen3}"
+        run_lock.clear_run_lock("/ws/r", gen1)  # T1 的迟到收尾
+        path = run_lock.lock_path_for("/ws/r")
+        assert path.exists(), "earlier finisher cleared a live later writer's lock"
+        assert json.loads(path.read_text())["pid"] == 333
+
     def test_inprocess_mutex_exists(self):
         attrs = [a for a in dir(run_lock) if "lock" in a.lower() or "mutex" in a.lower()]
         assert any(
@@ -233,6 +246,34 @@ class TestRunnerConcurrency:
         assert not results[0].error
         assert results[1].error and CONCURRENCY_LIMIT_MARKER in results[1].error, (
             repr(results[1]))
+
+    def test_configs_do_not_clobber_each_other(self):
+        """配置 A（1/reject）在飞时用配置 B（2/queue）跑一条，不得替换 A 的闸。"""
+        from agentproc.runner import RunOptions, run
+
+        slow_profile = {"command": "python3", "args": [
+            "-c",
+            "import time,json;time.sleep(0.5);"
+            "print(json.dumps({'type':'result','text':'done'}),flush=True)",
+        ]}
+        held = [None]
+
+        def hold():
+            held[0] = run(slow_profile, RunOptions(
+                message="m", max_concurrent=1, on_saturated="reject", timeout_secs=30))
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        time.sleep(0.2)  # 让配置 A 占住槽位
+
+        other = run(_echo_profile(), RunOptions(message="m", max_concurrent=2, timeout_secs=30))
+        assert not other.error, repr(other)
+
+        second = run(_echo_profile(), RunOptions(
+            message="m", max_concurrent=1, on_saturated="reject", timeout_secs=30))
+        holder.join()
+        assert not held[0].error, repr(held[0])
+        assert second.error and CONCURRENCY_LIMIT_MARKER in second.error, repr(second)
 
     def test_default_no_limits(self):
         from agentproc.runner import RunOptions, run

@@ -745,18 +745,22 @@ async function run(profileRaw, options) {
 }
 
 const _SESSION_SERIALIZER = new SessionSerializer();
-let _cachedGate = null;
+const _GATES = new Map();
 
-/** Module-level gate shared across run() calls with the same configuration. */
+/**
+ * Module-level gate shared across run() calls with the same configuration —
+ * keyed by config, so two configurations in flight never clobber each other.
+ */
 function _gateFor(maxConcurrent, onSaturated) {
   if (maxConcurrent == null) return null;
   const mode = onSaturated || 'queue';
-  if (!_cachedGate ||
-      _cachedGate.maxConcurrent !== maxConcurrent ||
-      _cachedGate.onSaturated !== mode) {
-    _cachedGate = new ConcurrencyGate(maxConcurrent, mode);
+  const cacheKey = `${maxConcurrent}:${mode}`;
+  let gate = _GATES.get(cacheKey);
+  if (!gate) {
+    gate = new ConcurrencyGate(maxConcurrent, mode);
+    _GATES.set(cacheKey, gate);
   }
-  return _cachedGate;
+  return gate;
 }
 
 async function runInner(profileRaw, options) {

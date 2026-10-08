@@ -49,6 +49,11 @@ _DEFAULT_LOCK_DIR = os.path.join("~", ".agentproc", "run-locks")
 _GUARD = threading.Lock()
 _KEY_MUTEX: Dict[str, threading.Lock] = {}
 
+# 进程内世代号水位：锁文件被 clear 后磁盘上的计数器归零，若只从文件取，一个
+# write→clear→write 循环就会让世代号回到 1（先结束者又能误清仍在跑的后来者）。
+# 水位只增不减，与文件里的世代取较大者，兼顾跨进程连续性与本进程单调性。
+_GEN: Dict[str, int] = {}
+
 
 def _key_mutex(key: str) -> threading.Lock:
     with _GUARD:
@@ -83,13 +88,18 @@ def write_run_lock(key: str, pid: int, argv: List[str]) -> Optional[Tuple[Path, 
         with mutex:
             path = lock_path_for(key)
             path.parent.mkdir(parents=True, exist_ok=True)
-            generation = 0
+            file_generation = 0
             try:
                 prev = json.loads(path.read_text(encoding="utf-8"))
-                generation = int(prev.get("generation", 0))
+                file_generation = int(prev.get("generation", 0))
             except (OSError, ValueError, TypeError):
                 pass
-            generation += 1
+            # 取文件与本进程水位之较大者：跨进程续接，且本进程内 1,2,1 不可能。
+            # 水位按锁文件路径记录（而非 key），同一 key 换了锁目录互不干扰。
+            watermark_key = str(path)
+            with _GUARD:
+                generation = max(file_generation, _GEN.get(watermark_key, 0)) + 1
+                _GEN[watermark_key] = generation
             record = {
                 "key": os.path.abspath(key),
                 "pid": int(pid),
@@ -115,7 +125,8 @@ def write_run_lock(key: str, pid: int, argv: List[str]) -> Optional[Tuple[Path, 
 
 def clear_run_lock(key: str, generation: Optional[int] = None) -> None:
     """正常收尾清锁（best-effort）。带 ``generation`` 时只清自己世代——
-    锁文件已属更高世代（仍在跑的后来者）则不动。"""
+    锁文件已属更高世代（仍在跑的后来者）则不动。``generation=None`` 是无条件
+    清除，仅适用于自行确认独占该 key 的调用方；runner 一律传自己的世代。"""
     mutex = _key_mutex(key)
     try:
         with mutex:
