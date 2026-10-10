@@ -265,6 +265,17 @@ def _make_cursor_handlers() -> Dict[str, Any]:
             "--output-format", "stream-json",
             "--stream-partial-output",
         ]
+        # `--trust`：cursor-agent 对**未信任目录**先弹交互式
+        # 「⚠ Workspace Trust Required」；非交互（-p）下拿不到答复，
+        # 表现为**模型退化为受限列表**——实测报
+        # `Cannot use this model: claude-4.6-sonnet-medium. Available models:
+        # auto, composer-2.5, cursor-grok-4.5-high, …`，是**误导性报错**，
+        # 真因是目录未信任（2026-10-10 实测：全新目录直接跑弹 trust 提示；
+        # 同目录加 `--trust` 立即正常，日志显示 `model: Claude Sonnet 4.6 1M`）。
+        # 默认信任（与 `--yolo` 同档：非交互执行本就要求无人值守），
+        # 可用 `CURSOR_TRUST=0` 关闭。
+        if (env.get("CURSOR_TRUST") or "1") == "1":
+            args.append("--trust")
         if (env.get("CURSOR_FORCE") or "1") == "1":
             args.append("--yolo")
         model = env.get("CURSOR_MODEL", "").strip()

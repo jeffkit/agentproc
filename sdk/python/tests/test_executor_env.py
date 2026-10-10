@@ -195,3 +195,42 @@ def test_executor_timeout_kills_the_whole_process_group(tmp_path, monkeypatch):
         return
     os.killpg(pid, signal.SIGKILL)
     raise AssertionError(f"process group {pid} survived the executor timeout")
+
+
+# ── 代理变量必须在 infra 白名单内（2026-10-10 生产实证）────────────────────
+# 背景：cursor-agent 的**登录态校验必须走代理**。`ENV_INFRA_VARS` 缺 proxy
+# 变量时，它在非交互模式下拿不到 login 态、**静默退化成「API-key 可用模型」
+# 子集**，报错却是误导性的：
+#     Cannot use this model: claude-4.6-sonnet-medium.
+#     Available models: auto, composer-2.5, cursor-grok-4.5-high, …
+# 真因是认证降级而非模型名错误 —— 这类「配置写了不生效 + 报错指向别处」的
+# 缺陷极难定位（当天排查耗时约 1 小时，最终靠二分 env 定位到 HTTPS_PROXY）。
+#
+# 实测复现：白名单 env + 仅 HTTPS_PROXY/https_proxy → `apiKeySource: login`；
+# 去掉 proxy 两个变量 → 立即退化为受限模型列表。
+
+
+def test_base_env_carries_proxy_vars():
+    """build_base_env 必须透传 proxy 变量（大小写两式）。"""
+    from agentproc.runner import build_base_env
+
+    keys = [
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    ]
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        for i, k in enumerate(keys):
+            os.environ[k] = f"http://proxy-{i}.test:3128"
+        env = build_base_env()
+        for k in keys:
+            assert env.get(k) == os.environ[k], (
+                f"{k} 必须透传给子进程——cursor-agent 等 CLI 的登录态校验"
+                f"依赖代理；缺失会静默退化为受限模型列表"
+            )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v

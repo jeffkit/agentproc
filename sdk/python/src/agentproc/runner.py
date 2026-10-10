@@ -180,6 +180,14 @@ def _normalise_exit_code(code):
 ENV_INFRA_VARS = (
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
     "LC_MESSAGES", "TERM", "TMPDIR", "TZ", "PWD",
+    # 代理（大小写两式都要，不同 CLI/库取的不一样）——2026-10-10：cursor-agent
+    # 的**登录态校验必须走代理**，白名单缺这些变量时它拿不到 login 态、静默
+    # 退化成「API-key 可用模型」子集，报错却是**误导性的**
+    # `Cannot use this model: claude-4.6-sonnet-medium. Available models: auto,
+    # composer-2.5, cursor-grok-…`（真因是认证降级，不是模型名错）。
+    # 实测：白名单 + 仅 HTTPS_PROXY/https_proxy → `apiKeySource: login` 成功。
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     # Windows infra
     "SystemRoot", "TEMP", "TMP", "USERPROFILE", "USERNAME", "PATHEXT",
     "COMSPEC", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "NUMBER_OF_PROCESSORS",
