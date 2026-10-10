@@ -716,3 +716,30 @@ class TestClaudeStdinDelivery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_cursor_prefers_dedicated_cli_name():
+    """cursor 必须优先用专属名 `cursor-agent`，而非泛化名 `agent`。
+
+    2026-10-10 生产实证：`agent` 是泛化名，本机 `~/.grok/bin/agent`（grok CLI）
+    同名且常在 PATH 更前位 ⇒ `shutil.which("agent")` 命中 grok，报
+        error: unexpected argument '--stream-partial-output' found
+    （与真实原因无关）。cursor 是 14 个 executor 里唯一用泛化名的。
+
+    优先专属名后，即使 `~/.grok/bin` 排在 PATH 最前也能正确解析。
+    """
+    from agentproc import EXECUTORS
+
+    handlers = EXECUTORS["cursor"]["make_handlers"]()
+    argv = handlers["build_args"]("hi", "", {"CURSOR_MODEL": "m"})
+    # 本机两个名字都在时，必须选 cursor-agent
+    import shutil as _sh
+
+    if _sh.which("cursor-agent"):
+        assert argv[0] == "cursor-agent", (
+            f"应优先专属名 cursor-agent（避免与 grok 的 agent 冲突），实得 {argv[0]!r}"
+        )
+
+    # 显式覆盖优先
+    argv2 = handlers["build_args"]("hi", "", {"CURSOR_CLI": "/opt/custom/agent"})
+    assert argv2[0] == "/opt/custom/agent", "CURSOR_CLI 应可显式覆盖"

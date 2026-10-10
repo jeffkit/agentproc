@@ -55,6 +55,7 @@ ParseResult shape:
 from __future__ import annotations
 
 import json
+import shutil
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -259,9 +260,33 @@ CODEX = {
 def _make_cursor_handlers() -> Dict[str, Any]:
     accumulated: List[str] = []
 
+    def _resolve_cursor_cli(env: Dict[str, str]) -> str:
+        """择优解析 cursor-agent 的可执行名。
+
+        为什么不能直接用裸 ``agent``（2026-10-10 生产实证）：
+        cursor-agent 官方安装后同时提供 ``cursor-agent`` 与 ``agent`` 两个
+        入口，而 ``agent`` 是**泛化名**——本机 ``~/.grok/bin/agent``（grok
+        CLI）同名且常在 PATH 更前位，``shutil.which("agent")`` 会命中 grok，
+        报出与真实原因无关的错误：
+
+            error: unexpected argument '--stream-partial-output' found
+
+        这在 14 个 executor 里是**唯一**用泛化名的（其余均为专属名）。
+        优先用专属名 ``cursor-agent``；仅当它不存在时才回退 ``agent``
+        （保持对只装了官方 ``agent`` 入口的环境兼容）。可用
+        ``CURSOR_CLI`` 显式指定覆盖。
+        """
+        override = (env.get("CURSOR_CLI") or "").strip()
+        if override:
+            return override
+        for name in ("cursor-agent", "agent"):
+            if shutil.which(name):
+                return name
+        return "cursor-agent"        # 都没有 → 交 runner 报 command not found
+
     def build_args(message: str, session_id: str, env: Dict[str, str], _ctx: Optional[Dict[str, Any]] = None) -> List[str]:
         args = [
-            "agent", "-p", message,
+            _resolve_cursor_cli(env), "-p", message,
             "--output-format", "stream-json",
             "--stream-partial-output",
         ]
