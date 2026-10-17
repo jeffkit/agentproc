@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.10`
+**文档修订：** `1.11`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -653,6 +653,8 @@ agent **MAY** 为 UI / 策略包含的可选字段：
 
 其他非零码视为通用错误。进程非零退出且未发 `error` 事件时，bridge **SHOULD** 向用户发送一条通用错误消息。
 
+进程非零退出且未发 `error` 事件时，bridge **SHOULD** 用捕获到的 stderr 里的**诊断行**构造上报的 `RunResult.error`，而不是取固定长度的头部窗口。agent 常在 stderr 第一行打启动横幅——`recursive` 会打 `checkpoint: per-turn snapshots active`——头部截断于是只报横幅、丢掉更后面真正的失败原因（LLM 瞬时 HTTP 错误、panic 等）。命中已知失败形态（`transient HTTP error`、`429`、`5xx`、`panic`、`thread '…' panicked`、`error` / `exception` / `fatal` / `failed`）的行 **SHOULD** 优先（保序、去重、有上限）；一条都不命中时，**SHOULD** 带上 stderr 末 N 行并显式标注「未必是根因」，而不是静默丢弃。Python 参考 runner 已实现（`extract_failure_diagnostics`）；Node 与 Rust runner 仍取头部窗口。无线上变更。
+
 ### 多个失败信号并存时的优先级
 
 一个 turn 可能产生不止一个失败信号——例如 agent 发出 `error` 后 bridge 在它退出前因超时 kill 它，或 agent 发出 `error` 后非零退出。bridge 按以下优先级（从高到低）决定最终退出码：
@@ -880,6 +882,8 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 ## 变更日志
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
+
+- **doc 1.11** —— 退出码一节新增「非零退出的错误上报」规则：bridge **SHOULD** 从捕获的 stderr 中提取**诊断行**，而不是截取固定长度的头部窗口——启动横幅（如 `recursive` 的 `checkpoint: per-turn snapshots active`）会把窗口占满而真因被丢弃；一条诊断行都不命中时，**SHOULD** 带上 stderr 末 N 行并显式标注「未必是根因」。Python 参考 runner 已实现（`extract_failure_diagnostics`）；Node 与 Rust 的一致性待补。无 wire 变更。
 
 - **doc 1.10** —— In-process executor 下新增[消息传递与 argv](#消息传递与-argv)小节，分两部分。(a) 当被包装的 CLI 能从 stdin 读 prompt 时，消息 **MUST** 留在 argv 之外；[Executor 接口](#executor-接口)新增可选的 `buildInitialStdin(message, sessionId) -> string | null`，runner 在 spawn 前每轮调用一次，返回非 `null` 时写入 CLI 的 stdin 并关闭管道。它属于 turn 内闭合契约，也属于 `makeHandlers()` 工厂返回值；同一小节记录：`permission: true` 模式下管道保持打开，只在该 runner 于这条路径上服务审批通道时成立（今为 Rust——Python 与 Node 的 executor 路径没有审批通道，那里 `permission: true` 的轮次会阻塞到超时）。`claude-code` 的**两种**模式都改为这样做（`claude --print --input-format stream-json`，一行 stream-json 用户消息走 stdin），不再把 `<message>` 放进 argv。(b) 对只接受把 prompt 作为命令行参数传入的 CLI，executor 路径仍是明文、有限豁免；该节记录三个后果（消息可经 `ps(1)` 读到；OS argv 长度上限；以 `-` 开头的消息被当作 flag 解析）与部署前提（独占宿主 / 容器 / VM）。规范性规则：当消息是位置参数时，`--` **必须**紧邻其前，且所有 flag **必须**置于 `--` 之前。设计原则中的 argv 条目现指向该豁免。无 wire 变更。「超时处理」现在写明**对谁**发信号、bridge **可以等多久**。两步击杀（以及 bridge 侧其余每一次终止——协作式取消、Ctrl-C、先于限额到期的 bridge 内部 CLI 超时）针对 agent 的整个**进程组**，而非直接子进程：agent 的助手进程（shell 工具调用、构建、sub-agent）继承 agent 的凭据与 workspace 写权限，此前会被留下继续运行且无人回收。把 CLI 跑在自己进程里的 bridge **MUST** 先把该 CLI 放进它自己的进程组再对组发信号；CLI 与 bridge 共组的 bridge，则由调用方的组信号覆盖——前提是它转发该信号。自行维护孤儿记录的实现（Python SDK 的 run lock）**MUST** 只在组击杀之后清除该记录。继承 stdio 新增规则：agent 的 stdout/stderr 只有在每一个持有者都退出后才到 EOF，故存活的助手进程可能让该轮 turn 永远挂起——直接子进程退出后，bridge **MAY** 再 drain 一个短暂有界的窗口（参考 runner 取 1 秒），此后 **MUST** 放弃管道并以已收到的输出结束该轮。无线协议变更——stdin/stdout 上的字节不变；无新增退出码或事件。
 - **doc 1.9** —— 对实现本已携带的字段做一次卫生整理：把 `from_user`（平台发送者标识）记为 turn 的**可选**字段——它属于应用层关注点，bridge **MAY** 发送，缺省或 `""` 表示未知；[Executor 接口](#executor-接口)表新增 `getSessionId`（`plain` executor 的会话 id，在 `buildArgs` 中铸造、进程退出后由 runner 读取），同时消除 [`plain` executor](#plain-executor) 小节里与之矛盾的表述——纯文本 CLI executor 的会话连续性在**接口内**完成，而非另建 run 循环。版本治理新增 SHOULD：读取到 `protocol_version` 与自身版本不同的 turn 时，实现向 stderr 写一条同时含两个版本字符串的诊断并 best-effort 继续（永不作为兼容闸门，永不改变行为）。SDK 侧：三个 SDK 的 `on_partial` / `onPartial` 回调第二参统一为 partial 的 `role`（缺省 = 无 role）。无线协议变更——stdin/stdout 上的字节不变。

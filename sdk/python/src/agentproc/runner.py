@@ -83,6 +83,8 @@ __all__ = [
     "expand_path",
     "STDERR_DIAGNOSTICS",
     "diagnose_stderr_failure",
+    "FAILURE_DIAGNOSTIC_PATTERNS",
+    "extract_failure_diagnostics",
     "EXECUTORS",
     "executor_names",
 ]
@@ -543,6 +545,62 @@ def diagnose_stderr_failure(stderr_text: str) -> str:
         if m:
             return _format_hint(rule["hint"], m)
     return ""
+
+
+# Failure-reporting "diagnostic line" patterns (plaita#121). On a non-zero
+# executor exit the *head* of stderr is often a startup banner — recursive
+# prints "checkpoint: per-turn snapshots active" as its first stderr line —
+# which fills a fixed-size head window while the real cause (an LLM transient
+# HTTP error, a panic, …) sits further down. Instead of truncating blindly we
+# scan for lines that look diagnostic; only when nothing matches do we fall
+# back to the stderr tail with an explicit "not necessarily the cause" note.
+# This text flows to the node error, the fix-loop prompt and failure-*.log.
+FAILURE_DIAGNOSTIC_PATTERNS: List["re.Pattern[str]"] = [
+    re.compile(r"transient HTTP error", re.IGNORECASE),
+    re.compile(r"\b429\b"),
+    re.compile(r"\b5\d{2}\b"),  # 5xx status (status=500 / HTTP 503)
+    re.compile(r"thread '[^']*' panicked"),  # Rust panic
+    re.compile(r"\bpanic(?:ked)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:error|exception|fatal|failed|failure)\b", re.IGNORECASE),
+]
+FAILURE_TAIL_LINES = 20
+FAILURE_MAX_DIAGNOSTIC_LINES = 10
+
+
+def extract_failure_diagnostics(
+    stderr_text: str,
+    max_tail_lines: int = FAILURE_TAIL_LINES,
+) -> str:
+    """Pick the useful failure signal out of an executor's stderr (plaita#121).
+
+    Returns the diagnostic-looking lines (order preserved, de-duplicated,
+    capped) when any match ``FAILURE_DIAGNOSTIC_PATTERNS``; otherwise the last
+    ``max_tail_lines`` lines prefixed with an explicit
+    "not necessarily the cause" marker. Falls back to ``"(no stderr)"`` for
+    empty input so the caller keeps the historical wording.
+    """
+    lines = [ln.rstrip() for ln in (stderr_text or "").splitlines() if ln.strip()]
+    if not lines:
+        return "(no stderr)"
+    hits: List[str] = []
+    seen = set()
+    for line in lines:
+        if not any(p.search(line) for p in FAILURE_DIAGNOSTIC_PATTERNS):
+            continue
+        key = line.strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        hits.append(line)
+        if len(hits) >= FAILURE_MAX_DIAGNOSTIC_LINES:
+            break
+    if hits:
+        return "\n".join(hits)
+    tail = lines[-max_tail_lines:] if max_tail_lines > 0 else lines
+    return (
+        "(no diagnostic line matched; last {n} stderr lines follow — "
+        "not necessarily the cause)\n{body}"
+    ).format(n=len(tail), body="\n".join(tail))
 
 
 # ---------------------------------------------------------------------------
@@ -1347,7 +1405,7 @@ def run_via_executor(
     if exit_code != 0:
         result.error = (
             f"executor '{cli_name}' exited {exit_code}: "
-            + (stderr_text[:500] or "(no stderr)")
+            + extract_failure_diagnostics(stderr_text)
         )
         result.exit_code = exit_code
         if options.on_error:
