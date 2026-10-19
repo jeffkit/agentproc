@@ -62,7 +62,21 @@ func main() {
 （error + 非零退出，绝不静默回退 `--dangerously-skip-permissions`）；
 `AGENTPROC_AUTO_APPROVE=0` 拒绝任何 auto-approve argv。
 
+## Workspace run lock
+
+设置 `RunOptions.RunLockKey`（通常=workspace 绝对路径）即可记录在跑 agent
+进程组的「遗言」；接管方开工前调 `CleanupStaleRun`——孤儿（身份核实通过且
+spawner 已死）整组击杀后放行；宿主仍活着的健康 agent 返回 `RunLockBusy`
+（绝不盲杀）。
+
+## CLI
+
+`go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest` 构建
+`agentproc` 二进制——`agentproc --profile <yaml> --prompt "hi"` 与
+`agentproc hub list|show|install|run` 子命令，输出语义与退出码和 Python/Node
+CLI 一致。
+
 ## 边界说明
 
-- 仅库（同 Rust SDK）：无 `agentproc` CLI、无 hub 拉取。
-- Python SDK 的 workspace run lock 未实现；进程组契约完全一致。
+- hub 差异：Go CLI 无内置 profile 副本——`hub` 命令走 jsDelivr CDN 并缓存
+  24h（`AGENTPROC_HUB_REF` 钉住 ref、按 ref 失效），首次使用需要网络。

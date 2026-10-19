@@ -67,8 +67,23 @@ mid-turn approval channel is refused (error + non-zero exit, never a silent
 `--dangerously-skip-permissions`), and `AGENTPROC_AUTO_APPROVE=0` refuses
 any auto-approve argv.
 
+## Workspace run lock
+
+Set `RunOptions.RunLockKey` (usually the workspace absolute path) to record a
+"last will" of the running agent group; a takeover calls `CleanupStaleRun`
+before starting on the same workspace — orphans (verified identity + dead
+spawner) get their whole group killed, while a healthy agent whose host is
+still alive yields `RunLockBusy` (never blind-killed).
+
+## CLI
+
+`go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest` builds
+the `agentproc` binary — `agentproc --profile <yaml> --prompt "hi"` and the
+`agentproc hub list|show|install|run` subcommands, with the same output
+semantics and exit codes as the Python/Node CLIs.
+
 ## Scope notes
 
-- Library-only (like the Rust SDK): no `agentproc` CLI, no hub fetch.
-- The Python SDK's workspace run lock is not implemented; the process-group
-  contract is identical.
+- Hub divergence: the Go CLI has no bundled profile copy — `hub` commands
+  resolve via the jsDelivr CDN and cache for 24h (`AGENTPROC_HUB_REF` pins a
+  ref and invalidates the cache per ref), so first use needs network.

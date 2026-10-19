@@ -116,12 +116,12 @@ type PermissionDecision struct {
 // classified events carry Kind/Line/Seq; bridge-level decisions carry
 // Decision (timeout | sigterm_process_group | sigkill_process_group).
 type JournalEntry struct {
-	Seq        int
-	Ts         string
-	Kind       string
-	Line       string
-	Decision   string
-	BudgetSecs float64
+	Seq        int     `json:"seq"`
+	Ts         string  `json:"ts"`
+	Kind       string  `json:"kind,omitempty"`
+	Line       string  `json:"line,omitempty"`
+	Decision   string  `json:"decision,omitempty"`
+	BudgetSecs float64 `json:"budget_secs,omitempty"`
 }
 
 // RunOptions configures one run.
@@ -147,6 +147,13 @@ type RunOptions struct {
 	// TimeoutSecs overrides the profile timeout. 0 = use the profile value
 	// (a profile value of 0 means no host-side limit).
 	TimeoutSecs int
+	// RunLockKey (usually the workspace absolute path) turns on the "last
+	// will" run lock: after spawn the runner records pid + argv + this
+	// process's pid, so a takeover can kill-before-start the orphan group a
+	// hard-killed host left behind (CleanupStaleRun). The lock is cleared
+	// after the group kill on normal completion; early returns keep it on
+	// purpose (self-healing: the recorded pid is dead by then).
+	RunLockKey string
 	// OnJournal is the opt-in journal hook (nil = no journaling).
 	OnJournal func(JournalEntry)
 	// OnPartial is called as each partial is forwarded. role is nil when the
@@ -362,6 +369,10 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 	stdinR.Close()
 	stdoutW.Close()
 	stderrW.Close()
+
+	if opts.RunLockKey != "" {
+		WriteRunLock(opts.RunLockKey, cmd.Process.Pid, argv, 0)
+	}
 
 	// --- stdin: turn line, then EOF unless the permission channel is on ---
 	var stdinMu sync.Mutex
@@ -816,6 +827,9 @@ salvaged:
 		result.ExitCode = exitCode
 	}
 
+	if opts.RunLockKey != "" && !cancelled {
+		ClearRunLock(opts.RunLockKey)
+	}
 	result.Duration = time.Since(startedMono).Seconds()
 	return result, nil
 }
@@ -1028,6 +1042,10 @@ func RunViaExecutor(ctx context.Context, executor Executor, opts *RunOptions, pr
 	stdoutW.Close()
 	stderrW.Close()
 
+	if opts.RunLockKey != "" {
+		WriteRunLock(opts.RunLockKey, child.Process.Pid, argv, 0)
+	}
+
 	// Stderr is drained in the background so the pipe can never fill and
 	// deadlock; captured for the failure diagnostics below.
 	var stderrBuf bytes.Buffer
@@ -1202,6 +1220,10 @@ drain:
 	stderrText := stderrBuf.String()
 	stderrMu.Unlock()
 	stderrText = strings.TrimSpace(stderrText)
+
+	if opts.RunLockKey != "" && !timedOut && !cancelled {
+		ClearRunLock(opts.RunLockKey)
+	}
 
 	if cancelled {
 		result.ExitCode = ExitCancelled

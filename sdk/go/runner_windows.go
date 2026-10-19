@@ -36,6 +36,13 @@ func signalProcessGroup(cmd *exec.Cmd, _ syscallSignal) {
 	}
 }
 
+const processGroupsSupported = false
+
+const syscallZero = syscall.Signal(0)
+
+// killGroup is unreachable on Windows (CleanupStaleRun reports unsupported).
+func killGroup(pgid int) error { return syscall.Errno(1) }
+
 // normalizeExitCode: Windows return codes are never negative, so the mapping
 // is a no-op (mirrors the Python runner).
 func normalizeExitCode(state *os.ProcessState) int {

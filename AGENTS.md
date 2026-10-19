@@ -30,6 +30,9 @@ agentproc/
 │   └── go/                  # `github.com/jeffkit/agentproc/sdk/go` (Go module)
 │       ├── runner.go        # spawn-path engine + in-process executor path
 │       ├── executors*.go    # Executor interface, registry, built-in CLIs
+│       ├── runlock.go       # workspace run lock (kill-before-start orphan sweep)
+│       ├── hub.go           # hub client (jsDelivr CDN + 24h cache + ref pinning)
+│       ├── cmd/agentproc/   # the `agentproc` CLI (run + hub subcommands)
 │       └── *_test.go        # drives the shared conformance fixtures
 ├── examples/
 │   ├── bash/                # echo agent (smoke test)

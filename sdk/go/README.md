@@ -110,12 +110,45 @@ a silent `--dangerously-skip-permissions`) when `permission: true` meets an
 executor without `SupportsPermission()`, or when `AGENTPROC_AUTO_APPROVE` is
 off and the argv carries an auto-approve flag.
 
+## Workspace run lock
+
+For hosts that can be hard-killed (SIGKILL / OOM) — worker runtimes, long-
+lived bridges — set `RunOptions.RunLockKey` (usually the workspace absolute
+path). After spawn the runner records pid + argv + the host's own pid under
+`~/.agentproc/run-locks/` (the "last will"); on normal completion the lock is
+cleared after the group kill. A takeover calls `CleanupStaleRun(key, grace)`
+**before** starting a new agent on the same workspace: dead pid → stale,
+release; live pid with verified identity (group leader + matching command)
+and a dead spawner → orphan, the whole group is killed, then release; a live
+spawner → `RunLockBusy` (never kill a healthy agent whose host is still
+running — the issue #9 rule); unverifiable → `RunLockBusy`, human decision.
+
+## CLI
+
+`go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest` builds
+the `agentproc` binary (port of the Python/Node CLI):
+
+```bash
+agentproc --profile ./hub/echo-agent/profile.yaml --prompt "hi" [--cwd dir] [--raw] [--no-stream]
+agentproc hub list
+agentproc hub run claude-code -p "explain this" --env ANTHROPIC_API_KEY=$KEY
+agentproc hub show codex
+agentproc hub install agy
+```
+
+Output semantics match the reference CLIs: protocol events on stderr (NDJSON),
+the reply body on stdout, `agentproc:session:<id>` / `agentproc:error:<msg>`
+trailers, exit 0 / 1 / 2 (usage) / 130 (interrupted — the agent group is
+killed first). Interactive permission profiles prompt y/N on a TTY and deny
+without one.
+
 ## Scope notes
 
-- The SDK is library-only (like Rust): no CLI, no hub fetch. Compose it into
-  your own bridge binary.
-- The workspace run lock (Python SDK) is not implemented; the process-group
-  contract is identical.
+- **Hub divergence:** the Go CLI has no bundled profile copy (a Go module
+  cannot embed files outside its subtree) — `hub` commands resolve via the
+  jsDelivr CDN and cache at `~/.agentproc/cache/hub/` (24h TTL), so first
+  use needs network. `AGENTPROC_HUB_REF` pins an exact upstream version and
+  invalidates the cache per ref.
 - Modules: `gopkg.in/yaml.v3` (profile parsing) is the only dependency.
 
 ## Tests

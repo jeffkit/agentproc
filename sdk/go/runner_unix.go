@@ -52,6 +52,20 @@ func signalProcessGroup(cmd *exec.Cmd, sig syscallSignal) {
 	_ = cmd.Process.Signal(sig)
 }
 
+const processGroupsSupported = true
+
+const syscallZero = syscall.Signal(0)
+
+// killGroup SIGKILLs a verified process group (the recorded pid IS the group
+// leader). A gone group (ESRCH) is success.
+func killGroup(pgid int) error {
+	err := syscall.Kill(-pgid, syscall.SIGKILL)
+	if err == syscall.ESRCH {
+		return nil
+	}
+	return err
+}
+
 // normalizeExitCode normalises a child exit status to a spec exit code.
 // POSIX wait reports signal deaths via WaitStatus.Signaled — normalise to
 // 128 + signo (SIGINT → 130, SIGTERM → 143). A missing status (no Wait)
