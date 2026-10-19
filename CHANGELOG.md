@@ -4,7 +4,7 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.10`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (unreleased); the Rust crate is on its own track currently `0.15.0`. Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (released); the Rust crate is on its own track currently `0.15.0`. Includes runner/CLI/SDK behaviour changes.
 - **Go module version** — `sdk/go` (`github.com/jeffkit/agentproc/sdk/go`), on its own track like the Rust crate; currently `0.1.0`. Includes runner/SDK behaviour changes.
 
 ## Released
@@ -84,7 +84,9 @@ Implementation notes:
 
 Wire protocol stays `0.4` — nothing on stdin/stdout changed for the existing SDKs.
 
-### Spec / SDK 0.20.0 — unreleased
+### Spec / SDK 0.20.0 — released 2026-10-19 (tag `v0.20.0`)
+
+This publish also ships the accumulated, never-tagged 0.19.x entries below (package versions 0.17–0.19 were never cut; everything up to here rides in 0.20.0).
 
 **security(sdk): the wrapped CLI no longer sees a `-`-prefixed message as a flag (#13)**
 
@@ -97,7 +99,7 @@ Wire protocol stays `0.4` — nothing on stdin/stdout changed for the existing S
 - **Python runner (spawn path): the child's own last stdout/stderr lines are no longer dropped.** The drain threads watch the pipe with `poll()` instead of iterating `proc.stdout`, so a turn ends at "child reaped and pipe drained" rather than at "child exited". (`poll`, not `select`: `select` cannot watch a pipe fd at all on Windows — Winsock accepts sockets only — nor any fd at or above `FD_SETSIZE`; where `poll` does not exist the pre-0.20 blocking iteration is kept, ending the turn at EOF or at the join backstop, so a straggler-held tail can still be lost there but never as a drain failure.) A process the agent spawned inherits the pipe write-end and keeps that iterator blocked with the child's tail already in hand, and the post-exit epoch guard then discarded it — observed as flaky empty replies, missing session ids and empty `on_partial` sequences (~3% of fast turns lost their `result`/`partial` lines). The boundary is that probe rather than the child's exit: a straggler writing between the two is indistinguishable from the child, so its bytes count as part of the turn (they can empty `reply` through `partials_forwarded`, or have a `session_id` adopted). That window is wider than one probe interval: the probe is only consulted while the pipe is idle, so a straggler that keeps writing is read until the 1 s-per-pipe join backstop gives up on the drain thread. What is guaranteed is the other direction — once the boundary is observed the drain is over — so issue #20's "no callbacks after `run()` returns" guarantee is unchanged. Both pipe read-ends are now also released before `run()` returns even when the drain threads finished on their own (no fd-per-turn leak). Decoding stays what `text=True, errors="replace"` iteration produced (universal newlines, replacement characters). Wire protocol stays `0.4`.
 - SDK packages `0.19.0` → `0.20.0`; Rust crate `0.14.0` → `0.15.0`. Wire protocol stays `0.4` — nothing on stdin/stdout changed. Not tagged, not published.
 
-### Spec / SDK 0.19.1 — unreleased
+### Spec / SDK 0.19.1 — released as part of package 0.20.0 (tag `v0.20.0`)
 
 **Process-tree kill and the inherited-stdio hang across all three SDKs and the hub bridges (#8)**
 
@@ -111,7 +113,7 @@ The 2026-09-27 incident fix (orphaned agent CLIs still holding credentials and w
 - **Python runner — Ctrl-C clears the tree before the lock.** The spawn path's `KeyboardInterrupt` handler signalled the direct child (`proc.send_signal(SIGINT)`) and the run lock was then cleared, so a surviving subtree became invisible to the next turn's stale-orphan sweep. It now signals the whole group (`_signal_process_group(proc, signal.SIGINT)`), waits `kill_grace_secs`, escalates with `_kill_process_group`, and only then falls through to the lock clear. `_signal_process_group` also guards the `os.killpg` lookup, so the Windows path falls back to the direct child instead of raising `AttributeError`.
 - Tests: `sdk/python/tests/test_runner_lifecycle_leaks.py` (Ctrl-C group signal + ordering, spawn-path and executor-path "agent exits while a grandchild holds the pipe" non-hang tests, unterminated-tail delivery), `sdk/python/tests/test_bridges.py` (plain-CLI group kill, real process group cleared), `sdk/node/src/runner.test.js` (spawn-path and executor-path "agent exits while a grandchild holds the pipe" non-hang tests, executor-path group kill), and a new `sdk/rust/tests/drain_grace.rs`. Wire protocol stays `0.4`; nothing on stdin/stdout changed, and no new exit codes or events were introduced.
 
-### Spec / SDK 0.19.0 — unreleased
+### Spec / SDK 0.19.0 — released as part of package 0.20.0 (tag `v0.20.0`)
 
 **Protocol-surface hygiene: optional turn fields, the executor interface, and version diagnostics (#19)**
 
