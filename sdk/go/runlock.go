@@ -40,6 +40,7 @@ package agentproc
 //     (non-blocking); lock read/write work as usual.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -129,7 +130,9 @@ func WriteRunLock(key string, pid int, argv []string, spawner int) {
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(raw); err == nil {
 		_ = tmp.Close()
-		_ = os.Rename(tmpName, path)
+		if err := os.Rename(tmpName, path); err != nil {
+			_ = os.Remove(tmpName)
+		}
 	} else {
 		_ = tmp.Close()
 		_ = os.Remove(tmpName)
@@ -149,13 +152,8 @@ func absPath(p string) string {
 }
 
 func pidAlive(pid int) bool {
-	// signal 0 probes existence without delivering anything; on Windows
-	// Process.Signal(0) is unsupported, so go through FindProcess + Signal.
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscallZero) == nil
+	alive, _ := pidAliveProbe(pid)
+	return alive
 }
 
 // pidGone waits until the process no longer exists (a reaped zombie counts —
@@ -196,7 +194,10 @@ func CleanupStaleRun(key string, graceSecs float64) (CleanupStaleRunResult, erro
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return CleanupStaleRunResult{Action: "clean"}, nil
+		// Exists but unreadable: same as corrupt — sweep it so the probe
+		// does not hit the same wall on every takeover (Python parity).
+		_ = os.Remove(path)
+		return CleanupStaleRunResult{Action: "stale", Reason: "corrupt"}, nil
 	}
 	var rec runLockRecord
 	if err := json.Unmarshal(raw, &rec); err != nil || rec.PID <= 0 {
@@ -262,7 +263,9 @@ func CleanupStaleRun(key string, graceSecs float64) (CleanupStaleRunResult, erro
 // psFields returns (pgid, command) for pid via ps(1); ok=false when ps is
 // unavailable — callers must not make kill decisions on that.
 func psFields(pid int) (int, string, bool) {
-	out, err := exec.Command("ps", "-o", "pgid=,command=", "-p", strconv.Itoa(pid)).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "pgid=,command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return 0, "", false
 	}
@@ -280,7 +283,9 @@ func psFields(pid int) (int, string, bool) {
 
 // psStat returns the process state letter (first column of `ps -o stat=`).
 func psStat(pid int) (string, bool) {
-	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return "", false
 	}

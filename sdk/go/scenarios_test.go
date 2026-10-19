@@ -43,7 +43,7 @@ func TestScenarioConformance(t *testing.T) {
 			result, err := Run(t.Context(), profileRaw, &RunOptions{
 				Message:     "hi",
 				Streaming:   &streaming,
-				TimeoutSecs: 30,
+				TimeoutSecs: intPtr(30),
 				OnPartial:   func(text string, role *string) { partials = append(partials, text) },
 			})
 			if err != nil {

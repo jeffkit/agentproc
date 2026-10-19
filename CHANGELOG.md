@@ -9,6 +9,25 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Released
 
+### Go SDK 0.1.2 — released 2026-10-19 (tag `sdk/go/v0.1.2`)
+
+**fix(sdk/go): four-subagent review round — lifecycle hangs, misreported exits, and kill-safety hardening.**
+
+Independent review of `sdk/go` (protocol conformance / concurrency & lifecycle / CLI & release engineering / hub & run lock) surfaced the following, all fixed and pinned by new regression tests:
+
+- **P0 — the spawn path could hang before the watchdog armed:** the turn object was written synchronously to the child's stdin; a payload larger than the 64KB pipe buffer aimed at a child that never reads stdin blocked `Run` forever, with `timeout_secs` and cancellation unreachable. The write now happens off the calling goroutine (the graded kill later produces EPIPE), matching the executor path.
+- **P0 — an agent that closes stdout and then hangs abandoned the time limit:** the wait loop ended on stdout EOF and then blocked unboundedly on `cmd.Wait` — `timeout_secs`/`budget_secs`/`deadline` and cancellation never fired. The loop is now two-phase: EOF only stops consumption; the limit and cancel stay live until the child is reaped.
+- **P1 — a late timer/cancel could flip a finished turn to 124/125:** after `waitCh` delivered, the select kept serving the (one-shot) limit timer and `ctx.Done()`; a budget expiring just after a clean exit won the select race ~50% of the time, misreported the exit, stalled `kill_grace_secs`+2s on a consumed channel, and wrote spurious journal entries. The limit/cancel cases now leave the loop on reap, and `waitExecutorProcess` double-checks `waitCh` non-blockingly before killing. Same fix pattern covers the executor path.
+- **P1 — deadline validation hardened:** a non-string or empty `deadline` was silently dropped during normalization (spec: validation error); `Profile.Deadline` now keeps the raw value and `Run` rejects invalid ones. A space separator (`2020-01-01 00:00:00+00:00`) is tolerated, matching Python's `fromisoformat`.
+- **P1 — `RunOptions.TimeoutSecs` is now `*int`:** `nil` defers to the profile; an explicit `0` disables the limit — the Python/Node `timeout_secs=0` semantics the plain int could not express. The CLI `--timeout 0` follows.
+- **P1 — run-lock kill safety:** `pidAlive` treated a foreign-UID process as dead (`kill(pid,0)` → EPERM), which would let a takeover sweep a healthy agent's lock and start a second agent on the same workspace; EPERM now classifies as alive, mirroring the Python module. `ps` probes gained the reference's 5s timeout; an unreadable lock file sweeps as `stale/corrupt` instead of reporting `clean`; the lock-write temp file is cleaned up on rename failure.
+- **P1 — hub hardening:** profile names are validated (`^[A-Za-z0-9][A-Za-z0-9._-]*$`, no `..`) before they reach the cache directory (`os.RemoveAll`), the CDN URL, or install destinations; a future-dated `.cache-meta.json` counts as a cache miss (the 24h TTL stays the recovery bound for a poisoned cache); CDN response bodies are read with a 1MB cap.
+- **P2s:** an empty `usage` object (`{}`) no longer lands on `RunResult.Usage` (first *non-empty* wins, Python truthiness parity); a whitespace-padded but parseable `permission_request` id now gets the deny response the spec asks for (stripped, as Python does); the `OnPermission` dispatcher claims the request id atomically so a slow allow can no longer double-answer after the kill path denied; permission-response writes carry a 2s write deadline so `denyPending` can never hold the stdin mutex past the kill sequence; the executor path no longer leaks the parent's `stdinR` fd per turn; the CLI surfaces flag-parse errors instead of a misleading "--profile is required", distinguishes SIGINT (130) from SIGTERM (143) per the spec table, prints `agentproc:error:turn timed out` on a timeout exit, and serializes interactive permission answers through one shared stdin reader.
+- **cli.yml:** release creation is idempotent on re-run (`gh release view` → `upload --clobber`), artifacts use `overwrite: true`, dispatch builds are pinned with `--target "$GITHUB_SHA"`, and `permissions: contents: write` is scoped to the release job only. Release notes now advertise `go install …@latest` (the CLI tag series does not resolve as a module version).
+- **Docs:** the CLI pages (EN+ZH) drop the unimplemented `--from`, correct `--raw` to its actual behavior (quiet mode, not verbatim piping), state the real CLI exit codes (0/1/2/130/143, timeouts folded to 1), and document `--image-url`/`--file-url`.
+
+`go test -race` full suite green; eight new regression tests pin the fixed behaviors. Wire protocol stays `0.4`.
+
 ### Go CLI release pipeline — released 2026-10-19 (first tag `agentproc-cli/v0.1.1`)
 
 **feat(sdk/go): the `agentproc` Go CLI gets a release form — prebuilt binaries + honest version reporting.**

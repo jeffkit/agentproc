@@ -370,3 +370,128 @@ func TestHistoryHelpers(t *testing.T) {
 		t.Fatalf("empty session load should be a no-op, got %v", err)
 	}
 }
+
+func TestTimeoutBoundsAnAgentThatClosesStdoutAndHangs(t *testing.T) {
+	requireExecable(t)
+	dir := t.TempDir()
+	// Regression (review round 1): the agent closes stdout and keeps living.
+	// The old loop broke on EOF and then blocked on Wait unbounded — the
+	// time limit never fired and Run hung for the full sleep.
+	agent := filepath.Join(dir, "agent.sh")
+	body := "#!/usr/bin/env bash\nexec 1>&- 2>&-\nsleep 30\n"
+	if err := os.WriteFile(agent, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	result, err := Run(t.Context(), map[string]any{
+		"command":         agent,
+		"timeout_secs":    1,
+		"kill_grace_secs": 1,
+	}, &RunOptions{Message: "hi"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !result.TimedOut || result.ExitCode != ExitTimeout {
+		t.Fatalf("expected timeout after EOF, got %+v", result)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("EOF-then-hang took %s — the limit was abandoned again", elapsed)
+	}
+}
+
+func TestLateTimerDoesNotFlipAFinishedTurn(t *testing.T) {
+	requireExecable(t)
+	dir := t.TempDir()
+	// Regression (review round 1): the child exits cleanly just before the
+	// deadline while a grandchild holds the stdout pipe; the still-armed
+	// timer used to win the select race and report 124 (with a dead stall).
+	agent := filepath.Join(dir, "agent.sh")
+	body := "#!/usr/bin/env bash\n" +
+		"sleep 30 &\n" +
+		"echo '{\"type\":\"result\",\"text\":\"done\",\"session_id\":\"s-1\"}'\n" +
+		"exit 0\n"
+	if err := os.WriteFile(agent, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	result, err := Run(t.Context(), map[string]any{
+		"command":         agent,
+		"timeout_secs":    1,
+		"kill_grace_secs": 1,
+	}, &RunOptions{Message: "hi"})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.TimedOut || result.ExitCode != 0 {
+		t.Fatalf("natural exit misreported: %+v", result)
+	}
+	if result.Reply != "done" {
+		t.Fatalf("reply %q", result.Reply)
+	}
+	if elapsed := time.Since(start); elapsed > 6*time.Second {
+		t.Fatalf("drain took %s — killSequence stalled on a consumed waitCh", elapsed)
+	}
+}
+
+func TestExplicitZeroTimeoutDisablesTheLimit(t *testing.T) {
+	requireExecable(t)
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "agent.sh")
+	// Profile says 1s; the explicit nil-able option 0 must disable it (the
+	// turn is then ended by ctx cancel, not by a 124 at 1s).
+	body := "#!/usr/bin/env bash\necho '{\"type\":\"result\",\"text\":\"late\"}'\nsleep 2\n"
+	if err := os.WriteFile(agent, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() {
+		time.Sleep(1500 * time.Millisecond)
+		cancel()
+	}()
+	result, err := Run(ctx, map[string]any{
+		"command":         agent,
+		"timeout_secs":    1,
+		"kill_grace_secs": 1,
+	}, &RunOptions{Message: "hi", TimeoutSecs: intPtr(0)})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if result.TimedOut || result.ExitCode != ExitCancelled {
+		t.Fatalf("explicit 0 must disable the limit: %+v", result)
+	}
+	if result.Reply != "late" {
+		t.Fatalf("reply %q — salvage lost the result", result.Reply)
+	}
+}
+
+func TestDeadlineNonStringIsAValidationError(t *testing.T) {
+	// Regression (review round 1): a non-string deadline used to be dropped
+	// during normalization — the spec requires a validation error.
+	_, err := Run(t.Context(), map[string]any{"command": "true", "deadline": 12345}, &RunOptions{Message: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "ISO-8601") {
+		t.Fatalf("non-string deadline must be rejected, got %v", err)
+	}
+	// An empty string is also invalid (Python fromisoformat parity).
+	_, err = Run(t.Context(), map[string]any{"command": "true", "deadline": ""}, &RunOptions{Message: "hi"})
+	if err == nil || !strings.Contains(err.Error(), "ISO-8601") {
+		t.Fatalf("empty deadline must be rejected, got %v", err)
+	}
+	// A space separator is tolerated (Python fromisoformat parity).
+	requireExecable(t)
+	dir := t.TempDir()
+	agent := filepath.Join(dir, "agent.sh")
+	if err := os.WriteFile(agent, []byte("#!/usr/bin/env bash\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(t.Context(), map[string]any{
+		"command":         agent,
+		"deadline":        "2020-01-01 00:00:00+00:00",
+		"kill_grace_secs": 1,
+	}, &RunOptions{Message: "hi"})
+	if err != nil {
+		t.Fatalf("space-separated deadline rejected: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("past deadline should expire: %+v", result)
+	}
+}

@@ -43,6 +43,17 @@ const syscallZero = syscall.Signal(0)
 // killGroup is unreachable on Windows (CleanupStaleRun reports unsupported).
 func killGroup(pgid int) error { return syscall.Errno(1) }
 
+// pidAliveProbe: Windows has no usable existence probe without extra
+// dependencies (FindProcess succeeds for dead pids); CleanupStaleRun reports
+// "unsupported" before any kill decision, so this never gates a kill.
+func pidAliveProbe(pid int) (bool, error) {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false, err
+	}
+	return p.Signal(syscallZero) == nil, nil
+}
+
 // normalizeExitCode: Windows return codes are never negative, so the mapping
 // is a no-op (mirrors the Python runner).
 func normalizeExitCode(state *os.ProcessState) int {

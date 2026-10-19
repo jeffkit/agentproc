@@ -171,7 +171,7 @@ func TestPartialRoleConformance(t *testing.T) {
 			var seen []call
 			opts := &RunOptions{
 				Message:     "hello",
-				TimeoutSecs: 10,
+				TimeoutSecs: intPtr(10),
 				OnPartial: func(text string, role *string) {
 					seen = append(seen, call{text, role})
 				},

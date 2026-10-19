@@ -105,7 +105,13 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 |------|-------------|
 | `--session <id>` | Previous session id for multi-turn continuity |
 | `--session-name <name>` | Human-readable session name (default: `default`) |
-| `--from <user>` | Sender identifier |
+
+### Attachments
+
+| Flag | Description |
+|------|-------------|
+| `--image-url <url>` | Image attachment URL (carried in the turn's `attachments`) |
+| `--file-url <url>` | File attachment URL (carried in the turn's `attachments`) |
 
 ### Execution
 
@@ -113,7 +119,7 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 |------|-------------|
 | `--cwd <path>` | Override `profile.cwd`. Relative paths resolve against the profile's directory. In `hub run`, defaults to your current directory. |
 | `--env KEY=VALUE` | Extra env var (repeatable) |
-| `--timeout <secs>` | Override `profile.timeout_secs` |
+| `--timeout <secs>` | Override `profile.timeout_secs` (`0` = no limit) |
 | `--journal <path>` | Append an NDJSON event/decision journal to `<path>` (opt-in; off by default, never written to stdout) |
 | `--no-stream` | Disable streaming (ignore `{"type":"partial"}` events) |
 
@@ -123,7 +129,7 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 |------|-------------|
 | `--verbose` | Forward protocol lines to stderr (default) |
 | `--quiet` | Suppress protocol lines on stderr |
-| `--raw` | Don't parse stdout; forward agent output verbatim |
+| `--raw` | Quiet mode: only print the final reply body (no live events on stderr) |
 | `--stdin` | Read prompt from stdin instead of `--prompt` |
 
 ### Other
@@ -139,9 +145,11 @@ In `--profile` mode, `-p` is the short form of `--profile`. In `hub run` mode, s
 
 | Stream | Content |
 |--------|---------|
-| stderr | NDJSON events (`{"type":"partial"}`, `{"type":"result"}`, `{"type":"error"}`; optional `session_id` on events) in real time |
-| stdout | Final reply body (from `{"type":"result"}` / streaming `partial`s), printed after the agent exits |
-| exit | `0` success · `1` error · `124` timeout (per spec) |
+| stderr | NDJSON events as they arrive (`{"type":"partial"}`, `{"type":"error"}`; session ids via the `agentproc:session:<id>` trailer) |
+| stdout | Final reply body, printed after the agent exits |
+| exit | `0` success · `1` error (including timeouts) · `2` usage · `130` SIGINT / `143` SIGTERM (the agent group is killed first) |
+
+(The underlying `RunResult.ExitCode` distinguishes further — `124` timeout, `125` cancelled — but the CLIs fold every failure to `1`, matching the reference Python/Node CLIs.)
 
 The final session id is also printed on stderr as `agentproc:session:<id>`, so shell scripts can capture it:
 
@@ -153,10 +161,10 @@ agentproc -p prof.yaml --prompt "follow up" --session "$session"
 
 ### `--raw` mode
 
-Don't parse stdout at all — forward the agent's stdout verbatim. Useful for piping the agent's raw output to another tool, or for debugging bridge scripts in isolation.
+Quiet mode: suppress the live event echo on stderr and print only the final reply body to stdout. (All CLIs still run the full protocol parser — the reply is the assembled result, not raw agent bytes.)
 
 ```bash
-agentproc -p prof.yaml --prompt "hi" --raw | some-other-tool
+agentproc -p prof.yaml --prompt "hi" --raw
 ```
 
 ## Examples
@@ -204,6 +212,6 @@ The CLI is a thin wrapper over the SDK's `run()` function in [`sdk/node/src/runn
 - **Env injection**: the profile `env` block (with `${VAR}` expansion gated by `env_allowlist`) plus a fixed infra set (`PATH`/`HOME`/`TERM`/…). `--env KEY=VALUE` adds per-run extras.
 - **stdout classification**: each line is a JSON object dispatched on `type` — `{"type":"partial"}` (forwarded when `streaming: true`), `{"type":"result"}` (terminal reply body; optional `session_id` / `usage`), `{"type":"error"}` (fails the turn). `session_id` is a field on events (first non-empty persisted; early omit OK; SHOULD attach once known). Non-JSON / unknown `type` lines are logged and ignored.
 - **Timeout handling**: SIGTERM → `kill_grace_secs` (default 5s) → SIGKILL, all three targeted at the agent's whole **process group** (so a shell tool call or sub-agent the CLI spawned dies with it), not just the direct child. Exit code 124. The limit itself is the earliest expiry of the profile's `timeout_secs`, `budget_secs`, and `deadline`. If the agent exits while a helper still holds its stdout/stderr open, the run still ends: the pipes get a 1s drain window and are then abandoned (with a stderr warning) instead of hanging the turn.
-- **Exit codes**: 0 success · 1 error (including when `{"type":"error"}` was emitted) · 124 timeout.
+- **Exit codes**: 0 success · 1 error (including when `{"type":"error"}` was emitted, and including timeouts — the runner's 124 surfaces in `RunResult.ExitCode`, the CLI folds it to 1).
 
 If you're writing your own bridge in another language, [`runner.js`](https://github.com/jeffkit/agentproc/blob/main/sdk/node/src/runner.js) is the spec in code form.

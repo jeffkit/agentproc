@@ -88,6 +88,8 @@ func normalizeJSON(t *testing.T, v any) any {
 	return out
 }
 
+func intPtr(i int) *int { return &i }
+
 func runOptsFor(opts *RunOptions) *RunOptions {
 	if opts == nil {
 		return &RunOptions{}

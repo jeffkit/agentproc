@@ -44,7 +44,10 @@ type Profile struct {
 	// wins with TimeoutSecs and Deadline); nil = absent.
 	BudgetSecs *float64
 	// Deadline is the optional absolute ISO-8601 timestamp (timezone-aware).
-	Deadline string
+	// Kept raw: a value that is present but not a valid timestamp string is
+	// a profile validation error at Run time (spec: MUST NOT be silently
+	// ignored), never dropped during normalization.
+	Deadline any
 	// Streaming forwards {"type":"partial"} events in real time. Default true.
 	Streaming bool
 }
@@ -234,7 +237,7 @@ func NormalizeProfile(raw map[string]any) (*Profile, error) {
 		b := toFloat(src["budget_secs"])
 		p.BudgetSecs = &b
 	}
-	if d, ok := src["deadline"].(string); ok && d != "" {
+	if d, ok := src["deadline"]; ok && d != nil {
 		p.Deadline = d
 	}
 
@@ -258,10 +261,12 @@ func ParseDeadline(value any) (float64, error) {
 	if !ok {
 		return 0, errors.New("profile.deadline must be an ISO-8601 timestamp string")
 	}
-	if strings.TrimSpace(s) == "" {
-		return 0, nil
+	// Python's fromisoformat accepts a space as the date/time separator —
+	// normalize once so profiles portable across SDKs keep working.
+	text := strings.ReplaceAll(strings.TrimSpace(s), " ", "T")
+	if text == "" || text == "T" {
+		return 0, fmt.Errorf("profile.deadline must be a timezone-aware ISO-8601 timestamp, got %q", value)
 	}
-	text := strings.TrimSpace(s)
 	if strings.HasSuffix(text, "Z") || strings.HasSuffix(text, "z") {
 		text = text[:len(text)-1] + "+00:00"
 	}

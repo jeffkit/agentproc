@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -94,6 +95,20 @@ func hubCacheRoot() string {
 	return filepath.Join(home, ".agentproc", "cache", "hub")
 }
 
+// hubNameRe is the profile-name allowlist: hub directories are simple
+// identifiers. Validation closes the path-traversal door before a name
+// reaches HubCacheDir (os.RemoveAll on install/refetch) or the CDN URL.
+var hubNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$`)
+
+// validateProfileName rejects anything that is not a plain hub directory
+// name (path separators, "..", leading dots, control characters).
+func validateProfileName(name string) *HubError {
+	if name == "" || strings.Contains(name, "..") || !hubNameRe.MatchString(name) {
+		return &HubError{Message: fmt.Sprintf("invalid profile name %q (must be a plain hub directory name)", name)}
+	}
+	return nil
+}
+
 // HubCacheDir is the local cache path for a profile.
 func HubCacheDir(name string) string {
 	return filepath.Join(hubCacheRoot(), name)
@@ -115,6 +130,12 @@ func cacheAgeSecs(name string) (float64, bool) {
 		return 0, false
 	}
 	if orDefault(meta.Ref, "main") != HubRef() {
+		return 0, false
+	}
+	if meta.FetchedAt > float64(time.Now().Unix()+120) {
+		// A timestamp in the future would freeze the cache as fresh
+		// indefinitely — treat it as a miss so the TTL stays the recovery
+		// bound for a poisoned cache.
 		return 0, false
 	}
 	age := time.Since(time.Unix(int64(meta.FetchedAt), 0)).Seconds()
@@ -140,7 +161,8 @@ func httpGet(url string) ([]byte, *HubError) {
 		return nil, &HubError{Message: "could not reach the hub CDN", Hint: networkHint}
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	// Bounded read: a hostile CDN/proxy error page must not OOM the bridge.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, &HubError{Message: "could not read the hub CDN response", Hint: networkHint}
 	}
@@ -425,6 +447,9 @@ func ensureSharedCached(refresh bool, onLog func(string)) *HubError {
 // its path. Resolution: fresh cache (younger than 24h, same hub ref) →
 // jsDelivr CDN. `_shared/` is populated alongside.
 func FetchProfile(name string, refresh bool, onLog func(string)) (string, *HubError) {
+	if herr := validateProfileName(name); herr != nil {
+		return "", herr
+	}
 	if refresh {
 		clearTreeCache()
 	}
@@ -571,6 +596,9 @@ func ShowReadme(name string, refresh bool, onLog func(string)) (string, *HubErro
 // InstallProfile copies a cached profile into targetDir/<name>/, along with
 // `_shared/` (the bridge scripts import it via a sibling path).
 func InstallProfile(name string, targetDir string, refresh bool, onLog func(string)) (string, *HubError) {
+	if herr := validateProfileName(name); herr != nil {
+		return "", herr
+	}
 	src, herr := FetchProfile(name, refresh, onLog)
 	if herr != nil {
 		return "", herr

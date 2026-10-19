@@ -20,7 +20,7 @@ package agentproc
 
 // SDKVersion is the Go SDK's own version track (independent from the Python,
 // Node, and Rust packages, which are released separately).
-const SDKVersion = "0.1.1"
+const SDKVersion = "0.1.2"
 
 // PROTOCOL_VERSION is re-exported from runner.go where the single literal
 // definition lives (mirrors the Python/Node convention that the runner owns

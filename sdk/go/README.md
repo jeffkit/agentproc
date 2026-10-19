@@ -143,9 +143,10 @@ agentproc hub install agy
 
 Output semantics match the reference CLIs: protocol events on stderr (NDJSON),
 the reply body on stdout, `agentproc:session:<id>` / `agentproc:error:<msg>`
-trailers, exit 0 / 1 / 2 (usage) / 130 (interrupted — the agent group is
-killed first). Interactive permission profiles prompt y/N on a TTY and deny
-without one.
+trailers, exit 0 / 1 / 2 (usage) / 130 (SIGINT) / 143 (SIGTERM — the agent
+group is killed first in every interrupt case). `--timeout 0` disables the
+time limit, matching the profile field. Interactive permission profiles
+prompt y/N on a TTY and deny without one.
 
 ## Scope notes
 

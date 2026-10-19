@@ -27,7 +27,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"gopkg.in/yaml.v3"
@@ -62,6 +64,41 @@ type envFlags []string
 func (e *envFlags) String() string     { return strings.Join(*e, ",") }
 func (e *envFlags) Set(v string) error { *e = append(*e, v); return nil }
 
+// timeoutFlag distinguishes "--timeout 0" (explicitly no limit, matching the
+// Python/Node CLIs) from "--timeout absent" (use the profile value).
+type timeoutFlag struct {
+	set bool
+	val int
+}
+
+func (t *timeoutFlag) String() string { return fmt.Sprintf("%d", t.val) }
+func (t *timeoutFlag) Set(v string) error {
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return err
+	}
+	t.set, t.val = true, n
+	return nil
+}
+
+// stdinReader is the shared buffered reader for interactive permission
+// answers — a fresh reader per prompt would discard buffered input and hang
+// the second approval of a multi-request turn.
+var (
+	stdinReader   = bufio.NewReader(os.Stdin)
+	stdinReaderMu sync.Mutex
+)
+
+func readPermissionAnswer() (string, error) {
+	stdinReaderMu.Lock()
+	defer stdinReaderMu.Unlock()
+	line, err := stdinReader.ReadString('\n')
+	if err != nil && line == "" {
+		return "", err
+	}
+	return line, nil
+}
+
 type cliOptions struct {
 	profile     string
 	prompt      string
@@ -71,7 +108,7 @@ type cliOptions struct {
 	fileURL     string
 	cwd         string
 	env         envFlags
-	timeout     int
+	timeout     timeoutFlag
 	journal     string
 	noStream    bool
 	verbose     bool
@@ -92,7 +129,7 @@ func newFlagSet(fs *flag.FlagSet, opts *cliOptions) {
 	fs.StringVar(&opts.fileURL, "file-url", "", "file attachment URL")
 	fs.StringVar(&opts.cwd, "cwd", "", "override profile.cwd")
 	fs.Var(&opts.env, "env", "extra env var KEY=VALUE (repeatable)")
-	fs.IntVar(&opts.timeout, "timeout", 0, "override profile.timeout_secs")
+	fs.Var(&opts.timeout, "timeout", "override profile.timeout_secs (0 = no limit)")
 	fs.StringVar(&opts.journal, "journal", "", "append an NDJSON event journal to a file")
 	fs.BoolVar(&opts.noStream, "no-stream", false, "disable streaming (ignore partial events)")
 	fs.BoolVar(&opts.verbose, "verbose", false, "forward protocol lines to stderr (default)")
@@ -117,7 +154,12 @@ func run(argv []string) int {
 	fs := flag.NewFlagSet("agentproc", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	newFlagSet(fs, opts)
-	_ = fs.Parse(argv)
+	if err := fs.Parse(argv); err != nil && err != flag.ErrHelp {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr)
+		showHelp()
+		return 2
+	}
 
 	if opts.version {
 		fmt.Printf("agentproc %s (protocol %s)\n", cliVersion(), agentproc.PROTOCOL_VERSION)
@@ -177,6 +219,11 @@ func runAgentWithProfile(profilePath string, opts *cliOptions) int {
 		v := false
 		streaming = &v
 	}
+	var timeoutOverride *int
+	if opts.timeout.set {
+		v := opts.timeout.val
+		timeoutOverride = &v
+	}
 
 	var attachments []any
 	if opts.imageURL != "" {
@@ -187,9 +234,21 @@ func runAgentWithProfile(profilePath string, opts *cliOptions) int {
 	}
 
 	// Ctrl-C / SIGTERM: cancel the run context — the runner performs the
-	// graded group kill and returns 125; the CLI reports 130.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// graded group kill and returns 125; the CLI reports 130 (SIGINT) or
+	// 143 (SIGTERM) per the spec exit-code table.
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+	sigSeen := make(chan os.Signal, 1)
+	signal.Notify(sigSeen, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigSeen)
+	go func() {
+		select {
+		case s := <-sigSeen:
+			sigSeen <- s // relay what we caught for the exit-code mapping
+			stop()
+		case <-ctx.Done():
+		}
+	}()
 
 	runOpts := &agentproc.RunOptions{
 		Message:     prompt,
@@ -200,7 +259,7 @@ func runAgentWithProfile(profilePath string, opts *cliOptions) int {
 		ProfileDir:  profileDir,
 		ExtraEnv:    extraEnv,
 		Attachments: attachments,
-		TimeoutSecs: opts.timeout,
+		TimeoutSecs: timeoutOverride,
 	}
 
 	if !opts.raw {
@@ -257,7 +316,21 @@ func runAgentWithProfile(profilePath string, opts *cliOptions) int {
 		}
 	}
 	if ctx.Err() != nil {
-		return 130 // interrupted; the agent group has already been killed
+		// Interrupted; the agent group has already been killed. The spec
+		// reserves 130 for SIGINT and 143 for SIGTERM.
+		select {
+		case s := <-sigSeen:
+			if s == syscall.SIGTERM {
+				return 143
+			}
+		default:
+		}
+		return 130
+	}
+	if result.TimedOut {
+		// The runner keeps Error empty on a spawn-path timeout (conformance);
+		// the CLI still owes the operator a reason for exit 1.
+		fmt.Fprintf(os.Stderr, "agentproc:error:turn timed out\n")
 	}
 	if result.ExitCode == 0 {
 		return 0
@@ -279,9 +352,9 @@ func interactivePermissionHandler(req map[string]any) *agentproc.PermissionDecis
 		fmt.Fprintln(os.Stderr, "[agentproc] no TTY — denying permission request")
 		return &agentproc.PermissionDecision{Behavior: "deny", Message: "no TTY for interactive approval"}
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := readPermissionAnswer()
 	if err != nil {
-		return &agentproc.PermissionDecision{Behavior: "deny", Message: "denied by user"}
+		return &agentproc.PermissionDecision{Behavior: "deny", Message: "stdin unavailable — denied"}
 	}
 	answer := strings.ToLower(strings.TrimSpace(line))
 	if answer == "y" || answer == "yes" {
@@ -432,7 +505,10 @@ func runHubSubcommand(args []string) int {
 		fs := flag.NewFlagSet("agentproc hub run", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		newFlagSet(fs, opts)
-		_ = fs.Parse(runnerArgs)
+		if err := fs.Parse(runnerArgs); err != nil && err != flag.ErrHelp {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			return 2
+		}
 		if opts.prompt == "" && !opts.stdinMode {
 			fmt.Fprintln(os.Stderr, "error: hub run requires --prompt <text> or --stdin")
 			return 2

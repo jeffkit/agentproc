@@ -3,9 +3,11 @@ package agentproc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -234,4 +236,39 @@ func killTestGroup(cmd *exec.Cmd) {
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	_, _ = cmd.Process.Wait()
+}
+
+func TestUnreadableLockIsStaleCorrupt(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read anything")
+	}
+	dir := lockTestEnv(t)
+	key := filepath.Join(dir, "ws")
+	WriteRunLock(key, 999999, []string{"sleep"}, os.Getpid())
+	if err := os.Chmod(LockPathFor(key), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	res, err := CleanupStaleRun(key, 1)
+	if err != nil || res.Action != "stale" || res.Reason != "corrupt" {
+		t.Fatalf("expected stale/corrupt, got %+v err=%v", res, err)
+	}
+	if _, err := os.Stat(LockPathFor(key)); !os.IsNotExist(err) {
+		t.Fatal("unreadable lock must be swept")
+	}
+}
+
+func TestPidAliveProbeTreatsEPERMAsAlive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix probe semantics")
+	}
+	// A process owned by another user (init/launchd, pid 1) answers EPERM —
+	// the probe must report ALIVE, never dead (review round 1: treating
+	// EPERM as dead let a takeover sweep a healthy foreign agent's lock).
+	alive, err := pidAliveProbe(1)
+	if !alive {
+		t.Fatalf("pid 1 (foreign uid) must classify as alive (err=%v)", err)
+	}
+	if !errors.Is(err, syscall.EPERM) && err != nil {
+		t.Fatalf("expected EPERM, got %v", err)
+	}
 }

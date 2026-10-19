@@ -136,7 +136,7 @@ func TestExecutorPathConformance(t *testing.T) {
 			partials := []string{}
 			opts := &RunOptions{
 				Message:     "hello",
-				TimeoutSecs: 10,
+				TimeoutSecs: intPtr(10),
 				Streaming:   boolPtr(s["streaming"].(bool)),
 				OnPartial:   func(text string, role *string) { partials = append(partials, text) },
 			}

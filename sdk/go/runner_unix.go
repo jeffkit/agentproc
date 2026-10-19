@@ -3,6 +3,7 @@
 package agentproc
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -64,6 +65,27 @@ func killGroup(pgid int) error {
 		return nil
 	}
 	return err
+}
+
+// pidAliveProbe reports whether pid exists: signal-0 probe with the Python
+// runner's PermissionError semantics — an existing process owned by another
+// user answers EPERM, which means ALIVE (treating it as dead would let a
+// takeover sweep a healthy foreign agent's lock and start a second agent on
+// the same workspace).
+func pidAliveProbe(pid int) (bool, error) {
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return false, err
+	}
+	err = p.Signal(syscallZero)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, syscall.EPERM):
+		return true, err
+	default:
+		return false, err
+	}
 }
 
 // normalizeExitCode normalises a child exit status to a spec exit code.

@@ -15,12 +15,11 @@ on:
         description: 'Release tag (e.g. agentproc-cli/v0.1.1)'
         required: true
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       matrix:
         include:
@@ -51,10 +50,13 @@ jobs:
         with:
           name: agentproc-${{ matrix.goos }}-${{ matrix.goarch }}
           path: sdk/go/dist/
+          overwrite: true
 
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -68,12 +70,17 @@ jobs:
         run: |
           VERSION="${TAG#agentproc-cli/}"
           case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
-          gh release create "$TAG" dist/* \
-            --title "agentproc CLI ${VERSION}" \
-            --notes "Prebuilt \`agentproc\` CLI binaries (Go implementation).
-          \
+          # Idempotent on re-run: attach to the existing release if present.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "agentproc CLI ${VERSION}" \
+              --notes "Prebuilt \`agentproc\` CLI binaries (Go implementation).
           Binaries: linux/darwin (amd64, arm64) and windows (amd64).
           Built from sdk/go at ${GITHUB_SHA::7}. See docs/cli for usage, or:
           \
-            go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@${VERSION}"
+            go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest"
+          fi
 

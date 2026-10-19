@@ -6,13 +6,17 @@ package agentproc
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+var fakeHubURL string
 
 // fakeHub serves the jsDelivr raw + data API shapes for a small tree.
 func fakeHub(t *testing.T) *httptest.Server {
@@ -64,6 +68,8 @@ func fakeHub(t *testing.T) *httptest.Server {
 	t.Setenv("AGENTPROC_HUB_REF", "")
 	jsdelivrRawBase = srv.URL
 	jsdelivrDataBase = srv.URL + "/v1/packages/gh"
+	t.Cleanup(func() { fakeHubURL = "" })
+	fakeHubURL = srv.URL
 	clearTreeCache()
 	t.Cleanup(func() {
 		jsdelivrRawBase = "https://cdn.jsdelivr.net/gh"
@@ -187,5 +193,54 @@ func TestSuggestCloseName(t *testing.T) {
 		if got := suggestCloseName(c.in, candidates); got != c.want {
 			t.Fatalf("suggest(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestFetchProfileRejectsTraversalNames(t *testing.T) {
+	fakeHub(t)
+	for _, name := range []string{"../../etc", "a/b", "..", ".hidden", "", "x\x00y"} {
+		dir, herr := FetchProfile(name, false, nil)
+		if herr == nil || !strings.Contains(herr.Message, "invalid profile name") {
+			t.Fatalf("name %q must be rejected, got dir=%q err=%+v", name, dir, herr)
+		}
+	}
+	// Nothing escaped the cache root.
+	entries, _ := os.ReadDir(hubCacheRoot())
+	for _, e := range entries {
+		if e.Name() != "tree.json" && e.Name() != "_shared" {
+			t.Fatalf("unexpected cache entry %q from a rejected name", e.Name())
+		}
+	}
+}
+
+func TestCorruptOrFutureCacheMetaTriggersRefetch(t *testing.T) {
+	fakeHub(t)
+	if _, herr := FetchProfile("echo-agent", false, nil); herr != nil {
+		t.Fatalf("priming fetch: %v", herr)
+	}
+	metaPath := filepath.Join(HubCacheDir("echo-agent"), ".cache-meta.json")
+
+	// Corrupt meta: the fresh-cache path must fall through to the network.
+	os.WriteFile(metaPath, []byte("{not json"), 0o644)
+	jsdelivrRawBase = "http://127.0.0.1:1/unreachable"
+	if _, herr := FetchProfile("echo-agent", false, nil); herr == nil {
+		t.Fatal("corrupt meta must not serve as fresh cache")
+	}
+	jsdelivrRawBase = fakeHubURL
+	if _, herr := FetchProfile("echo-agent", false, nil); herr != nil {
+		t.Fatalf("refetch after corrupt meta: %v", herr)
+	}
+	raw, _ := os.ReadFile(metaPath)
+	if !strings.Contains(string(raw), "fetched_at") {
+		t.Fatalf("meta not rewritten: %s", raw)
+	}
+
+	// Future fetched_at: a tampered cache must count as a miss, not fresh
+	// forever (the TTL is the recovery bound for a poisoned cache).
+	future := fmt.Sprintf(`{"fetched_at": %d, "ref": "main"}`, time.Now().Unix()+3600)
+	os.WriteFile(metaPath, []byte(future), 0o644)
+	jsdelivrRawBase = "http://127.0.0.1:1/unreachable"
+	if _, herr := FetchProfile("echo-agent", false, nil); herr == nil {
+		t.Fatal("future-dated meta must not serve as fresh cache")
 	}
 }

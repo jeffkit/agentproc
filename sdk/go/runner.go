@@ -144,9 +144,10 @@ type RunOptions struct {
 	// ProfileDir is the profile's own directory ({{PROFILE_DIR}} expansion
 	// and relative-cwd resolution).
 	ProfileDir string
-	// TimeoutSecs overrides the profile timeout. 0 = use the profile value
-	// (a profile value of 0 means no host-side limit).
-	TimeoutSecs int
+	// TimeoutSecs overrides the profile timeout. nil = use the profile value;
+	// a non-nil 0 explicitly disables the host-side limit (matching the
+	// Python/Node `timeout_secs=0` semantics).
+	TimeoutSecs *int
 	// RunLockKey (usually the workspace absolute path) turns on the "last
 	// will" run lock: after spawn the runner records pid + argv + this
 	// process's pid, so a takeover can kill-before-start the orphan group a
@@ -167,6 +168,9 @@ type RunOptions struct {
 	// OnProtocolLine is called for every raw stdout line (debug traces).
 	OnProtocolLine func(line string)
 	// OnStderr is called for each stderr line and for runner warnings.
+	// Callbacks may fire concurrently (stderr pump goroutine + main loop,
+	// OnPermission on its dispatcher) — implementations must be
+	// goroutine-safe or serialize themselves.
 	OnStderr func(line string)
 	// OnPermission answers a permission_request. nil = no approver wired:
 	// the agent stays blocked until the turn timeout.
@@ -240,8 +244,8 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 		streaming = *opts.Streaming
 	}
 	timeoutSecs := profile.TimeoutSecs
-	if opts.TimeoutSecs != 0 {
-		timeoutSecs = opts.TimeoutSecs
+	if opts.TimeoutSecs != nil {
+		timeoutSecs = *opts.TimeoutSecs
 	}
 
 	startedWall := time.Now()
@@ -370,6 +374,9 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 	stdoutW.Close()
 	stderrW.Close()
 
+	pendingMu := sync.Mutex{}
+	pendingPermissions := map[string]bool{}
+
 	if opts.RunLockKey != "" {
 		WriteRunLock(opts.RunLockKey, cmd.Process.Pid, argv, 0)
 	}
@@ -392,13 +399,27 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 		if stdinClosed {
 			return false
 		}
+		// Bounded write: a child that stopped reading stdin must not hold
+		// stdinMu (and with it the kill sequence) past this deadline.
+		_ = stdinW.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		defer func() { _ = stdinW.SetWriteDeadline(time.Time{}) }()
 		if _, err := stdinW.WriteString(FormatPermissionResponse(response) + "\n"); err != nil {
 			return false
 		}
 		return true
 	}
-	pendingMu := sync.Mutex{}
-	pendingPermissions := map[string]bool{}
+	// claimPending atomically test-and-removes a request id from the pending
+	// set — exactly one of {the OnPermission dispatcher, denyPending} gets to
+	// answer a given request, whichever wins.
+	claimPending := func(rid string) bool {
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		if pendingPermissions[rid] {
+			delete(pendingPermissions, rid)
+			return true
+		}
+		return false
+	}
 	denyPending := func(message string) {
 		pendingMu.Lock()
 		ids := make([]string, 0, len(pendingPermissions))
@@ -409,16 +430,24 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 		pendingMu.Unlock()
 		sort.Strings(ids)
 		for _, id := range ids {
-			writePermissionResponse(map[string]any{"request_id": id, "behavior": "deny", "message": message})
+			if claimPending(id) {
+				writePermissionResponse(map[string]any{"request_id": id, "behavior": "deny", "message": message})
+			}
 		}
 	}
 
-	if _, err := stdinW.WriteString(turnLine); err != nil {
-		opts.stderrf("[agentproc runner] warning: turn write failed: %v", err)
-	}
-	if !profile.Permission {
-		closeStdin()
-	}
+	// The turn is written off the calling goroutine: a payload larger than
+	// the pipe buffer aimed at a child that never reads stdin would block
+	// here forever — before the time limit / cancel watchdog is even armed.
+	// The graded kill eventually produces EPIPE and unblocks this writer.
+	go func() {
+		if _, err := stdinW.WriteString(turnLine); err != nil {
+			opts.stderrf("[agentproc runner] warning: turn write failed: %v", err)
+		}
+		if !profile.Permission {
+			closeStdin()
+		}
+	}()
 
 	// --- stdout pump: raw lines to the main loop, single-threaded handling ---
 	lineCh := make(chan string, 256)
@@ -573,7 +602,7 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 			switch {
 			case errorSeen:
 				// Cannot contribute to a failed turn's reply; usage still counts.
-				if c.Usage != nil && result.Usage == nil {
+				if len(c.Usage) > 0 && result.Usage == nil {
 					result.Usage = c.Usage
 				}
 			case resultSeen:
@@ -583,7 +612,7 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 				noteSessionID(c.SessionID)
 				text := c.Value
 				resultText = &text
-				if c.Usage != nil {
+				if len(c.Usage) > 0 {
 					result.Usage = c.Usage
 				}
 			}
@@ -594,7 +623,7 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 			noteSessionID(c.SessionID)
 			result.Error = c.Value
 			errorSeen = true
-			if c.Usage != nil {
+			if len(c.Usage) > 0 {
 				result.Usage = c.Usage
 			}
 			if opts.OnError != nil {
@@ -616,12 +645,15 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 			case !IsValidPermissionRequest(c.Obj):
 				opts.stderrf("[agentproc runner] malformed permission_request: %q", truncForLog(line, 200))
 				if c.Obj != nil {
-					if rid, ok := c.Obj["request_id"].(string); ok && strings.TrimSpace(rid) != "" && !whitespaceControlRe.MatchString(rid) {
-						writePermissionResponse(map[string]any{
-							"request_id": rid,
-							"behavior":   "deny",
-							"message":    "malformed permission request",
-						})
+					if rid, ok := c.Obj["request_id"].(string); ok {
+						rid = strings.TrimSpace(rid)
+						if rid != "" && !whitespaceControlRe.MatchString(rid) {
+							writePermissionResponse(map[string]any{
+								"request_id": rid,
+								"behavior":   "deny",
+								"message":    "malformed permission request",
+							})
+						}
 					}
 				}
 			default:
@@ -638,12 +670,17 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 						defer func() {
 							if r := recover(); r != nil {
 								opts.stderrf("[agentproc runner] on_permission failed: %v", r)
-								writeResponseForDecision(req, &PermissionDecision{Behavior: "deny", Message: "permission handler error"})
+								if rid, ok := req["request_id"].(string); ok && claimPending(rid) {
+									writeResponseForDecision(req, &PermissionDecision{Behavior: "deny", Message: "permission handler error"})
+								}
 							}
 						}()
 						decision := opts.OnPermission(req)
 						if turnFinished.Load() {
 							return
+						}
+						if rid, ok := req["request_id"].(string); ok && !claimPending(rid) {
+							return // already answered by the kill-path deny
 						}
 						writeResponseForDecision(req, decision)
 					}(c.Obj)
@@ -707,67 +744,71 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 		defer timer.Stop()
 		timeLimitCh = timer.C
 	}
-	var drainDeadline *time.Time
-	drainCheck := time.NewTicker(50 * time.Millisecond)
-	defer drainCheck.Stop()
+	// Two-phase wait.
+	//
+	// Phase A — until the direct child is reaped: stdout lines, the time
+	// limit, and cooperative cancel all stay live. An agent that closes
+	// stdout and then hangs must NOT end the turn (EOF only stops the
+	// consumption, never the wait), and a limit/cancel firing at the same
+	// instant as a clean exit must NOT flip the turn to 124/125 — both cases
+	// simply leave the loop the moment waitCh delivers.
+	lineChLive := lineCh
+	limitCh := timeLimitCh
+	doneCh := ctx.Done()
+	eofSeen := false
 
-loop:
-	for {
+phaseA:
+	for !childGone && !cancelled && !timedOut {
 		select {
-		case line, ok := <-lineCh:
+		case line, ok := <-lineChLive:
 			if !ok {
-				break loop // EOF: every writer is gone, the child's tail is in
+				// EOF: every stdout writer is gone and the child's own tail
+				// is already in. Stop consuming; keep waiting for the exit
+				// under the same limit and cancel.
+				lineChLive = nil
+				eofSeen = true
+				continue
 			}
 			handleLine(line)
 		case wi := <-waitCh:
 			exitState = wi.state
 			childGone = true
-			t := time.Now().Add(drainGrace)
-			drainDeadline = &t
-		case <-ctx.Done():
-			cancelled = true
-			journalDecisions = false // the cancel path records no journal decisions
-			killSequence("cancelled")
-			break loop
-		case <-timeLimitCh:
+		case <-limitCh:
 			timedOut = true
 			journal(JournalEntry{Seq: int(seq.Add(1)), Decision: "timeout", BudgetSecs: effectiveSecs})
 			killSequence("permission timed out")
-			break loop
-		case <-drainCheck.C:
-			if drainDeadline != nil && time.Now().After(*drainDeadline) {
+			break phaseA
+		case <-doneCh:
+			cancelled = true
+			journalDecisions = false // the cancel path records no journal decisions
+			killSequence("cancelled")
+			break phaseA
+		}
+	}
+
+	// Phase B — post-reap drain: only the pump and one bounded drainGrace
+	// window remain; a straggler keeping the pipe busy must not hold the turn
+	// open (spec "Never wait unboundedly for inherited stdio"). If stdout
+	// already hit EOF there is nothing left to drain.
+	drainDeadline := time.Now().Add(drainGrace)
+	if !eofSeen {
+		for {
+			select {
+			case line, ok := <-lineChLive:
+				if !ok {
+					goto drained
+				}
+				handleLine(line)
+				if time.Now().After(drainDeadline) {
+					goto drained
+				}
+			case <-time.After(time.Until(drainDeadline)):
 				opts.stderrf("[agentproc runner] warning: agent exited but its stdout/stderr pipe is still open (held by a surviving grandchild); abandoning the drain")
-				break loop
+				goto drained
 			}
 		}
 	}
-	// Salvage window: after the direct child is reaped (or the kill gave up),
-	// keep consuming the pump for at most drainGrace; a straggler that keeps
-	// the pipe busy must not hold the turn open (spec "Never wait unboundedly
-	// for inherited stdio").
-	if !childGone {
-		// EOF without a reap (possible only if stdout closed spuriously):
-		// block until Wait returns, as the reference runners do.
-		wi := <-waitCh
-		exitState = wi.state
-		childGone = true
-	}
-	salvageDeadline := time.Now().Add(drainGrace)
-	for {
-		select {
-		case line, ok := <-lineCh:
-			if !ok {
-				goto salvaged
-			}
-			handleLine(line)
-			if time.Now().After(salvageDeadline) {
-				goto salvaged
-			}
-		case <-time.After(time.Until(salvageDeadline)):
-			goto salvaged
-		}
-	}
-salvaged:
+drained:
 	closeStdin()
 	turnFinished.Store(true)
 	close(stdoutStop)
@@ -927,8 +968,8 @@ func RunViaExecutor(ctx context.Context, executor Executor, opts *RunOptions, pr
 		streaming = *opts.Streaming
 	}
 	timeoutSecs := profile.TimeoutSecs
-	if opts.TimeoutSecs != 0 {
-		timeoutSecs = opts.TimeoutSecs
+	if opts.TimeoutSecs != nil {
+		timeoutSecs = *opts.TimeoutSecs
 	}
 	cwd := opts.Cwd
 	if cwd == "" {
@@ -1039,6 +1080,7 @@ func RunViaExecutor(ctx context.Context, executor Executor, opts *RunOptions, pr
 		message := fmt.Sprintf("executor '%s': command not found: %s. %s", cliName, argv[0], hint)
 		return fail(strings.TrimSpace(message))
 	}
+	stdinR.Close()
 	stdoutW.Close()
 	stderrW.Close()
 
@@ -1133,7 +1175,7 @@ func RunViaExecutor(ctx context.Context, executor Executor, opts *RunOptions, pr
 				opts.OnSession(parsed.SessionID)
 			}
 		}
-		if parsed.Usage != nil && result.Usage == nil {
+		if len(parsed.Usage) > 0 && result.Usage == nil {
 			result.Usage = parsed.Usage
 		}
 		if parsed.Error != "" {
@@ -1304,6 +1346,9 @@ func valueOrJoin(final *string, parts []string) string {
 func waitExecutorProcess(ctx context.Context, child *exec.Cmd, timeout time.Duration, killGraceSecs int) (state *os.ProcessState, timedOut bool, cancelled bool) {
 	type waitInfo struct{ state *os.ProcessState }
 	waitCh := make(chan waitInfo, 1)
+	// Note: if SIGKILL fails to reap the child (D state), this goroutine
+	// blocks in Wait for the process' lifetime — bounded by the OS, not
+	// cancelable from Go.
 	go func() {
 		_ = child.Wait()
 		waitCh <- waitInfo{state: child.ProcessState}
@@ -1337,10 +1382,22 @@ func waitExecutorProcess(ctx context.Context, child *exec.Cmd, timeout time.Dura
 		case wi := <-waitCh:
 			return wi.state, false, false
 		case <-ctx.Done():
+			// The child may have exited in the same instant the cancel
+			// fired — prefer the real exit over misreporting 125.
+			select {
+			case wi := <-waitCh:
+				return wi.state, false, false
+			default:
+			}
 			cancelled = true
 			killSequence()
 			return state, false, true
 		case <-timeoutCh:
+			select {
+			case wi := <-waitCh:
+				return wi.state, false, false
+			default:
+			}
 			timedOut = true
 			killSequence()
 			return state, true, false

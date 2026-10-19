@@ -108,7 +108,13 @@ agentproc --profile <path.yaml> --prompt "hello" [options]
 |------|------|
 | `--session <id>` | 上一轮的 session id，用于多轮续接 |
 | `--session-name <name>` | 会话可读名称（默认 `default`） |
-| `--from <user>` | 发送者标识符 |
+
+### 附件
+
+| 选项 | 说明 |
+|------|------|
+| `--image-url <url>` | 图片附件 URL（随 turn 的 `attachments` 传递） |
+| `--file-url <url>` | 文件附件 URL（随 turn 的 `attachments` 传递） |
 
 ### 执行
 
@@ -116,7 +122,7 @@ agentproc --profile <path.yaml> --prompt "hello" [options]
 |------|------|
 | `--cwd <path>` | 覆盖 `profile.cwd` |
 | `--env KEY=VALUE` | 额外注入的环境变量（可重复） |
-| `--timeout <secs>` | 覆盖 `profile.timeout_secs` |
+| `--timeout <secs>` | 覆盖 `profile.timeout_secs`（`0` = 不限时） |
 | `--journal <path>` | 把 NDJSON 事件/决策日志追加写入 `<path>`（opt-in；默认关闭，绝不写 stdout） |
 | `--no-stream` | 关闭流式（忽略 `{"type":"partial"}` 事件） |
 
@@ -126,7 +132,7 @@ agentproc --profile <path.yaml> --prompt "hello" [options]
 |------|------|
 | `--verbose` | 把协议行打到 stderr（默认） |
 | `--quiet` | 不打协议行 |
-| `--raw` | 不解析 stdout，原样转发 agent 输出 |
+| `--raw` | 安静模式：只打印最终回复正文（stderr 不再回显事件） |
 | `--stdin` | 从 stdin 读 prompt（而不是 `--prompt`） |
 
 ### 其他
@@ -142,9 +148,11 @@ agentproc --profile <path.yaml> --prompt "hello" [options]
 
 | 流 | 内容 |
 |----|------|
-| stderr | 实时 NDJSON 事件（`{"type":"partial"}`、`{"type":"result"}`、`{"type":"error"}`；事件上可选 `session_id`） |
-| stdout | 最终回复正文（来自 `{"type":"result"}` / 流式 `partial`），在 agent 退出后打印 |
-| 退出码 | `0` 成功 · `1` 错误 · `124` 超时（按 spec） |
+| stderr | 事件实时回显（`{"type":"partial"}`、`{"type":"error"}`；session id 走 `agentproc:session:<id>` 尾行） |
+| stdout | 最终回复正文，agent 退出后打印 |
+| 退出码 | `0` 成功 · `1` 错误（含超时） · `2` 用法错误 · `130` SIGINT / `143` SIGTERM（先杀干净 agent 进程组再退出） |
+
+（底层 `RunResult.ExitCode` 区分更细——`124` 超时、`125` 取消——但三个 CLI 都把失败折叠为 `1`，与 Python/Node 参考 CLI 一致。）
 
 最终的 session id 也会以 `agentproc:session:<id>` 的形式打到 stderr 末尾，便于 shell 脚本捕获：
 
@@ -156,10 +164,10 @@ agentproc -p prof.yaml --prompt "follow up" --session "$session"
 
 ### `--raw` 模式
 
-完全不解析 stdout——原样转发 agent 的 stdout。适用于把 agent 的原始输出 pipe 给别的工具，或调试 bridge 脚本本身。
+安静模式：关闭 stderr 上的实时事件回显，只在 stdout 打印最终回复正文。（三个 CLI 仍然走完整的协议解析——拿到的是组装后的回复，不是 agent 的原始字节。）
 
 ```bash
-agentproc -p prof.yaml --prompt "hi" --raw | some-other-tool
+agentproc -p prof.yaml --prompt "hi" --raw
 ```
 
 ## 示例
@@ -206,6 +214,6 @@ CLI 是 SDK `run()` 函数（[`sdk/node/src/runner.js`](https://github.com/jeffk
 - **env 注入**：profile 的 `env` 块（`${VAR}` 展开受 `env_allowlist` 约束），外加固定的 infra 集合（`PATH`/`HOME`/`TERM`/…）。`--env KEY=VALUE` 追加运行期额外变量。
 - **stdout 分类**：每一行是按 `type` 派发的 JSON 对象——`{"type":"partial"}`（`streaming: true` 时转发）、`{"type":"result"}`（终端回复正文；可选 `session_id` / `usage`）、`{"type":"error"}`（使本轮失败）。`session_id` 是事件上的字段（持久化第一个非空值；早期可省略；一旦已知 SHOULD 带上）。非 JSON / 未知 `type` 的行记日志并忽略。
 - **超时处理**：SIGTERM → `kill_grace_secs`（默认 5 秒）→ SIGKILL，三者都针对 agent 的整个**进程组**（CLI 派生的 shell 工具调用或 sub-agent 会随之一起死），而非仅直接子进程。退出码 124。限额本身取 profile 的 `timeout_secs`、`budget_secs`、`deadline` 三者中最早到期者。若 agent 已退出而某个助手仍持有其 stdout/stderr，该轮仍会结束：管道获得 1 秒 drain 窗口后被放弃（并写 stderr 警告），而不是让该轮挂死。
-- **退出码**：0 成功 · 1 错误（包括出现 `{"type":"error"}` 事件的情况）· 124 超时。
+- **退出码**：0 成功 · 1 错误（包括出现 `{"type":"error"}` 事件的情况，也包括超时——runner 的 124 体现在 `RunResult.ExitCode`，CLI 折叠为 1）。
 
 如果你在用别的语言写自己的 bridge，[`runner.js`](https://github.com/jeffkit/agentproc/blob/main/sdk/node/src/runner.js) 就是协议的代码化形式。
