@@ -9,6 +9,10 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Released
 
+### Go SDK 0.1.1 — released 2026-10-19 (tag `sdk/go/v0.1.1`)
+
+**chore(sdk): add the repo-level MIT LICENSE file.** The README and the Rust crate's `Cargo.toml` already declared MIT, but no `LICENSE` file existed at the repo root — pkg.go.dev (and corporate license scanners) therefore reported the Go module as unlicensed. No code change; the Go SDK and every other SDK are unaffected.
+
 ### Go SDK 0.1.0 — released 2026-10-19 (tag `sdk/go/v0.1.0`)
 
 **feat(sdk/go): the fourth reference SDK — a Go implementation of the full bridge + agent contract (wire 0.4).**
