@@ -25,6 +25,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -32,6 +34,28 @@ import (
 
 	agentproc "github.com/jeffkit/agentproc/sdk/go"
 )
+
+// versionOverride is set at release-build time via -ldflags
+// "-X main.versionOverride=<tag>"; when empty (go install / go build from
+// source) the CLI falls back to the embedded build info or the SDK constant.
+var versionOverride string
+
+// realTagRe matches a plain semver tag only — local source builds embed
+// pseudo-versions (v0.16.1-0.<ts>-<sha> [+dirty]) that would misreport.
+var realTagRe = regexp.MustCompile(`^v\d+\.\d+\.\d+$`)
+
+// cliVersion reports the CLI version: the release build's injected tag, else
+// the module version embedded by `go install pkg@version` (when it is a real
+// tag, not a local pseudo-version), else the SDK constant.
+func cliVersion() string {
+	if versionOverride != "" {
+		return versionOverride
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && realTagRe.MatchString(info.Main.Version) {
+		return info.Main.Version
+	}
+	return agentproc.SDKVersion
+}
 
 type envFlags []string
 
@@ -96,7 +120,7 @@ func run(argv []string) int {
 	_ = fs.Parse(argv)
 
 	if opts.version {
-		fmt.Printf("agentproc %s (protocol %s)\n", agentproc.SDKVersion, agentproc.PROTOCOL_VERSION)
+		fmt.Printf("agentproc %s (protocol %s)\n", cliVersion(), agentproc.PROTOCOL_VERSION)
 		return 0
 	}
 	if opts.help {

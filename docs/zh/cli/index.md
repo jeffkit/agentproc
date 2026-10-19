@@ -10,6 +10,19 @@ npm install -g agentproc       # 全局安装
 npx agentproc ...              # 不装直接跑
 ```
 
+Go 实现随 `sdk/go` 模块发布——命令、flag、输出语义一致：
+
+```bash
+go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest
+# 或从 GitHub Releases 取预编译二进制（linux/darwin amd64+arm64、windows amd64），
+# tag 形态为 agentproc-cli/v*
+```
+
+Go CLI 差异：hub 命令经 jsDelivr CDN 解析 profile 并缓存在
+`~/.agentproc/cache/hub/<name>/`（24 小时 TTL）——二进制里没有内置 profile
+副本，首次 `hub` 命令需要联网。`AGENTPROC_HUB_REF` 与 Node/Python CLI 一样
+可把拉取钉在指定 upstream ref。
+
 ## 两种调用方式
 
 CLI 有两个等价入口：

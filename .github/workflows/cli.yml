@@ -1,0 +1,77 @@
+name: CLI Release
+
+# Prebuilt `agentproc` binaries (Go CLI) attached to a GitHub Release.
+# Triggered by tags of the form `agentproc-cli/v*` — a separate series from
+# the module tags (`sdk/go/v*`); the glob in publish.yml (`v*`) does not
+# match across `/`, so this never touches the npm/PyPI release pipeline.
+
+on:
+  push:
+    tags:
+      - 'agentproc-cli/v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. agentproc-cli/v0.1.1)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Build agentproc (${{ matrix.goos }}/${{ matrix.goarch }})
+        working-directory: sdk/go
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#agentproc-cli/}"
+          EXT=""
+          [ "$GOOS" = "windows" ] && EXT=".exe"
+          go build -trimpath -ldflags "-s -w -X main.versionOverride=v${VERSION}" \
+            -o "dist/agentproc-${GOOS}-${GOARCH}${EXT}" ./cmd/agentproc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentproc-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: sdk/go/dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release and attach binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#agentproc-cli/}"
+          gh release create "$TAG" dist/* \
+            --title "agentproc CLI ${VERSION}" \
+            --notes "Prebuilt \`agentproc\` CLI binaries (Go implementation).
+          \
+          Binaries: linux/darwin (amd64, arm64) and windows (amd64).
+          Built from sdk/go at ${GITHUB_SHA::7}. See docs/cli for usage, or:
+          \
+            go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@${VERSION}"
+

@@ -10,6 +10,16 @@ npm install -g agentproc       # global install
 npx agentproc ...              # run without installing
 ```
 
+A Go implementation ships in the `sdk/go` module — same commands, same flags, same output semantics:
+
+```bash
+go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest
+# or grab a prebuilt binary (linux/darwin amd64+arm64, windows amd64)
+# from the GitHub Releases page, tagged agentproc-cli/v*
+```
+
+Go CLI divergence: the hub commands resolve profiles via the jsDelivr CDN and cache them at `~/.agentproc/cache/hub/<name>/` (24h TTL) — there is no bundled profile copy inside the binary, so the first `hub` command needs network. `AGENTPROC_HUB_REF` pins fetches to an exact upstream ref, same as the Node/Python CLIs.
+
 ## Two ways to invoke
 
 The CLI supports two equivalent entry points:

@@ -100,6 +100,7 @@ All SDKs are at parity on observable behaviour: `send_partial` / `sendPartial` f
 - **Rust SDK reference**: https://agentproc.dev/sdk/rust
 - **Go SDK reference**: https://agentproc.dev/sdk/go
 - **agentproc CLI** (canonical bridge runner): https://agentproc.dev/cli/
+  - Install: `npm install -g agentproc` (Node), or `go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest` (Go; prebuilt binaries on GitHub Releases, tags `agentproc-cli/v*`)
 - **Profile Hub** (ready-to-use profiles for claude/codex/codebuddy/agy): https://agentproc.dev/hub/
   - Source: https://github.com/jeffkit/agentproc/tree/main/hub
 - **Wrapping the claude CLI**: https://agentproc.dev/examples/claude

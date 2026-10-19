@@ -9,6 +9,16 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Released
 
+### Go CLI release pipeline — released 2026-10-19 (first tag `agentproc-cli/v0.1.1`)
+
+**feat(sdk/go): the `agentproc` Go CLI gets a release form — prebuilt binaries + honest version reporting.**
+
+- New `.github/workflows/cli.yml`: pushing a tag of the form `agentproc-cli/v*` builds the CLI with `-trimpath` and a `-ldflags`-injected version for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, and windows/amd64, then attaches the binaries to a GitHub Release. The tag glob never matches `publish.yml`'s `v*` filter (GitHub Actions globs do not cross `/`), so the npm/PyPI pipeline stays untouched. The CLI tag series is independent from the module tags (`sdk/go/v*`).
+- **Version reporting** (`agentproc --version`): release builds report the injected tag; binaries installed via `go install …@vX.Y.Z` report the version embedded in their build info (only when it is a real `vX.Y.Z` tag — local source builds embed pseudo-versions like `v0.16.1-0.<ts>-<sha>+dirty`, which are ignored); source checkouts fall back to the `SDKVersion` constant, now `0.1.1` (aligned with the latest `sdk/go` tag).
+- Docs: the CLI page (`docs/cli`, EN+ZH), `llms.txt`, and `sdk/go/README.md` document the Go install form (`go install`, or prebuilt binaries from Releases) and the hub divergence (jsDelivr CDN + 24h cache, no bundled profile copy).
+
+No protocol change; the Node/Python CLIs are unaffected.
+
 ### Go SDK 0.1.1 — released 2026-10-19 (tag `sdk/go/v0.1.1`)
 
 **chore(sdk): add the repo-level MIT LICENSE file.** The README and the Rust crate's `Cargo.toml` already declared MIT, but no `LICENSE` file existed at the repo root — pkg.go.dev (and corporate license scanners) therefore reported the Go module as unlicensed. No code change; the Go SDK and every other SDK are unaffected.

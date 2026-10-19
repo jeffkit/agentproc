@@ -126,7 +126,12 @@ running — the issue #9 rule); unverifiable → `RunLockBusy`, human decision.
 ## CLI
 
 `go install github.com/jeffkit/agentproc/sdk/go/cmd/agentproc@latest` builds
-the `agentproc` binary (port of the Python/Node CLI):
+the `agentproc` binary (port of the Python/Node CLI); prebuilt binaries for
+linux/darwin (amd64, arm64) and windows (amd64) are attached to the GitHub
+Releases tagged `agentproc-cli/v*`, so a Go toolchain is optional. `--version`
+reports the release tag: release builds inject it via `-ldflags`, `go install
+…@vX.Y.Z` reads it from the embedded build info, and source builds fall back
+to the `SDKVersion` constant:
 
 ```bash
 agentproc --profile ./hub/echo-agent/profile.yaml --prompt "hi" [--cwd dir] [--raw] [--no-stream]
