@@ -33,12 +33,48 @@ func init() {
 	RegisterExecutor("pi", func() Executor { return &piExecutor{} })
 }
 
-// envKnob reads an environment knob with the runner-side default (trimmed).
+// envKnob reads an environment knob with the runner-side default (trimmed) —
+// the value-knob pattern shared with Python's `env.get(X, default).strip()`.
 func envKnob(env map[string]string, name, fallback string) string {
 	if v, ok := env[name]; ok {
 		return strings.TrimSpace(v)
 	}
 	return fallback
+}
+
+// envOr is the toggle-knob pattern — Python's `(env.get(X) or fallback)`:
+// an unset OR EMPTY value takes the fallback, and the raw value (no trim)
+// is compared verbatim (`CURSOR_FORCE=" 1 "` is NOT "1").
+func envOr(env map[string]string, name, fallback string) string {
+	if v, ok := env[name]; ok && v != "" {
+		return v
+	}
+	return fallback
+}
+
+// truthy applies Python truthiness — the canonical semantics for
+// `is_error` / `delta` flags (None/False/0/""/empty list/map are falsy).
+// Node matches; Go's strict bool assertions flipped stringified flags
+// ("false" → false-positive success).
+func truthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case string:
+		return t != ""
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	case []any:
+		return len(t) > 0
+	case map[string]any:
+		return len(t) > 0
+	default:
+		return true
+	}
 }
 
 // newUUIDv4 mints a stable per-turn session id for plain executors whose CLI
@@ -137,7 +173,7 @@ func (e *claudeCodeExecutor) ParseEvent(event map[string]any) *ParseResult {
 		return nil
 	case etype == "result":
 		sid, _ := event["session_id"].(string)
-		if isErr, _ := event["is_error"].(bool); isErr {
+		if truthy(event["is_error"]) {
 			msg, _ := event["result"].(string)
 			if msg == "" {
 				msg = "claude reported an error"
@@ -156,16 +192,17 @@ func (e *claudeCodeExecutor) ParseEvent(event map[string]any) *ParseResult {
 // BuildInitialStdin is the stream-json user turn Claude reads from stdin in
 // both modes.
 func (e *claudeCodeExecutor) BuildInitialStdin(message, sessionID string) (*string, error) {
-	frame, err := json.Marshal(orderedObject{
+	frame := marshalCompact(orderedObject{
 		{"type", "user"},
 		{"message", orderedObject{{"role", "user"}, {"content", message}}},
 		{"parent_tool_use_id", nil},
 		{"session_id", sessionID},
 	})
-	if err != nil {
-		return nil, err
-	}
-	return strPtr(string(frame)), nil
+	// encoding/json always escapes U+2028/2029; Python's ensure_ascii=False
+	// emits them raw — undo it for byte parity (JSON-equivalent either way).
+	frame = strings.ReplaceAll(frame, `\u2028`, " ")
+	frame = strings.ReplaceAll(frame, `\u2029`, " ")
+	return strPtr(frame), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +241,7 @@ func (e *codebuddyExecutor) ParseEvent(event map[string]any) *ParseResult {
 		}
 	case "result":
 		sid, _ := event["session_id"].(string)
-		if isErr, _ := event["is_error"].(bool); isErr {
+		if truthy(event["is_error"]) {
 			msg, _ := event["result"].(string)
 			if msg == "" {
 				msg = "codebuddy reported an error"
@@ -264,13 +301,26 @@ func (e *codexExecutor) ParseEvent(event map[string]any) *ParseResult {
 			}
 		}
 	case "turn.failed":
+		// Python stringifies the whole error value (`str(event.get("error")
+		// or "codex turn failed")`); mirror with a compact JSON rendering —
+		// the text is a pass-through diagnostic, not a pinned contract.
 		msg := "codex turn failed"
-		if errObj, ok := event["error"].(map[string]any); ok {
-			if m, ok := errObj["message"].(string); ok && m != "" {
-				msg = m
+		switch err := event["error"].(type) {
+		case string:
+			if err != "" {
+				msg = err
 			}
-		} else if m, ok := event["error"].(string); ok && m != "" {
-			msg = m
+		case nil:
+		default:
+			if raw, ok := event["error"].(map[string]any); ok {
+				if m, ok := raw["message"].(string); ok && m != "" {
+					msg = m
+					break
+				}
+			}
+			if b, err := json.Marshal(event["error"]); err == nil && string(b) != "null" {
+				msg = string(b)
+			}
 		}
 		return &ParseResult{Error: msg}
 	}
@@ -296,7 +346,7 @@ func (e *cursorExecutor) MakeTurn() *TurnHandlers {
 	return &TurnHandlers{
 		BuildArgs: func(message, sessionID string, env map[string]string, _ TurnCtx) ([]string, error) {
 			args := []string{"agent", "-p", message, "--output-format", "stream-json", "--stream-partial-output"}
-			if envKnob(env, "CURSOR_FORCE", "1") == "1" {
+			if envOr(env, "CURSOR_FORCE", "1") == "1" {
 				args = append(args, "--yolo")
 			}
 			if model := envKnob(env, "CURSOR_MODEL", ""); model != "" {
@@ -328,9 +378,8 @@ func (e *cursorExecutor) MakeTurn() *TurnHandlers {
 				return &ParseResult{PartialText: strPtr(text)}
 			case "result":
 				sid, _ := event["session_id"].(string)
-				isErr, _ := event["is_error"].(bool)
 				sub, _ := event["subtype"].(string)
-				if isErr || sub == "error" {
+				if truthy(event["is_error"]) || sub == "error" {
 					msg, _ := event["result"].(string)
 					if msg == "" {
 						msg = "cursor agent reported an error"
@@ -388,7 +437,7 @@ func geminiStyleParseEvent(event map[string]any, cliLabel string) *ParseResult {
 		if text == "" {
 			return nil
 		}
-		if delta, _ := event["delta"].(bool); delta {
+		if truthy(event["delta"]) {
 			return &ParseResult{PartialText: strPtr(text)}
 		}
 		return &ParseResult{FinalText: strPtr(text)}
@@ -594,7 +643,7 @@ func (e *agyExecutor) MakeTurn() *TurnHandlers {
 			// Message last, after "--", so a message starting with "-" stays
 			// positional.
 			args := []string{"agy", "--print", "--conversation", sessionID}
-			if envKnob(env, "AGY_DANGEROUSLY_SKIP_PERMISSIONS", "1") == "1" {
+			if envOr(env, "AGY_DANGEROUSLY_SKIP_PERMISSIONS", "1") == "1" {
 				args = append(args, "--dangerously-skip-permissions")
 			}
 			if model := envKnob(env, "AGY_MODEL", ""); model != "" {
@@ -667,7 +716,7 @@ func (e *piExecutor) SupportsPermission() bool { return false }
 
 func (e *piExecutor) BuildArgs(message, sessionID string, env map[string]string, _ TurnCtx) ([]string, error) {
 	args := []string{"pi", "-p", message, "--approve"}
-	if envKnob(env, "PI_NO_EXTENSIONS", "1") != "0" {
+	if envOr(env, "PI_NO_EXTENSIONS", "1") != "0" {
 		args = append(args, "--no-extensions")
 	}
 	if model := envKnob(env, "PI_MODEL", ""); model != "" {

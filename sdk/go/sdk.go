@@ -219,11 +219,12 @@ func readTurn(reader *bufio.Reader, stdout, stderr *os.File) *Context {
 	if s, ok := t["session_name"].(string); ok {
 		ctx.SessionName = s
 	}
-	if s, ok := t["protocol_version"].(string); ok && s != "" {
+	if s, ok := t["protocol_version"].(string); ok {
+		// Pass the raw value through ("" included) — Python/Node parity.
 		ctx.ProtocolVersion = s
 		// Diagnostic only (spec Versioning): one stderr line, then continue
 		// best-effort — it never gates or alters what the handler may send.
-		if s != PROTOCOL_VERSION && stderr != nil {
+		if s != "" && s != PROTOCOL_VERSION && stderr != nil {
 			fmt.Fprintf(stderr, "[agentproc] protocol_version %q does not match this agent SDK's %q; continuing best-effort (fail-soft)\n", s, PROTOCOL_VERSION)
 		}
 	} else {

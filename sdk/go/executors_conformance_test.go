@@ -164,3 +164,154 @@ func TestExecutorPathConformance(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// --- Review round 2: malformed/adversarial parity pins (canonical = Python/Node truthiness) ---
+
+func TestIsErrorTruthyParity(t *testing.T) {
+	// Python truthiness: the STRING "false" is truthy → the error branch.
+	e := &claudeCodeExecutor{}
+	for _, tc := range []struct {
+		val     any
+		wantErr bool
+	}{
+		{"false", true},
+		{"true", true},
+		{float64(1), true},
+		{float64(0), false},
+		{"", false},
+		{false, false},
+		{true, true},
+		{nil, false},
+	} {
+		out := e.ParseEvent(map[string]any{"type": "result", "is_error": tc.val, "result": "x"})
+		if out == nil {
+			t.Fatalf("is_error=%v: nil", tc.val)
+		}
+		if (out.Error != "") != tc.wantErr {
+			t.Fatalf("is_error=%#v: error=%q wantErr=%v", tc.val, out.Error, tc.wantErr)
+		}
+	}
+}
+
+func TestDeltaTruthyParity(t *testing.T) {
+	// The STRING "false" is truthy → partial; a real false → final.
+	e := &geminiCLIExecutor{}
+	for _, tc := range []struct {
+		delta   any
+		partial bool
+	}{
+		{"false", true},
+		{"true", true},
+		{"", false},
+		{false, false},
+		{true, true},
+		{nil, false},
+	} {
+		event := map[string]any{"type": "message", "role": "assistant", "content": "x"}
+		if tc.delta != nil {
+			event["delta"] = tc.delta
+		}
+		out := e.ParseEvent(event)
+		if out == nil {
+			t.Fatalf("delta=%v: nil", tc.delta)
+		}
+		if (out.PartialText != nil) != tc.partial {
+			t.Fatalf("delta=%#v: got %+v, partial=%v", tc.delta, out, tc.partial)
+		}
+	}
+}
+
+func TestEnvToggleKnobsAreVerbatim(t *testing.T) {
+	// Python `(env.get(X) or "1")`: empty → default, raw compare (no trim).
+	runs := []struct {
+		name   string
+		build  func(map[string]string) ([]string, error)
+		env    map[string]string
+		want   string // argv token that must be present
+		banned string // argv token that must be absent
+	}{
+		{"cursor force empty→yolo", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&cursorExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"CURSOR_FORCE": ""}, "--yolo", ""},
+		{"cursor force spaced≠1→no yolo", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&cursorExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"CURSOR_FORCE": " 1 "}, "", "--yolo"},
+		{"agy skip empty→dangerous", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&agyExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"AGY_DANGEROUSLY_SKIP_PERMISSIONS": ""}, "--dangerously-skip-permissions", ""},
+		{"agy skip spaced≠1→clean", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&agyExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"AGY_DANGEROUSLY_SKIP_PERMISSIONS": " 1 "}, "", "--dangerously-skip-permissions"},
+		{"pi noext empty→extensions", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&piExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"PI_NO_EXTENSIONS": ""}, "--no-extensions", ""},
+		{"pi noext spaced 0→kept", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&piExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"PI_NO_EXTENSIONS": " 0 "}, "--no-extensions", ""},
+		{"pi noext 0→dropped", func(e map[string]string) ([]string, error) {
+			return resolveTurnHandlers(&piExecutor{}).BuildArgs("m", "", e, TurnCtx{})
+		}, map[string]string{"PI_NO_EXTENSIONS": "0"}, "", "--no-extensions"},
+	}
+	for _, tc := range runs {
+		argv, err := tc.build(tc.env)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tc.want != "" {
+			found := false
+			for _, a := range argv {
+				if a == tc.want {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s: %v missing %s", tc.name, argv, tc.want)
+			}
+		}
+		if tc.banned != "" {
+			for _, a := range argv {
+				if a == tc.banned {
+					t.Fatalf("%s: %v must not contain %s", tc.name, argv, tc.banned)
+				}
+			}
+		}
+	}
+}
+
+func TestClaudeStdinFrameByteParity(t *testing.T) {
+	// HTML-unsafe characters must arrive raw (ensure_ascii=False parity).
+	e := &claudeCodeExecutor{}
+	frame, err := e.BuildInitialStdin(`<a href="x">&</a>`+"ok", "s-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{`\u003c`, `\u003e`, `\u0026`} {
+		if strings.Contains(*frame, banned) {
+			t.Fatalf("frame over-escaped (%s): %s", banned, *frame)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(*frame), &parsed); err != nil {
+		t.Fatalf("frame is not JSON: %s", *frame)
+	}
+}
+
+func TestCodexTurnFailedErrorStringify(t *testing.T) {
+	e := &codexExecutor{}
+	out := e.ParseEvent(map[string]any{"type": "turn.failed", "error": "quota exceeded"})
+	if out == nil || out.Error != "quota exceeded" {
+		t.Fatalf("string error: %+v", out)
+	}
+	out = e.ParseEvent(map[string]any{"type": "turn.failed", "error": map[string]any{"message": "quota exceeded"}})
+	if out == nil || out.Error != "quota exceeded" {
+		t.Fatalf("object error with message: %+v", out)
+	}
+	out = e.ParseEvent(map[string]any{"type": "turn.failed", "error": map[string]any{"code": 42}})
+	if out == nil || out.Error == "" || out.Error == "codex turn failed" {
+		t.Fatalf("object error without message should be stringified: %+v", out)
+	}
+	out = e.ParseEvent(map[string]any{"type": "turn.failed"})
+	if out == nil || out.Error != "codex turn failed" {
+		t.Fatalf("absent error: %+v", out)
+	}
+}

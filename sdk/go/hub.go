@@ -265,6 +265,7 @@ func getTree() ([]treeEntry, *HubError) {
 			Tree      []treeEntry `json:"tree"`
 		}
 		if json.Unmarshal(raw, &meta) == nil &&
+			meta.FetchedAt <= float64(time.Now().Unix()+120) &&
 			time.Since(time.Unix(int64(meta.FetchedAt), 0)).Seconds() < HubCacheTTLSecs &&
 			orDefault(meta.Ref, "main") == HubRef() {
 			lockTree()

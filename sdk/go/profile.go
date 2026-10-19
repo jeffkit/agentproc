@@ -257,6 +257,12 @@ func ParseDeadline(value any) (float64, error) {
 	if value == nil {
 		return 0, nil
 	}
+	if t, ok := value.(time.Time); ok {
+		// yaml.v3 decodes an unquoted RFC3339 scalar into time.Time. Accepted
+		// even though Python errors on non-string deadlines — the scalar was
+		// already a real timestamp; refusing it here would only surprise.
+		return float64(t.UnixNano()) / 1e9, nil
+	}
 	s, ok := value.(string)
 	if !ok {
 		return 0, errors.New("profile.deadline must be an ISO-8601 timestamp string")

@@ -426,13 +426,13 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 		for id := range pendingPermissions {
 			ids = append(ids, id)
 		}
-		pendingPermissions = map[string]bool{}
 		pendingMu.Unlock()
 		sort.Strings(ids)
+		// The ids were removed from pending under the lock above — this path
+		// already owns them; claimPending here would look into the fresh,
+		// empty map and never fire (the regression this replaces).
 		for _, id := range ids {
-			if claimPending(id) {
-				writePermissionResponse(map[string]any{"request_id": id, "behavior": "deny", "message": message})
-			}
+			writePermissionResponse(map[string]any{"request_id": id, "behavior": "deny", "message": message})
 		}
 	}
 
@@ -676,8 +676,8 @@ func runSpawn(ctx context.Context, profile *Profile, opts *RunOptions) (*RunResu
 							}
 						}()
 						decision := opts.OnPermission(req)
-						if turnFinished.Load() {
-							return
+						if turnFinished.Load() || decision == nil {
+							return // nil decision: stay pending for the kill-path deny
 						}
 						if rid, ok := req["request_id"].(string); ok && !claimPending(rid) {
 							return // already answered by the kill-path deny

@@ -9,6 +9,22 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 ## Released
 
+### Go SDK 0.1.3 — released 2026-10-19 (tag `sdk/go/v0.1.3`)
+
+**fix(sdk/go): second review round — a dead deny path in the previous fix, executor truthiness parity, and fuzz-clean parsing.**
+
+Four more independent reviewers (adversarial diff review, native fuzzing, per-CLI parity audit, black-box integration). All findings verified, fixed where ours, and pinned:
+
+- **P1 — the round-1 kill-path permission deny was dead code.** Routing `denyPending` through the new `claimPending` made every deny a no-op (the map was cleared before the claim): a timed-out turn's pending `permission_request` never received its deny frame before the kill. `denyPending` now owns the removal directly, and a slow `OnPermission` that finally returns a decision can no longer double-answer a request the kill path already denied. A nil decision leaves the request pending so the kill path can still deny it. Two new tests assert the deny frame actually reaches the agent.
+- **P1 — executor truthiness parity (canonical = Python/Node):** `is_error` (claude-code / codebuddy / cursor) and `delta` (gemini-cli / qwen-code) now use Python truthiness — the string `"false"` is truthy, so it takes the error/partial branch where Go's strict bool assertions wrongly succeeded/finalized. Environment toggle knobs (`CURSOR_FORCE`, `AGY_DANGEROUSLY_SKIP_PERMISSIONS`, `PI_NO_EXTENSIONS`) now mirror Python's `(env.get(X) or default)` exactly: empty → default, raw comparison without trimming (`" 1 "` ≠ `"1"` — security-adjacent flags like `--yolo` / `--dangerously-skip-permissions` follow the reference argv).
+- **P2 — codex `turn.failed` error text** stringifies the whole error value (compact JSON) instead of extracting only `error.message`; **the claude-code stdin frame** no longer HTML-escapes (`<`/`&`) and emits U+2028/2029 raw, byte-matching Python's `ensure_ascii=False`; **`protocol_version: ""`** passes through to the handler context unchanged (Python/Node parity).
+- **P2 — hardening follow-ups from round 1:** yaml.v3's unquoted-RFC3339 `time.Time` deadlines are accepted (Python errors on non-strings; we accept the already-typed timestamp — documented divergence); the hub **tree** cache got the same future-`fetched_at` invalidation the per-profile cache received in 0.1.2.
+- **Fuzzing:** seven native fuzz targets added (`fuzz_test.go` — classify, profile YAML, deadline, session ids, permission frames, hub metadata, jsDelivr tree), ~10.5M executions across adversarial seeds: zero crashes in our code or in yaml.v3 (its recursion depth is bounded at 10000, verified).
+- **Black-box integration:** 14/14 scenarios pass against the real binary (200KB unicode via slow-reading bridges with no deadlock, SIGINT→130 / SIGTERM→143 with zero orphaned grandchildren, journal NDJSON validity, attachments, env edge cases, session continuity, parallel invocations).
+- **Known divergences in the OTHER SDKs, filed for their maintainers (not changed here):** Python's `parse_event` crashes the whole runner on seven malformed-but-plausible event shapes (`content: null` → TypeError, etc.) where Go returns nil; Python emits a wire-invalid `"input": null` permission_request when `input` is omitted.
+
+`go test -race` full suite green; nine new parity/regression tests. Wire protocol stays `0.4`.
+
 ### Go SDK 0.1.2 — released 2026-10-19 (tag `sdk/go/v0.1.2`)
 
 **fix(sdk/go): four-subagent review round — lifecycle hangs, misreported exits, and kill-safety hardening.**

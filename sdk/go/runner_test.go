@@ -128,6 +128,48 @@ func TestContextCancelIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestNilPermissionDecisionStaysPendingForKillDeny(t *testing.T) {
+	requireExecable(t)
+	dir := t.TempDir()
+	respFile := filepath.Join(dir, "resp.json")
+	agent := filepath.Join(dir, "agent.sh")
+	body := "#!/usr/bin/env bash\n" +
+		"trap '' TERM INT\n" +
+		"read -r turn\n" +
+		"echo '{\"type\":\"permission_request\",\"request_id\":\"r2\",\"tool_name\":\"Bash\",\"input\":{}}'\n" +
+		"read -r line && printf '%s' \"$line\" > \"$RESP_FILE\"\n" +
+		"sleep 30\n"
+	if err := os.WriteFile(agent, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Run(t.Context(), map[string]any{
+		"command":         agent,
+		"permission":      true,
+		"timeout_secs":    1,
+		"kill_grace_secs": 1,
+	}, &RunOptions{
+		Message:  "hi",
+		ExtraEnv: map[string]string{"RESP_FILE": respFile},
+		OnPermission: func(request map[string]any) *PermissionDecision {
+			time.Sleep(3 * time.Second) // decides after the kill path already denied
+			return &PermissionDecision{Behavior: "allow"}
+		},
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !result.TimedOut {
+		t.Fatalf("expected timeout, got %+v", result)
+	}
+	raw, err := os.ReadFile(respFile)
+	if err != nil {
+		t.Fatalf("agent never received a response: %v", err)
+	}
+	if !strings.Contains(string(raw), `"message":"permission timed out"`) {
+		t.Fatalf("slow allow must not double-answer a denied request: %s", raw)
+	}
+}
+
 func TestSpawnPathPermissionRoundtrip(t *testing.T) {
 	requireExecable(t)
 	dir := t.TempDir()
@@ -189,9 +231,13 @@ func TestPermissionTimeoutDeniesPending(t *testing.T) {
 	dir := t.TempDir()
 	// The agent asks and never reads the answer; the timeout path must deny
 	// the pending request before killing (spec: prefer deny, then kill).
+	respFile := filepath.Join(dir, "resp.json")
 	agent := filepath.Join(dir, "agent.sh")
 	body := "#!/usr/bin/env bash\n" +
+		"trap '' TERM INT\n" +
+		"read -r turn\n" +
 		"echo '{\"type\":\"permission_request\",\"request_id\":\"r1\",\"tool_name\":\"Bash\",\"input\":{}}'\n" +
+		"read -r line && printf '%s' \"$line\" > \"$RESP_FILE\"\n" +
 		"sleep 30\n"
 	if err := os.WriteFile(agent, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -203,7 +249,8 @@ func TestPermissionTimeoutDeniesPending(t *testing.T) {
 		"timeout_secs":    1,
 		"kill_grace_secs": 1,
 	}, &RunOptions{
-		Message: "hi",
+		Message:  "hi",
+		ExtraEnv: map[string]string{"RESP_FILE": respFile},
 		OnPermission: func(request map[string]any) *PermissionDecision {
 			// Block: no decision, the request stays pending until timeout.
 			asked <- "asked"
@@ -217,6 +264,18 @@ func TestPermissionTimeoutDeniesPending(t *testing.T) {
 	<-asked
 	if !result.TimedOut || result.ExitCode != ExitTimeout {
 		t.Fatalf("expected timeout, got %+v", result)
+	}
+	// Regression (review round 2): the kill-path deny must actually reach
+	// the agent — a claimPending refactor had made denyPending dead code.
+	raw, err := os.ReadFile(respFile)
+	if err != nil {
+		t.Fatalf("agent never received the timeout deny: %v", err)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(raw, &resp); err != nil ||
+		resp["behavior"] != "deny" || resp["request_id"] != "r1" ||
+		resp["message"] != "permission timed out" {
+		t.Fatalf("unexpected deny frame: %s (%v)", raw, err)
 	}
 }
 
