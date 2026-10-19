@@ -42,9 +42,10 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           VERSION="${TAG#agentproc-cli/}"
+          case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
           EXT=""
           [ "$GOOS" = "windows" ] && EXT=".exe"
-          go build -trimpath -ldflags "-s -w -X main.versionOverride=v${VERSION}" \
+          go build -trimpath -ldflags "-s -w -X main.versionOverride=${VERSION}" \
             -o "dist/agentproc-${GOOS}-${GOARCH}${EXT}" ./cmd/agentproc
       - uses: actions/upload-artifact@v4
         with:
@@ -66,6 +67,7 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           VERSION="${TAG#agentproc-cli/}"
+          case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
           gh release create "$TAG" dist/* \
             --title "agentproc CLI ${VERSION}" \
             --notes "Prebuilt \`agentproc\` CLI binaries (Go implementation).
