@@ -61,6 +61,8 @@ That's a complete agent.
 ```bash
 pip install agentproc         # Python
 npm install agentproc         # Node.js
+cargo add agentproc           # Rust
+go get github.com/jeffkit/agentproc/sdk/go   # Go
 ```
 
 Python:
@@ -86,7 +88,7 @@ createProfile(async ({ message }) => {
 });
 ```
 
-Both SDKs are at parity: `send_partial` / `sendPartial` for streaming, `send_error` / `sendError` for surfacing errors, `ProtocolError` exception, `attachments` parsing, JSONL history helpers. The SDKs read the turn from stdin and write NDJSON events to stdout for you.
+All SDKs are at parity on observable behaviour: `send_partial` / `sendPartial` for streaming, `send_error` / `sendError` for surfacing errors, `ProtocolError` exception, `attachments` parsing, JSONL history helpers. The SDKs read the turn from stdin and write NDJSON events to stdout for you. (Rust and Go are host/bridge-oriented too: they expose the `run` runner for driving profiles programmatically and ship the in-process executor registry.)
 
 ## Where to go next
 
@@ -95,6 +97,8 @@ Both SDKs are at parity: `send_partial` / `sendPartial` for streaming, `send_err
 - **Complete docs in one file** (for LLM ingestion): https://agentproc.dev/llms-full.txt
 - **Python SDK reference**: https://agentproc.dev/sdk/python
 - **Node SDK reference**: https://agentproc.dev/sdk/node
+- **Rust SDK reference**: https://agentproc.dev/sdk/rust
+- **Go SDK reference**: https://agentproc.dev/sdk/go
 - **agentproc CLI** (canonical bridge runner): https://agentproc.dev/cli/
 - **Profile Hub** (ready-to-use profiles for claude/codex/codebuddy/agy): https://agentproc.dev/hub/
   - Source: https://github.com/jeffkit/agentproc/tree/main/hub

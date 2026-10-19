@@ -55,6 +55,21 @@ jobs:
         env:
           PYTHONPATH: src
 
+
+  test-go:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.24', '1.25']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: Run Go SDK tests
+        run: go test -count=1 ./...
+        working-directory: sdk/go
+
   # Single source of truth: spec/conformance/cases.json drives BOTH SDKs.
   # This job runs both conformance suites in one place so a divergence
   # (someone edits cases.json or one classify_line but not the other) shows
@@ -84,6 +99,12 @@ jobs:
         working-directory: sdk/python
         env:
           PYTHONPATH: src
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Go conformance
+        run: go test -count=1 -run 'TestClassifyLineConformance|TestEnvComposeConformance|TestPartialRoleConformance|TestAutoApproveFlagsMatchFixture|TestPostureConformance|TestExecutorPathConformance|TestScenarioConformance|TestSDKEntryConformance|TestEmbeddedDiagnosticsMirrorFixture|TestDiagnosticSamplesProduceExpectedHints' ./...
+        working-directory: sdk/go
 
   # Enforce the "single source of truth" invariants that are easy to break
   # by hand: package versions on npm/PyPI must match, PROTOCOL_VERSION must

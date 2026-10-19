@@ -25,7 +25,7 @@ features:
     description: WeChat, Slack, Telegram, Discord — the bridge adapts AgentProc to wherever your users are.
   - icon: 📜
     title: Open spec, zero lock-in
-    description: A 1-page protocol with reference implementations in Node, Python and Rust. Read it in 5 minutes, implement it in an afternoon.
+    description: A 1-page protocol with reference implementations in Node, Python, Rust and Go. Read it in 5 minutes, implement it in an afternoon.
 ---
 
 <div class="get-started">
@@ -176,7 +176,7 @@ Save as `bridge.js`, point it at a profile, and wire it to your messaging platfo
 - **[Read the protocol spec](/spec/)** — 1 page, defines everything
 - **[Profile Hub](/hub/)** — drop-in profiles for popular CLIs
 - **[CLI reference](/cli/)** — every flag and option
-- **[Python SDK](/sdk/python) / [Node SDK](/sdk/node) / [Rust SDK](/sdk/rust)** — embed AgentProc in your bridge
+- **[Python SDK](/sdk/python) / [Node SDK](/sdk/node) / [Rust SDK](/sdk/rust) / [Go SDK](/sdk/go)** — embed AgentProc in your bridge
 - **[Examples](/examples/)** — claude_code bridge, bare scripts, more
 - **[Troubleshooting](/guide/troubleshooting)** — stuck? Common errors and their fixes
 

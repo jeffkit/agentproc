@@ -9,6 +9,7 @@ AgentProc SDK 封装了从 stdin 读取 turn 对象、向 stdout 写 NDJSON 事�
 | Python | `agentproc` | `pip install agentproc` |
 | Node.js | `agentproc` | `npm install agentproc` |
 | Rust | `agentproc` | `cargo add agentproc` |
+| Go | `github.com/jeffkit/agentproc/sdk/go` | `go get github.com/jeffkit/agentproc/sdk/go` |
 
 ## 不用 SDK
 
@@ -51,8 +52,30 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+```go [Go]
+package main
+
+import (
+	"context"
+	"fmt"
+
+	agentproc "github.com/jeffkit/agentproc/sdk/go"
+)
+
+func main() {
+	result, err := agentproc.Run(context.Background(),
+		map[string]any{"command": "python3", "args": []string{"{{PROFILE_DIR}}/bridge.py"}},
+		&agentproc.RunOptions{Message: "hello"})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(result.Reply)
+}
+```
+
 :::
 
 - [Python SDK 文档](/zh/sdk/python)
 - [Node.js SDK 文档](/zh/sdk/node)
 - [Rust SDK 文档](/zh/sdk/rust)
+- [Go SDK 文档](/zh/sdk/go)

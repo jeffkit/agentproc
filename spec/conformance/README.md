@@ -85,30 +85,37 @@ comes from `result` / streaming `partial` rules (see the protocol spec).
 
 ## How it's used
 
-Both reference SDKs run the same fixtures through their runners:
+Four reference SDKs run the same fixtures through their runners:
 
 - `cases.json` → line classifiers:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.classify_line`
   - Node:   `sdk/node/src/conformance.test.js`    → `runner.classifyLine`
+  - Go:     `sdk/go/conformance_test.go`          → `agentproc.ClassifyLine`
 - `cases.json` `env_compose` → shared child-env composition:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner._compose_env`
   - Node:   `sdk/node/src/conformance.test.js`    → `runner.composeEnv`
+  - Go:     `sdk/go/conformance_test.go`          → `agentproc.ComposeEnv`
 - `cases.json` `partial_role_cases` → the `on_partial` / `onPartial` second argument:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.run` (fake bash agent)
   - Node:   `sdk/node/src/conformance.test.js`    → `runner.run` (fake bash agent)
+  - Go:     `sdk/go/conformance_test.go`          → `agentproc.Run` (fake bash agent)
 - `scenarios.json` → end-to-end `run()`:
   - Python: `sdk/python/tests/test_scenarios.py` → `agentproc.runner.run`
   - Node:   `sdk/node/src/scenarios.test.js`     → `runner.run`
+  - Go:     `sdk/go/scenarios_test.go`           → `agentproc.Run`
 - `sdk.json` → SDK entry points (subprocess):
   - Python: `sdk/python/tests/test_sdk.py` → spawns `tests/_sdk_harness.py` under `create_profile`
   - Node:   `sdk/node/src/sdk.test.js`     → spawns `src/sdk_harness.js` under `createProfile`
+  - Go:     `sdk/go/sdk_test.go`           → builds and spawns `internal/sdkharness` under `agentproc.Serve`
 - `diagnostics.json` → stderr diagnosis table:
   - Python: `sdk/python/tests/test_diagnostics.py` → `agentproc.runner.diagnose_stderr_failure` + `STDERR_DIAGNOSTICS`
   - Node:   `sdk/node/src/diagnostics.test.js`     → `runner.diagnoseStderrFailure` + `STDERR_DIAGNOSTICS`
+  - Go:     `sdk/go/diagnostics_test.go`           → `agentproc.DiagnoseStderrFailure` + `StderrDiagnostics`
 - `cases.json` `posture_cases` → in-process executor permission posture:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.run`
   - Node:   `sdk/node/src/conformance.test.js`     → `runner.run`
   - Rust:   `sdk/rust/src/conformance.rs`          → executor `build_args` + `posture_refusal`
+  - Go:     `sdk/go/conformance_test.go`          → `agentproc.Run` (shim CLI per executor)
   Each driver also asserts that its SDK's embedded auto-approve flag list is
   equal, item for item, to `auto_approve_flags` — the matrix is driven from
   this file, so those lists must not drift.
@@ -118,6 +125,7 @@ Both reference SDKs run the same fixtures through their runners:
   - Python: `sdk/python/tests/test_conformance.py` → `agentproc.runner.run_via_executor` (fake printf-backed executor)
   - Node:   `sdk/node/src/conformance.test.js`     → `runner.runViaExecutor` (fake tmp-script executor)
   - Rust:   `sdk/rust/src/conformance.rs`         → `agentproc::run` with a registered fake executor (`--features executors`)
+  - Go:     `sdk/go/executors_conformance_test.go` → `agentproc.RunViaExecutor` with a fake printf-backed executor
 
   All three consumers live in the language's existing conformance entry point,
   so each conformance job runs this fixture. Each of them asserts a minimum
@@ -182,7 +190,7 @@ no longer apply.
 ## CI
 
 The `.github/workflows/test.yml` workflow has a dedicated `conformance` job
-that runs both SDKs' conformance suites against this file. A divergence gets
+that runs the SDKs' conformance suites against this file. A divergence gets
 its own red light there, separate from the per-SDK matrices. The regular
 `test-node` / `test-python` jobs also include conformance as part of their
 full suites.

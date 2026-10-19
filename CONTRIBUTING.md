@@ -7,7 +7,7 @@ Thanks for your interest in improving AgentProc.
 ## Project layout
 
 - `spec/` — the protocol specification. EN at `protocol.md`, ZH at `protocol.zh.md`. These are the source of truth; everything else follows.
-- `sdk/python/`, `sdk/node/` — reference SDKs that implement the spec.
+- `sdk/python/`, `sdk/node/`, `sdk/rust/`, `sdk/go/` — reference SDKs that implement the spec.
 - `examples/` — minimal agent scripts in bash / Python / Node.
 - `hub/` — drop-in AgentProc profiles for popular AI CLIs (14 profiles: claude-code, codex, codebuddy, gemini-cli, cursor, qwen-code, opencode, kimi-code, recursive, agy, aider, pi, deepseek, echo-agent). Each profile is a directory with `profile.yaml`, `bridge.py`, `bridge.js`, `README.md`.
 - `docs/` — VitePress documentation site, English root and `zh/` mirror.
@@ -28,7 +28,7 @@ Keep `spec/protocol.md` and `spec/protocol.zh.md` in sync. If you only speak one
 
 ## SDK changes
 
-Both SDKs should be at parity. If you add a feature to one, add the equivalent to the other and update both test suites.
+All SDKs should be at parity on observable behaviour. If you change a spec-relevant behaviour, add the equivalent to every SDK that implements it (fixtures first — see spec/conformance/README.md) and update the per-SDK test suites.
 
 ### Running tests
 

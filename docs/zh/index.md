@@ -176,7 +176,7 @@ handleMessage(process.argv[2] || 'hello', '');
 - **[读协议规范](/zh/spec/)** —— 1 页，定义全部
 - **[Profile Hub](/zh/hub/)** —— 主流 CLI 的开箱即用 profile
 - **[CLI 参考](/zh/cli/)** —— 每个选项和参数
-- **[Python SDK](/zh/sdk/python) / [Node SDK](/zh/sdk/node) / [Rust SDK](/zh/sdk/rust)** —— 在你 bridge 里嵌入 AgentProc
+- **[Python SDK](/zh/sdk/python) / [Node SDK](/zh/sdk/node) / [Rust SDK](/zh/sdk/rust) / [Go SDK](/zh/sdk/go)** —— 在你 bridge 里嵌入 AgentProc
 - **[示例](/zh/examples/)** —— claude_code bridge、裸脚本等
 - **[故障排除](/zh/guide/troubleshooting)** —— 卡住了？常见错误和确切修法
 

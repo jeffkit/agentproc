@@ -9,6 +9,7 @@ AgentProc SDKs remove the boilerplate of reading the turn object from stdin and 
 | Python | `agentproc` | `pip install agentproc` |
 | Node.js | `agentproc` | `npm install agentproc` |
 | Rust | `agentproc` | `cargo add agentproc` |
+| Go | `github.com/jeffkit/agentproc/sdk/go` | `go get github.com/jeffkit/agentproc/sdk/go` |
 
 ## Without an SDK
 
@@ -51,8 +52,30 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+```go [Go]
+package main
+
+import (
+	"context"
+	"fmt"
+
+	agentproc "github.com/jeffkit/agentproc/sdk/go"
+)
+
+func main() {
+	result, err := agentproc.Run(context.Background(),
+		map[string]any{"command": "python3", "args": []string{"{{PROFILE_DIR}}/bridge.py"}},
+		&agentproc.RunOptions{Message: "hello"})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(result.Reply)
+}
+```
+
 :::
 
 - [Python SDK docs](/sdk/python)
 - [Node.js SDK docs](/sdk/node)
 - [Rust SDK docs](/sdk/rust)
+- [Go SDK docs](/sdk/go)

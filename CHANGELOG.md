@@ -5,8 +5,33 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.10`. Does not change the wire contract (except when paired with a wire bump).
 - **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (unreleased); the Rust crate is on its own track currently `0.15.0`. Includes runner/CLI/SDK behaviour changes.
+- **Go module version** — `sdk/go` (`github.com/jeffkit/agentproc/sdk/go`), on its own track like the Rust crate; currently `0.1.0`. Includes runner/SDK behaviour changes.
 
 ## Released
+
+### Go SDK 0.1.0 — unreleased
+
+**feat(sdk/go): the fourth reference SDK — a Go implementation of the full bridge + agent contract (wire 0.4).**
+
+New `sdk/go` module (`github.com/jeffkit/agentproc/sdk/go`, Go 1.24, single dependency `gopkg.in/yaml.v3`). Library-only, like the Rust crate: no CLI, no hub fetch. Everything else is at observable parity with the Python/Node/Rust SDKs and is verified against the same shared fixtures — the Go test suite drives `spec/conformance/` directly:
+
+- `cases.json` — `ClassifyLine` line classification (all 41 cases), the three-layer `ComposeEnv` child-env policy (`env_compose`), and the `OnPartial` role passthrough (`partial_role_cases`, nil role preserved — the runner never synthesises `"output"`).
+- `scenarios.json` — all 22 multi-line turn scenarios end-to-end through `Run` with generated bash agents, including the `budget_secs` timing scenario and `partials_any_of` race semantics.
+- `executors.json` — the 15 in-process executor-path scenarios through `RunViaExecutor` with a fake printf-backed executor (including both `initial_stdin` scenarios: the payload reaches the CLI's stdin, not argv; a missing hook leaves the null device).
+- `cases.json` `posture_cases` — all 18 permission-posture cases against the real built-in registry with a shim CLI on PATH (refusal ⇒ the CLI is never spawned).
+- `sdk.json` — the 9 SDK-entry scenarios through `agentproc.Serve` via a compiled `internal/sdkharness` binary, byte-exact stdout + exit codes (Go handlers are synchronous, which covers the fixture's async and sync families by construction).
+- `diagnostics.json` — the embedded `StderrDiagnostics` table is asserted rule-for-rule against the fixture, and each sample produces the expected hint.
+
+Implementation notes:
+
+- **Runner (spawn path):** three-layer env composition (infra set → profile `env` with `${VAR}` expansion and `env_allowlist` filtering → extras), `{{SESSION_ID}}` / `{{SESSION_NAME}}` / `{{PROFILE_DIR}}` placeholders (message never in argv), earliest-expiry of `timeout_secs` / `budget_secs` / `deadline` (a past deadline expires immediately), SIGTERM → `kill_grace_secs` → SIGKILL against the whole **process group** (`Setpgid` + group kill; Windows degrades to the direct process), the 1 s bounded post-exit drain (a grandchild holding the pipe cannot hang the turn; the child's own unterminated tail is never lost), exit-code normalisation (`128 + signal`), the timeout > error-event > exit-code precedence, first-non-empty session ids with wire validation (path separators / control chars / `.` / `..` rejected, conflicting values keep the first), `usage` on terminal events, the spawn-path permission channel (`OnPermission` decisions written as `permission_response` frames; malformed requests denied when the id is parseable; timeout/cancel deny pending requests first), and the opt-in journal (`OnJournal` with `seq`/`ts` and the `timeout` / `sigterm_process_group` / `sigkill_process_group` decision vocabulary).
+- **Cooperative cancel:** cancelling the `context.Context` performs the graded group kill and returns `ExitCancelled` (125) with `TimedOut=false` — the Go shape of the Python SDK's `cancel_event`.
+- **Agent side:** `agentproc.Serve(handler)` mirrors `create_profile` / `createProfile` — reads the turn object, version-mismatch stderr diagnostic (fail-soft), `SendPartial` (optional role), non-terminal `SendError`, fatal `ProtocolError` (error event + exit 1), `SendPermissionRequest` / `ReadPermissionResponse`, and the exact result-event emission rules (empty response + empty session id emits nothing; `nil` result emits nothing).
+- **In-process executors:** the `Executor` interface with the spec's four-case resolution (unknown executor + command → warn and spawn; + no command → hard fail listing the registry), `TurnFactory` as `makeHandlers` (per-turn state for cursor / kimi-code / grok-build / agy), `InitialStdinBuilder` as `buildInitialStdin` (claude-code feeds the stream-json user turn on stdin in both modes), `SessionIDGetter` as `getSessionId` for plain CLIs, and the two posture refusals via `PostureRefusal`. The built-in registry is a faithful port of the Python one: claude-code (the only `SupportsPermission` executor), codebuddy, codex (`--` positional guard), cursor (duplicate-tail suppression), gemini-cli, qwen-code, opencode, kimi-code, grok-build (soft/hard chunk flushing), and the plain-text bridges agy / aider / deepseek / dsh / pi.
+- **Not implemented (documented):** the Python SDK's workspace run lock, and the hub/CLI layers. The protocol contract is unaffected.
+- CI: a `test-go` matrix job (1.24 / 1.25) and a Go step in the dedicated `conformance` job wire the new SDK into `.github/workflows/test.yml`; the conformance README lists the Go driver for every fixture.
+
+Wire protocol stays `0.4` — nothing on stdin/stdout changed for the existing SDKs.
 
 ### Spec / SDK 0.20.0 — unreleased
 

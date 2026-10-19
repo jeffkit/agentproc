@@ -7,7 +7,7 @@ Guidance for AI coding agents (Claude Code, Cursor, Aider, etc.) working in this
 AgentProc is a minimal protocol specification that defines how a messaging-platform bridge talks to an agent process. The repo contains:
 
 - The protocol spec (source of truth)
-- Three reference SDKs (Python, Node.js, and Rust) that implement the spec
+- Four reference SDKs (Python, Node.js, Rust, and Go) that implement the spec
 - Examples (bare scripts + claude CLI wrappers)
 - A VitePress documentation site
 
@@ -24,8 +24,13 @@ agentproc/
 │   ├── python/              # `agentproc` on PyPI
 │   │   ├── src/agentproc/   # the package
 │   │   └── tests/           # pytest
-│   └── node/                # `agentproc` on npm (SDK + CLI)
-│       └── src/             # index.js (SDK), cli.js (CLI), runner.js (core), tests
+│   ├── node/                # `agentproc` on npm (SDK + CLI)
+│   │   └── src/             # index.js (SDK), cli.js (CLI), runner.js (core), tests
+│   ├── rust/                # `agentproc` on crates.io (host/bridge-oriented)
+│   └── go/                  # `github.com/jeffkit/agentproc/sdk/go` (Go module)
+│       ├── runner.go        # spawn-path engine + in-process executor path
+│       ├── executors*.go    # Executor interface, registry, built-in CLIs
+│       └── *_test.go        # drives the shared conformance fixtures
 ├── examples/
 │   ├── bash/                # echo agent (smoke test)
 │   ├── python/              # claude_bridge.py
@@ -64,9 +69,9 @@ agentproc/
 
 `hub/<name>/` directories each contain a pure-P0 AgentProc profile for a real AI CLI. Each profile ships a Python bridge (`bridge.py`) and a Node bridge (`bridge.js`) that wrap the same underlying CLI, plus the shared `profile.yaml` and `README.md`. The two bridges SHOULD stay at parity at the **observable** level (same NDJSON event → same AgentProc output for the same CLI), not the code level — they are free to differ in implementation detail (stderr buffering, error-message wording, control flow). If you fix a *spec-relevant* bug in one, fix it in the other; if you change a friendly-hint string in one, the other does not have to match. See `hub/README.md` for the schema.
 
-## The two SDKs aim to mirror, not to stay in lockstep
+## The SDKs aim to mirror, not to stay in lockstep
 
-The Python and Node SDKs are independent implementations of the same spec. They SHOULD agree on **observable behaviour** (same profile + message → same `reply` / `sessionId` / `error` / `exitCode`; same env injection; same timeout/SIGTERM semantics), verified by the shared `spec/conformance/` suite. They are NOT required to mirror at the code level — implementation details (how stderr is buffered, what friendly error-hint regexes a runner uses, threading vs event-loop) are each SDK's own business.
+The four SDKs (Python, Node, Rust, Go) are independent implementations of the same spec. They SHOULD agree on **observable behaviour** (same profile + message → same `reply` / `sessionId` / `error` / `exitCode`; same env injection; same timeout/SIGTERM semantics), verified by the shared `spec/conformance/` suite — every fixture lists its per-SDK drivers in `spec/conformance/README.md`. They are NOT required to mirror at the code level — implementation details (how stderr is buffered, what friendly error-hint regexes a runner uses, threading vs event-loop vs goroutines) are each SDK's own business.
 
 Naming convention (kept as a convenience for users who switch between the two, not a hard contract):
 
