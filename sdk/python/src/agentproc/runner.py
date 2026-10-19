@@ -1169,7 +1169,17 @@ def run_via_executor(
             return
         if not isinstance(event, dict):
             return
-        parsed = parse_event_fn(event)
+        try:
+            parsed = parse_event_fn(event)
+        except Exception as exc:  # noqa: BLE001 — a broken parse_event must
+            # not kill the whole runner; the offending line is skipped with a
+            # warning (spec malformed-line posture, applied per executor).
+            if options.on_stderr:
+                options.on_stderr(
+                    f"[agentproc runner] executor '{cli_name}' parse_event "
+                    f"raised on a line; ignoring it ({exc!r})"
+                )
+            return
         if not isinstance(parsed, dict):
             return
         sid = parsed.get("session_id")

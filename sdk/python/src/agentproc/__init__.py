@@ -193,8 +193,14 @@ class AgentContext:
         if not isinstance(rid, str) or not rid:
             raise ValueError("req['request_id'] is required")
         payload: Dict[str, Any] = {"type": "permission_request"}
-        for k in ("request_id", "tool_name", "input"):
-            payload[k] = req.get(k)
+        input_value = req.get("input")
+        if not isinstance(input_value, dict):
+            # The wire requires an object; emitting null would be rejected by
+            # every runner (the Go SDK defaults to {} the same way).
+            input_value = {}
+        payload["request_id"] = req.get("request_id")
+        payload["tool_name"] = req.get("tool_name")
+        payload["input"] = input_value
         for k in ("description", "tool_use_id"):
             if k in req:
                 payload[k] = req[k]

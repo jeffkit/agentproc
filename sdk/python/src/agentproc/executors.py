@@ -61,6 +61,35 @@ from typing import Any, Callable, Dict, List, Optional
 __all__ = ["EXECUTORS", "executor_names"]
 
 
+def _message_text_blocks(event: Dict[str, Any]) -> str:
+    """Join the text blocks of an assistant message event, tolerating
+    wrong-typed fields. A malformed event (``message`` a string, ``content``
+    null/scalar, blocks of the wrong shape) contributes no text instead of
+    raising out of parse_event and killing the whole runner (Go SDK parity:
+    the comma-ok extraction there never panics)."""
+    msg = event.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if not isinstance(content, list):
+        return ""
+    parts: List[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            text = block.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
+def _str_or(value: Any, fallback: Any) -> Any:
+    """value when it is a non-empty string, else fallback."""
+    return value if isinstance(value, str) and value else fallback
+
+
+def _sid_of(event: Dict[str, Any], key: str = "session_id") -> Optional[str]:
+    sid = event.get(key)
+    return sid if isinstance(sid, str) and sid else None
+
+
 # ---------------------------------------------------------------------------
 # claude-code
 # ---------------------------------------------------------------------------
@@ -132,21 +161,25 @@ def _claude_code_build_initial_stdin(message: str, session_id: str) -> str:
 def _claude_code_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     etype = event.get("type")
     if etype == "system" and event.get("subtype") == "init":
-        sid = event.get("session_id")
-        if isinstance(sid, str) and sid:
-            return {"session_id": sid}
-        return None
+        sid = _sid_of(event)
+        return {"session_id": sid} if sid else None
     if etype == "assistant":
-        text = "".join(
-            b.get("text", "") for b in (event.get("message") or {}).get("content", [])
-            if b.get("type") == "text"
-        )
+        text = _message_text_blocks(event)
         return {"partial_text": text} if text else None
     if etype == "result":
-        sid = event.get("session_id")
+        sid = _sid_of(event)
         if event.get("is_error"):
-            return {"session_id": sid, "error": event.get("result") or "claude reported an error"}
-        return {"session_id": sid, "final_text": event.get("result") or None}
+            out: Dict[str, Any] = {"error": _str_or(event.get("result"), "claude reported an error")}
+            if sid:
+                out["session_id"] = sid
+            return out
+        out = {}
+        if sid:
+            out["session_id"] = sid
+        final = event.get("result")
+        if isinstance(final, str):
+            out["final_text"] = final
+        return out or None
     return None
 
 
@@ -184,16 +217,22 @@ def _codebuddy_build_args(message: str, session_id: str, env: Dict[str, str], _c
 def _codebuddy_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     etype = event.get("type")
     if etype == "assistant":
-        text = "".join(
-            b.get("text", "") for b in (event.get("message") or {}).get("content", [])
-            if b.get("type") == "text"
-        )
+        text = _message_text_blocks(event)
         return {"partial_text": text} if text else None
     if etype == "result":
-        sid = event.get("session_id")
+        sid = _sid_of(event)
         if event.get("is_error"):
-            return {"session_id": sid, "error": event.get("result") or "codebuddy reported an error"}
-        return {"session_id": sid, "final_text": event.get("result") or None}
+            out: Dict[str, Any] = {"error": _str_or(event.get("result"), "codebuddy reported an error")}
+            if sid:
+                out["session_id"] = sid
+            return out
+        out = {}
+        if sid:
+            out["session_id"] = sid
+        final = event.get("result")
+        if isinstance(final, str):
+            out["final_text"] = final
+        return out or None
     return None
 
 
@@ -229,13 +268,14 @@ def _codex_build_args(message: str, session_id: str, env: Dict[str, str], _ctx: 
 def _codex_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     etype = event.get("type")
     if etype == "thread.started":
-        return {"session_id": event.get("thread_id")}
+        sid = _sid_of(event, "thread_id")
+        return {"session_id": sid} if sid else None
     if etype == "item.completed":
-        item = event.get("item") or {}
-        if item.get("type") == "agent_message":
-            text = item.get("text", "")
-            return {"partial_text": text} if text else None
-        return None
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            return None
+        text = item.get("text")
+        return {"partial_text": text} if isinstance(text, str) and text else None
     if etype == "turn.failed":
         return {"error": str(event.get("error") or "codex turn failed")}
     return None
@@ -277,13 +317,10 @@ def _make_cursor_handlers() -> Dict[str, Any]:
     def parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         etype = event.get("type")
         if etype == "system" and event.get("subtype") == "init":
-            return {"session_id": event.get("session_id")}
+            sid = _sid_of(event)
+            return {"session_id": sid} if sid else None
         if etype == "assistant":
-            msg = event.get("message") or {}
-            text = "".join(
-                b.get("text", "") for b in msg.get("content", [])
-                if b.get("type") == "text"
-            )
+            text = _message_text_blocks(event)
             if not text:
                 return None
             if text == "".join(accumulated):
@@ -291,10 +328,19 @@ def _make_cursor_handlers() -> Dict[str, Any]:
             accumulated.append(text)
             return {"partial_text": text}
         if etype == "result":
-            sid = event.get("session_id")
+            sid = _sid_of(event)
             if event.get("is_error") or event.get("subtype") == "error":
-                return {"session_id": sid, "error": event.get("result") or "cursor agent reported an error"}
-            return {"session_id": sid, "final_text": event.get("result") or None}
+                out: Dict[str, Any] = {"error": _str_or(event.get("result"), "cursor agent reported an error")}
+                if sid:
+                    out["session_id"] = sid
+                return out
+            out = {}
+            if sid:
+                out["session_id"] = sid
+            final = event.get("result")
+            if isinstance(final, str):
+                out["final_text"] = final
+            return out or None
         return None
 
     return {"build_args": build_args, "parse_event": parse_event}
@@ -323,25 +369,31 @@ def _gemini_cli_build_args(message: str, session_id: str, env: Dict[str, str], _
     return args
 
 
-def _gemini_cli_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _gemini_style_parse_event(event: Dict[str, Any], label: str) -> Optional[Dict[str, Any]]:
     etype = event.get("type")
     if etype == "init":
-        return {"session_id": event.get("session_id")}
+        sid = _sid_of(event)
+        return {"session_id": sid} if sid else None
     if etype == "message":
         if event.get("role") != "assistant":
             return None
-        text = event.get("content", "")
-        if not text:
+        text = event.get("content")
+        if not isinstance(text, str) or not text:
             return None
         return {"partial_text": text} if event.get("delta") else {"final_text": text}
     if etype == "error":
         if event.get("severity") == "error":
-            return {"error": event.get("message") or "gemini reported an error"}
+            return {"error": _str_or(event.get("message"), f"{label} reported an error")}
         return None
     if etype == "result" and event.get("status") == "error":
-        err = event.get("error") or {}
-        return {"error": err.get("message") or "gemini turn failed"}
+        err = event.get("error")
+        msg = err.get("message") if isinstance(err, dict) else None
+        return {"error": _str_or(msg, f"{label} turn failed")}
     return None
+
+
+def _gemini_cli_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    return _gemini_style_parse_event(event, "gemini")
 
 
 GEMINI_CLI = {
@@ -373,8 +425,8 @@ def _make_kimi_code_handlers() -> Dict[str, Any]:
 
     def parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if event.get("role") == "assistant":
-            content = event.get("content", "")
-            if content:
+            content = event.get("content")
+            if isinstance(content, str) and content:
                 return {"partial_text": content, "final_text": content, "session_id": session["id"]}
         return None
 
@@ -407,19 +459,23 @@ def _opencode_build_args(message: str, session_id: str, env: Dict[str, str], _ct
 
 def _opencode_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     etype = event.get("type")
-    sid = event.get("sessionID") or None
-    part = event.get("part") or {}
+    sid = _sid_of(event, "sessionID")
+    part = event.get("part")
+    part = part if isinstance(part, dict) else {}
 
     if etype == "text":
-        text = part.get("text", "")
-        if text:
+        text = part.get("text")
+        if isinstance(text, str) and text:
             return {"session_id": sid, "partial_text": text}
         return {"session_id": sid} if sid else None
     if etype in ("step_start", "step_finish", "tool_use"):
         return {"session_id": sid} if sid else None
     if etype == "error":
-        err = part.get("message") or (event.get("error") or {}).get("message") or "opencode reported an error"
-        return {"session_id": sid, "error": err}
+        msg = part.get("message")
+        if not isinstance(msg, str) or not msg:
+            err = event.get("error")
+            msg = err.get("message") if isinstance(err, dict) else None
+        return {"session_id": sid, "error": _str_or(msg, "opencode reported an error")}
     return None
 
 
@@ -448,24 +504,7 @@ def _qwen_code_build_args(message: str, session_id: str, env: Dict[str, str], _c
 
 
 def _qwen_code_parse_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    etype = event.get("type")
-    if etype == "init":
-        return {"session_id": event.get("session_id")}
-    if etype == "message":
-        if event.get("role") != "assistant":
-            return None
-        text = event.get("content", "")
-        if not text:
-            return None
-        return {"partial_text": text} if event.get("delta") else {"final_text": text}
-    if etype == "error":
-        if event.get("severity") == "error":
-            return {"error": event.get("message") or "qwen reported an error"}
-        return None
-    if etype == "result" and event.get("status") == "error":
-        err = event.get("error") or {}
-        return {"error": err.get("message") or "qwen turn failed"}
-    return None
+    return _gemini_style_parse_event(event, "qwen")
 
 
 QWEN_CODE = {
@@ -626,8 +665,8 @@ def _make_grok_build_handlers() -> Dict[str, Any]:
         nonlocal pending
         etype = event.get("type")
         if etype == "text":
-            data = event.get("data") or ""
-            if not data:
+            data = event.get("data")
+            if not isinstance(data, str) or not data:
                 return None
             full.append(data)
             pending += data
@@ -648,7 +687,7 @@ def _make_grok_build_handlers() -> Dict[str, Any]:
         if etype == "error":
             sid = event.get("sessionId")
             pending = ""
-            out = {"error": event.get("message") or "grok reported an error"}
+            out = {"error": _str_or(event.get("message"), "grok reported an error")}
             if isinstance(sid, str) and sid:
                 out["session_id"] = sid
             return out
