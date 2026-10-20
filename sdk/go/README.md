@@ -92,7 +92,9 @@ in-process executor — spawning the target CLI directly, no bridge
 subprocess. The built-in registry mirrors the Python/Node one (claude-code
 with the stdio permission channel, codex, cursor, gemini-cli, qwen-code,
 codebuddy, opencode, kimi-code, grok-build, agy, aider, deepseek, dsh, pi),
-and applications can register their own:
+adds Go's `recursive` (the native plain-mode executor mirroring plaita-nodes'
+"recursive-direct": plain stdout, trailing JSON result object, native
+`resume <session>`), and applications can register their own:
 
 ```go
 func init() {
@@ -105,7 +107,13 @@ func init() {
 Stateful executors implement `TurnFactory` (`MakeTurn()` per turn); the
 stdin prompt channel is the `InitialStdinBuilder` interface; plain-text CLIs
 declare `Plain() = true` and surface a minted session id via
-`SessionIDGetter`. The runner refuses to spawn (error + non-zero exit, never
+`SessionIDGetter`. When a plain CLI's stdout is an envelope rather than the
+reply itself (e.g. `recursive`'s trailing JSON result object carrying
+session_id / usage / is_error), implement the optional `PlainOutputParser`
+interface — the runner hands it the assembled plain stdout after drain, and
+its `ParseResult` overrides the reply and contributes session, usage, and a
+terminal error (`is_error` fails the turn even on exit 0). The runner refuses
+to spawn (error + non-zero exit, never
 a silent `--dangerously-skip-permissions`) when `permission: true` meets an
 executor without `SupportsPermission()`, or when `AGENTPROC_AUTO_APPROVE` is
 off and the argv carries an auto-approve flag.

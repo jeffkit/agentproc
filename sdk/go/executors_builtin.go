@@ -31,6 +31,7 @@ func init() {
 	RegisterExecutor("deepseek", func() Executor { return &deepseekExecutor{} })
 	RegisterExecutor("dsh", func() Executor { return &dshExecutor{} })
 	RegisterExecutor("pi", func() Executor { return &piExecutor{} })
+	RegisterExecutor("recursive", func() Executor { return &recursiveExecutor{} })
 }
 
 // envKnob reads an environment knob with the runner-side default (trimmed) —
@@ -827,4 +828,153 @@ func (e *grokBuildExecutor) MakeTurn() *TurnHandlers {
 			return nil
 		},
 	}
+}
+
+// ---------------------------------------------------------------------------
+// recursive
+// ---------------------------------------------------------------------------
+
+// recursiveExecutor runs the recursive CLI in its native plain mode — the
+// same semantics as plaita-nodes' in-process "recursive-direct" executor:
+// `--output-format json` stdout is not NDJSON; the reply lives in the
+// trailing JSON result object together with session_id / usage / is_error,
+// which ParsePlainOutput extracts. The message rides in argv (the
+// recursive-direct bounded exception to the stdin-turn rule); resume uses
+// recursive's native `resume <session> --message`.
+type recursiveExecutor struct{}
+
+func (e *recursiveExecutor) CLIName() string { return "recursive" }
+
+func (e *recursiveExecutor) InstallHint() string {
+	return "Install: from the recursive repo, `cargo install --locked --path .` (then `recursive init`)"
+}
+
+func (e *recursiveExecutor) Plain() bool              { return true }
+func (e *recursiveExecutor) SupportsPermission() bool { return false }
+
+// ParseEvent is never called (Plain); the interface requires the method.
+func (e *recursiveExecutor) ParseEvent(map[string]any) *ParseResult { return nil }
+
+// BuildArgs mirrors plaita-nodes build_args: headless automation flags,
+// provider/model via env, then `run -- <message>` for a new session or
+// `resume <session> --message <m>` to continue one (L2 breakpoint resume).
+// The `--` ahead of the positional message follows the hub bridge's
+// hardening (spec ps/E2BIG boundary: every flag stays before the separator
+// so a message beginning with `-` cannot parse as one).
+func (e *recursiveExecutor) BuildArgs(message, sessionID string, env map[string]string, _ TurnCtx) ([]string, error) {
+	args := []string{
+		envOr(env, "RECURSIVE_BIN", "recursive"),
+		"--workspace", envOr(env, "RECURSIVE_WORKSPACE", "."),
+		"--output-format", envOr(env, "RECURSIVE_OUTPUT_FORMAT", "json"),
+		// headless: no permission bridge — explicit auto mode, otherwise a
+		// tool call would emit a control_request and hang until the timeout
+		"--permission-mode", "auto",
+	}
+	if v := envOr(env, "RECURSIVE_MODEL", ""); v != "" {
+		args = append(args, "--model", v)
+	}
+	if v := envOr(env, "RECURSIVE_MAX_STEPS", ""); v != "" {
+		args = append(args, "--max-steps", v)
+	}
+	if sessionID != "" {
+		args = append(args, "resume", sessionID, "--message", message)
+	} else {
+		args = append(args, "run", "--", message)
+	}
+	return args, nil
+}
+
+// ParsePlainOutput ports plaita-nodes extract_recursive_result: pull the
+// trailing JSON result object out of `--output-format json` stdout.
+// Strategy: line-start `{` objects scanned last-first (the result object
+// closes the stream; log noise appears mid-line), falling back to the first
+// `{"` with brace matching that skips string literals; raw text as a last
+// resort (plain-text CLIs behind the same env, e.g. wrapped runners).
+func (e *recursiveExecutor) ParsePlainOutput(stdout string) *ParseResult {
+	obj := extractRecursiveResult(stdout)
+	res := &ParseResult{}
+	if truthy(obj["is_error"]) {
+		res.Error = fmt.Sprint(obj["result"])
+		return res
+	}
+	if raw, _ := obj["raw"].(bool); raw {
+		text := strings.TrimSpace(obj["result"].(string))
+		res.FinalText = &text
+	} else if text, ok := obj["result"].(string); ok {
+		res.FinalText = &text
+	}
+	if sid, ok := obj["session_id"].(string); ok && sid != "" {
+		res.SessionID = sid
+	}
+	if usage, ok := obj["usage"].(map[string]any); ok {
+		res.Usage = usage
+	}
+	return res
+}
+
+// extractRecursiveResult scans stdout for the trailing JSON result object.
+func extractRecursiveResult(stdout string) map[string]any {
+	var lineStarts []int
+	offset := 0
+	for _, line := range strings.Split(stdout, "\n") {
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), "{") {
+			lineStarts = append(lineStarts, offset)
+		}
+		offset += len(line) + 1
+	}
+
+	scanOrder := make([]int, 0, len(lineStarts)+1)
+	for i := len(lineStarts) - 1; i >= 0; i-- {
+		scanOrder = append(scanOrder, lineStarts[i])
+	}
+	if idx := strings.Index(stdout, `{"`); idx >= 0 {
+		scanOrder = append(scanOrder, idx)
+	}
+
+	for _, start := range scanOrder {
+		if obj, ok := balancedJSONAt(stdout, start); ok {
+			return obj
+		}
+	}
+	return map[string]any{"result": stdout, "is_error": false, "raw": true}
+}
+
+// balancedJSONAt decodes the JSON object whose `{` sits exactly at start
+// (brace matching honouring string escapes). ok=false when no balanced
+// object starts there.
+func balancedJSONAt(s string, start int) (map[string]any, bool) {
+	if start >= len(s) || s[start] != '{' {
+		return nil, false
+	}
+	depth, inString, escaped := 0, false, false
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case ch == '\\':
+				escaped = true
+			case ch == '"':
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				var obj map[string]any
+				if err := json.Unmarshal([]byte(s[start:i+1]), &obj); err != nil {
+					return nil, false
+				}
+				return obj, true
+			}
+		}
+	}
+	return nil, false
 }

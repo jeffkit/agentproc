@@ -1245,6 +1245,26 @@ drain:
 
 	if plain {
 		result.Reply = strings.TrimSpace(strings.Join(plainLines, "\n"))
+		if pp, ok := executor.(PlainOutputParser); ok {
+			if parsed := pp.ParsePlainOutput(strings.Join(plainLines, "\n")); parsed != nil {
+				if parsed.Error != "" && errorMessage == nil {
+					message := parsed.Error
+					errorMessage = &message
+				}
+				if parsed.FinalText != nil {
+					result.Reply = *parsed.FinalText
+				}
+				if parsed.SessionID != "" && IsValidSessionIDString(parsed.SessionID) && result.SessionID == "" {
+					result.SessionID = parsed.SessionID
+					if opts.OnSession != nil {
+						opts.OnSession(parsed.SessionID)
+					}
+				}
+				if parsed.Usage != nil && result.Usage == nil {
+					result.Usage = parsed.Usage
+				}
+			}
+		}
 	} else {
 		switch {
 		case cancelled:
