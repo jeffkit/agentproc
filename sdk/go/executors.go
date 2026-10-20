@@ -53,6 +53,18 @@ type Executor interface {
 	ParseEvent(event map[string]any) *ParseResult
 }
 
+// PlainOutputParser is an optional Executor extension for Plain() executors
+// whose stdout is not the reply itself but an envelope carrying it — e.g.
+// recursive's native plain mode, where the trailing JSON result object holds
+// the reply text plus session_id / usage / is_error. After the child exits
+// and the pipes are drained, the runner hands the assembled plain stdout to
+// ParsePlainOutput once; a non-nil result overrides the reply (FinalText)
+// and contributes SessionID (wire-validated), Usage, and a terminal Error
+// (a turn that reports is_error fails even on exit 0).
+type PlainOutputParser interface {
+	ParsePlainOutput(stdout string) *ParseResult
+}
+
 // TurnFactory is the optional makeHandlers equivalent: stateful executors
 // (per-turn parse state, a session id minted in BuildArgs) implement it and
 // the runner calls MakeTurn() once per turn, using the returned handlers for

@@ -5,7 +5,17 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.10`. Does not change the wire contract (except when paired with a wire bump).
 - **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (released); the Rust crate is on its own track currently `0.15.0`. Includes runner/CLI/SDK behaviour changes.
-- **Go module version** — `sdk/go` (`github.com/jeffkit/agentproc/sdk/go`), on its own track like the Rust crate; currently `0.1.0`. Includes runner/SDK behaviour changes.
+- **Go module version** — `sdk/go` (`github.com/jeffkit/agentproc/sdk/go`), on its own track like the Rust crate; currently `0.1.3` (released). Includes runner/SDK behaviour changes.
+
+## Unreleased
+
+### Go SDK 0.1.4 (unreleased)
+
+**feat(sdk/go): built-in `recursive` executor — the native plain-mode adapter (plaita-nodes "recursive-direct" parity).**
+
+- **`PlainOutputParser` optional interface** (`executors.go`): for `Plain()` executors whose stdout is an envelope rather than the reply, the runner hands the assembled plain stdout to `ParsePlainOutput` once after drain; a non-nil result overrides the reply (`FinalText`) and contributes SessionID (wire-validated) / Usage / terminal Error. NDJSON executors and the spawn path are untouched.
+- **`recursive` executor** (`executors_builtin.go`): argv per plaita-nodes `build_args` — `RECURSIVE_BIN/WORKSPACE/OUTPUT_FORMAT/MODEL/MAX_STEPS` env knobs, baked `--permission-mode auto` (headless), `run -- <message>` (the `--` follows the hub bridge's message-in-argv hardening) or native `resume <session> --message <m>`; the trailing result object is extracted per `extract_recursive_result` (line-start `{` scanned last-first, `{"` fallback with string-aware brace matching, raw-text last resort; `is_error` fails the turn on Python truthiness even on exit 0).
+- Tests cover the argv/env/resume table, envelope parsing (log noise / pretty-printed / mid-line / raw fallback / is_error), and end-to-end `Run` + native resume against a fake binary. Hub users keep the bridge profile (`hub/recursive`); SDK consumers now have the in-process path with no Python runtime dependency.
 
 ## Released
 
