@@ -38,7 +38,9 @@ jobs:
         working-directory: sdk/node
 
   test-python:
-    runs-on: ubuntu-latest
+    # ubuntu-latest rolled to 26.04 (2026-11), which no longer provides
+    # Python 3.9 (EOL) — pin the matrix to 24.04 while 3.9 stays supported.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12', '3.13']
