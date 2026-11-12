@@ -72,6 +72,23 @@ jobs:
         run: go test -count=1 ./...
         working-directory: sdk/go
 
+  # The Rust SDK (sdk/rust) had no CI coverage until 2026-11 — regressions
+  # only surfaced when someone ran cargo test locally. This job keeps the
+  # crate honest. cargo test (not --all-targets) also runs doc-tests.
+  # Clippy/fmt are deliberately absent: the tree predates CI (15 clippy 1.98
+  # lints + fmt drift, 2026-11-12) — clean those up before gating on them.
+  test-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk/rust
+      - name: Run Rust SDK tests
+        run: cargo test
+        working-directory: sdk/rust
+
   # Single source of truth: spec/conformance/cases.json drives BOTH SDKs.
   # This job runs both conformance suites in one place so a divergence
   # (someone edits cases.json or one classify_line but not the other) shows
