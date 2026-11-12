@@ -4,12 +4,18 @@ All notable changes to AgentProc are documented here. Three version tracks are k
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
 - **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.12`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (released); the Rust crate is on its own track currently `0.15.0` (released). Includes runner/CLI/SDK behaviour changes.
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.21.0` (released); the Rust crate is on its own track currently `0.15.0` (released). Includes runner/CLI/SDK behaviour changes.
 - **Go module version** — `sdk/go` (`github.com/jeffkit/agentproc/sdk/go`), on its own track like the Rust crate; currently `0.1.4` (released). Includes runner/SDK behaviour changes.
 
 ## Unreleased
 
-### SDK 0.21.0 (Python + Node, unreleased)
+### Rust crate 0.15.1 (unreleased — publish via `publish-rust.yml`)
+
+No code change. Spec doc revision sync per repo convention (doc 1.12 adds the Concurrency section; the primitives ship Python/Node-side).
+
+## Released
+
+### SDK 0.21.0 — released 2026-11-12 (tag `v0.21.0`) — Python + Node
 
 **feat(sdk): concurrency primitives for bridge hosts — process-wide run gate with explicit queue-or-drop policy, opt-in per-session serialization, atomic session-file appends, and run-lock generation tokens (issue #17).**
 
