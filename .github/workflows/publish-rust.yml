@@ -1,15 +1,24 @@
 name: Publish Rust crate
 
-# The Rust crate is on its own version track (sdk/rust/Cargo.toml) and does
+# The Rust crate is on its own version track (sdk/rust/Cargo.toml) and must
 # NOT auto-publish on `v*` tags — those tag the Python/Node SDK release and
-# the Rust version usually differs. Publishing is a manual, deliberate act:
-# bump the version, merge to main, then dispatch this workflow with
-# dry_run=false (requires the CRATES_TOKEN repo secret).
+# the Rust version usually differs (a routine "already published" failure
+# would be the result). Instead it follows the Go SDK's proven pattern:
+# a dedicated tag namespace that the `v*` glob cannot match.
+#
+#   Release flow:  bump sdk/rust/Cargo.toml → merge to main →
+#                  tag `sdk/rust/vX.Y.Z` → push → CI verifies tag==version
+#                  then publishes (requires the CRATES_TOKEN repo secret).
+#   Rehearsal:     dispatch this workflow manually with dry_run=true
+#                  (full package + verify build, no upload).
 #
 # crates.io releases are effectively permanent — a botched version cannot be
-# re-published, only yanked. Always dry_run=true first.
+# re-published, only yanked. Rehearse with dry_run=true before the first tag.
 
 on:
+  push:
+    tags:
+      - 'sdk/rust/v*'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -26,17 +35,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: sdk/rust
+      - name: Verify tag matches crate version
+        if: ${{ github.event_name == 'push' }}
+        working-directory: sdk/rust
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          ref="${GITHUB_REF#refs/tags/sdk/rust/v}"
+          echo "tag wants: $ref | Cargo.toml has: $version"
+          if [ "$version" != "$ref" ]; then
+            echo "::error::tag sdk/rust/v${ref} does not match Cargo.toml version ${version} — bump the crate and re-tag (delete the wrong tag first; crates.io is NOT yet involved)"
+            exit 1
+          fi
       - name: Show crate version
         working-directory: sdk/rust
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
           echo "agentproc crate version: $version"
       - name: Dry run (package + verify build, no upload)
-        if: ${{ inputs.dry_run }}
+        if: ${{ github.event_name == 'push' || inputs.dry_run }}
         working-directory: sdk/rust
         run: cargo publish --dry-run
       - name: Publish to crates.io
-        if: ${{ !inputs.dry_run }}
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
         working-directory: sdk/rust
         env:
           CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
