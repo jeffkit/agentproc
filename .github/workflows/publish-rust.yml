@@ -1,0 +1,48 @@
+name: Publish Rust crate
+
+# The Rust crate is on its own version track (sdk/rust/Cargo.toml) and does
+# NOT auto-publish on `v*` tags — those tag the Python/Node SDK release and
+# the Rust version usually differs. Publishing is a manual, deliberate act:
+# bump the version, merge to main, then dispatch this workflow with
+# dry_run=false (requires the CRATES_TOKEN repo secret).
+#
+# crates.io releases are effectively permanent — a botched version cannot be
+# re-published, only yanked. Always dry_run=true first.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (full package + verify build, no upload)'
+        type: boolean
+        default: true
+
+jobs:
+  publish-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: sdk/rust
+      - name: Show crate version
+        working-directory: sdk/rust
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "agentproc crate version: $version"
+      - name: Dry run (package + verify build, no upload)
+        if: ${{ inputs.dry_run }}
+        working-directory: sdk/rust
+        run: cargo publish --dry-run
+      - name: Publish to crates.io
+        if: ${{ !inputs.dry_run }}
+        working-directory: sdk/rust
+        env:
+          CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: |
+          if [ -z "$CRATES_TOKEN" ]; then
+            echo "::error::CRATES_TOKEN repo secret is not set — add it via: gh secret set CRATES_TOKEN -R ${{ github.repository }}"
+            exit 1
+          fi
+          cargo publish --token "$CRATES_TOKEN"
