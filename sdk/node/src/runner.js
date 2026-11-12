@@ -45,6 +45,195 @@ const readline = require('node:readline');
 const { EXECUTORS, executorNames } = require('./executors.js');
 
 // ---------------------------------------------------------------------------
+// Concurrency gate (issue #17) — process-wide, opt-in, defaults unbounded
+// ---------------------------------------------------------------------------
+
+/**
+ * The wire protocol is scoped to one turn, but a bridge is a long-lived
+ * process and can issue overlapping run() calls. This module-level gate
+ * gives the bridge two explicit knobs (spec "Concurrency (host side)");
+ * both default to the historical behaviour (unbounded), so existing
+ * deployments see no change:
+ *
+ *   - Global run gate: at most `maxConcurrentRuns` run() calls execute at
+ *     once; when full, `overflow` decides — 'wait' (default) blocks until a
+ *     slot frees, 'reject' throws ConcurrencyRejected immediately so the
+ *     bridge can answer "busy".
+ *   - Per-session serializer: with serializeSameSession on, a run() whose
+ *     sessionId equals one already in flight waits for the earlier turn to
+ *     finish (two concurrent `--resume` processes on the same agent session
+ *     are undefined at the CLI layer — the host prevents them).
+ *
+ * Configured via configureConcurrency() or env (read once, lazily):
+ *   AGENTPROC_MAX_CONCURRENT_RUNS, AGENTPROC_CONCURRENCY_OVERFLOW,
+ *   AGENTPROC_SERIALIZE_SAME_SESSION
+ */
+
+const GATE_ENV_MAX = 'AGENTPROC_MAX_CONCURRENT_RUNS';
+const GATE_ENV_OVERFLOW = 'AGENTPROC_CONCURRENCY_OVERFLOW';
+const GATE_ENV_SERIALIZE = 'AGENTPROC_SERIALIZE_SAME_SESSION';
+
+class ConcurrencyRejected extends Error {
+  /**
+   * @param {string} message
+   * @param {number|null} maxConcurrentRuns
+   */
+  constructor(message, maxConcurrentRuns = null) {
+    super(message || 'run rejected: concurrent run limit reached');
+    this.name = 'ConcurrencyRejected';
+    this.isConcurrencyRejected = true;
+    this.maxConcurrentRuns = maxConcurrentRuns;
+  }
+}
+
+const gate = {
+  configured: false,
+  max: null, // null = unbounded
+  overflow: 'wait',
+  serialize: false,
+  active: 0,
+  // sessionId -> { tail: Promise, count: number } — promise-chain tickets;
+  // `tail` resolves only after every prior holder of this session finished.
+  sessionChains: new Map(),
+};
+
+function ensureGateEnvConfig() {
+  if (gate.configured) return;
+  const rawMax = (process.env[GATE_ENV_MAX] || '').trim();
+  let max = null;
+  if (rawMax) {
+    const n = Number.parseInt(rawMax, 10);
+    if (Number.isInteger(n) && n > 0) max = n; // garbage in env = unbounded
+  }
+  const overflow = (process.env[GATE_ENV_OVERFLOW] || '').trim().toLowerCase();
+  const serialize = ['1', 'true', 'yes', 'on']
+    .includes((process.env[GATE_ENV_SERIALIZE] || '').trim().toLowerCase());
+  gate.max = max;
+  gate.overflow = overflow === 'reject' ? 'reject' : 'wait';
+  gate.serialize = serialize;
+  gate.configured = true;
+}
+
+/**
+ * Configure the process-wide gate. Safe before first run; affects only
+ * subsequent acquisitions.
+ */
+function configureConcurrency({ maxConcurrentRuns = null, overflow = 'wait', serializeSameSession = false } = {}) {
+  if (overflow !== 'wait' && overflow !== 'reject') {
+    throw new Error(`overflow must be 'wait' or 'reject', got ${JSON.stringify(overflow)}`);
+  }
+  if (maxConcurrentRuns !== null && maxConcurrentRuns !== undefined) {
+    if (!Number.isInteger(maxConcurrentRuns) || maxConcurrentRuns < 1) {
+      throw new Error(
+        `maxConcurrentRuns must be a positive integer or null/undefined (unbounded), got ${maxConcurrentRuns}`
+      );
+    }
+  }
+  gate.max = maxConcurrentRuns ?? null;
+  gate.overflow = overflow;
+  gate.serialize = !!serializeSameSession;
+  gate.configured = true;
+}
+
+function concurrencySnapshot() {
+  return {
+    maxConcurrentRuns: gate.max,
+    overflow: gate.overflow,
+    serializeSameSession: gate.serialize,
+    activeRuns: gate.active,
+    sessionsInFlight: gate.sessionChains.size,
+  };
+}
+
+function acquireSlot() {
+  if (gate.max === null || gate.active < gate.max) {
+    gate.active += 1;
+    return;
+  }
+  if (gate.overflow === 'reject') {
+    throw new ConcurrencyRejected(
+      `run rejected: ${gate.active} runs already in flight ` +
+      `(maxConcurrentRuns=${gate.max}, overflow=reject); nothing was spawned`,
+      gate.max
+    );
+  }
+  // 'wait': park on a hand-off promise; releaseSlot() hands the slot over
+  // directly (active stays constant) so the count never dips below the cap.
+  return new Promise((resolve) => {
+    gate._waiters.push(resolve);
+  });
+}
+
+function releaseSlot() {
+  const waiter = (gate._waiters || []).shift();
+  if (waiter) {
+    waiter(); // slot transferred to the waiter — active unchanged
+    return;
+  }
+  gate.active = Math.max(0, gate.active - 1);
+}
+
+// Acquire a per-session ticket: resolves once every earlier run() with the
+// same sessionId has finished (or been rejected — a rejected run releases
+// its ticket so the next same-session waiter is not stuck behind a run
+// that never started).
+function acquireSessionTicket(sessionId) {
+  if (!gate.serialize || !sessionId) return null;
+  let entry = gate.sessionChains.get(sessionId);
+  if (!entry) {
+    entry = { tail: Promise.resolve(), count: 0 };
+    gate.sessionChains.set(sessionId, entry);
+  }
+  entry.count += 1;
+  const prev = entry.tail;
+  let releaseTicket;
+  const finished = new Promise((resolve) => { releaseTicket = resolve; });
+  entry.tail = prev.then(() => finished);
+  return {
+    sessionId,
+    entry,
+    prev,
+    releaseTicket,
+    released: false,
+  };
+}
+
+function releaseSessionTicket(ticket) {
+  if (!ticket || ticket.released) return;
+  ticket.released = true;
+  ticket.releaseTicket();
+  ticket.entry.count -= 1;
+  if (ticket.entry.count <= 0 && gate.sessionChains.get(ticket.sessionId) === ticket.entry) {
+    gate.sessionChains.delete(ticket.sessionId);
+  }
+}
+
+/**
+ * Gate entry used by run(): session ticket first, then the global slot.
+ * Throws ConcurrencyRejected (after releasing the session ticket) when the
+ * gate is configured with overflow:'reject' and no slot is free.
+ */
+async function gateAcquire(sessionId) {
+  ensureGateEnvConfig();
+  const ticket = acquireSessionTicket(sessionId);
+  try {
+    if (ticket) await ticket.prev;
+    const slot = acquireSlot();
+    if (slot) await slot; // 'wait' overflow parked on a hand-off promise
+  } catch (err) {
+    releaseSessionTicket(ticket);
+    throw err;
+  }
+  return {
+    release() {
+      releaseSlot();
+      releaseSessionTicket(ticket);
+    },
+  };
+}
+gate._waiters = [];
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -971,6 +1160,17 @@ async function run(profileRaw, options) {
     throw new Error('options.message is required');
   }
 
+  // Concurrency gate (issue #17): process-wide, opt-in, default unbounded.
+  // May throw ConcurrencyRejected (overflow 'reject') before anything spawns.
+  const gateToken = await gateAcquire(options.sessionId);
+  try {
+    return await runDispatch(profileRaw, options);
+  } finally {
+    gateToken.release();
+  }
+}
+
+async function runDispatch(profileRaw, options) {
   const profile = normalizeProfile(profileRaw);
 
   // executor: field resolution — four cases per spec:
@@ -1477,6 +1677,10 @@ async function run(profileRaw, options) {
 
 module.exports = {
   run,
+  runDispatch,
+  configureConcurrency,
+  concurrencySnapshot,
+  ConcurrencyRejected,
   normalizeProfile,
   parseDeadline,
   classifyLine,

@@ -30,7 +30,15 @@ const fs = require('fs');
 // Single source of truth: the wire-protocol version lives in runner.js
 // (the canonical bridge-side engine). The SDK entry point re-exports it so
 // `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
-const { PROTOCOL_VERSION, isValidSessionId, executorNames, EXECUTORS } = require('./runner.js');
+const {
+  PROTOCOL_VERSION,
+  isValidSessionId,
+  executorNames,
+  EXECUTORS,
+  ConcurrencyRejected,
+  configureConcurrency,
+  concurrencySnapshot,
+} = require('./runner.js');
 
 // ---------------------------------------------------------------------------
 // History helpers (optional — for handlers calling LLM APIs directly)
@@ -344,6 +352,9 @@ function protocolError(message) {
 module.exports = {
   createProfile,
   ProtocolError,
+  ConcurrencyRejected,
+  configureConcurrency,
+  concurrencySnapshot,
   loadHistory,
   appendHistory,
   sessionFilePath,

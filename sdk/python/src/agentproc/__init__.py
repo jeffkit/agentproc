@@ -38,11 +38,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
+try:
+    import fcntl  # POSIX: advisory lock guarding concurrent session appends
+except ImportError:  # Windows: single-blob O_APPEND write is the only guard
+    fcntl = None  # type: ignore[assignment]
+
+
+def _flock_exclusive(f: Any) -> None:
+    if fcntl is not None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+
+def _funlock(f: Any) -> None:
+    if fcntl is not None:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+
 __all__ = [
     "AgentContext",
     "AgentResult",
     "HistoryEntry",
     "ProtocolError",
+    "ConcurrencyRejected",
     "create_profile",
     "load_history",
     "append_history",
@@ -51,6 +70,8 @@ __all__ = [
     "EXECUTORS",
     "executor_names",
     "run_via_executor",
+    "configure_concurrency",
+    "concurrency_snapshot",
 ]
 
 
@@ -83,6 +104,11 @@ __version__ = _read_version()
 # (the canonical bridge-side engine). Re-exported here so
 # `agentproc.PROTOCOL_VERSION` stays in lockstep without copy-pasted literals.
 from .runner import PROTOCOL_VERSION, is_valid_session_id, run_via_executor  # noqa: E402
+from .concurrency import (  # noqa: E402
+    ConcurrencyRejected,
+    concurrency_snapshot,
+    configure_concurrency,
+)
 from .executors import EXECUTORS, executor_names  # noqa: E402
 
 
@@ -310,17 +336,34 @@ def append_history(
     entries: Sequence[HistoryEntry],
     base_dir: Optional[str] = None,
 ) -> None:
-    """Append entries to a session's JSONL history file. No-op if no session_id."""
+    """Append entries to a session's JSONL history file. No-op if no session_id.
+
+    Concurrency-safe (spec "Concurrency (host side)", issue #17): the whole
+    batch is serialized to one blob and written under a single ``write(2)``
+    on an ``O_APPEND`` handle — POSIX guarantees the append is not torn by a
+    concurrent appender. On POSIX the write is additionally guarded by a
+    ``flock`` on the file; other platforms fall back to the single-blob
+    write alone (the per-entry write loop this replaces could interleave
+    mid-batch with a concurrent bridge turn).
+    """
     if not session_id or not entries:
         return
     path = session_file_path(session_id, base_dir)
+    blob = "".join(
+        json.dumps(
+            {"role": e.role, "content": e.content, "timestamp": e.timestamp},
+            ensure_ascii=False,
+        )
+        + "\n"
+        for e in entries
+    )
     with path.open("a", encoding="utf-8") as f:
-        for e in entries:
-            f.write(json.dumps(
-                {"role": e.role, "content": e.content, "timestamp": e.timestamp},
-                ensure_ascii=False,
-            ))
-            f.write("\n")
+        _flock_exclusive(f)
+        try:
+            f.write(blob)
+            f.flush()
+        finally:
+            _funlock(f)
 
 
 # ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
+from . import concurrency as _concurrency
 from . import run_lock as _run_lock
 
 # Imported lazily to avoid circular imports; only used by run_via_executor.
@@ -1455,7 +1456,22 @@ def run_via_executor(
 # ---------------------------------------------------------------------------
 
 def run(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
-    """Run an agent process per the AgentProc spec."""
+    """Run an agent process per the AgentProc spec.
+
+    Overlapping calls are gated by the process-wide concurrency gate
+    (see ``agentproc.concurrency``; default is unbounded, i.e. the
+    historical behaviour). May raise ``ConcurrencyRejected`` when the gate
+    is configured with ``overflow="reject"`` and no slot is free — nothing
+    has been spawned and no session state touched when that happens.
+    """
+    token = _concurrency._gate.acquire(options.session_id)
+    try:
+        return _run_dispatch(profile_raw, options)
+    finally:
+        token.release()
+
+
+def _run_dispatch(profile_raw: Dict[str, Any], options: RunOptions) -> RunResult:
     profile = normalize_profile(profile_raw)
 
     # Executor path: skip the subprocess bridge entirely.

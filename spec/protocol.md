@@ -1,7 +1,7 @@
 # AgentProc Protocol Specification
 
 **Wire protocol:** `0.4` (the string carried in the `protocol_version` field of the turn object)
-**Document revision:** `1.11`
+**Document revision:** `1.12`
 **Status:** Stable
 
 The wire protocol and this document are versioned **independently**. The wire version only changes when the bytes on stdin/stdout change; the document revision tracks editorial updates, clarifications, and new guidance that does not alter what a conformant agent or bridge must send or accept. See [Versioning](#versioning) below for the rule an implementer should apply when reading `protocol_version`.
@@ -358,7 +358,7 @@ The agent process writes to stdout. The bridge reads it line by line in real tim
 
 The event set above is **closed**. The six `type` values — `turn` (stdin), `partial`, `result`, `error`, `permission_request`, and `permission_response` (stdin) — are the entire protocol vocabulary. AgentProc deliberately does **not** grow typed events for tool calls, file diffs, plan updates, reasoning blocks, or other richer semantics. An agent that needs those should wrap an IDE-oriented protocol (e.g. ACP) internally; an AgentProc bridge renders no diffs and owns no user files, so it has nothing to do with such events. Bridges MUST NOT expect additional event types, and agents MUST NOT invent them as a way to smuggle richer semantics through this protocol — that path leads to reimplementing ACP poorly. Unknown `type` values are handled per [Malformed lines](#malformed-lines).
 
-This protocol is scoped to **one turn**: one user message, one process, one reply. Long-lived sessions, mid-turn cancellation, concurrent requests, and client-provided callbacks (file system, terminal) are out of scope by design — they are what make ACP an IDE protocol rather than a chat-bridge protocol.
+This protocol is scoped to **one turn**: one user message, one process, one reply. Long-lived sessions, mid-turn cancellation, and client-provided callbacks (file system, terminal) are out of scope by design — they are what make ACP an IDE protocol rather than a chat-bridge protocol. Concurrent requests stay out of scope **on the wire** for the same reason; the host-side contract for overlapping turns is defined in [Concurrency (host side)](#concurrency-host-side).
 
 ### `session_id` on events
 
@@ -740,6 +740,23 @@ The journal MUST be off by default, MUST NOT be written to stdout, and when disa
 
 ---
 
+## Concurrency (host side)
+
+The wire contract is scoped to one turn — one message, one process, one reply — and concurrent requests stay out of scope **on the wire**. But a bridge is a long-lived process, and nothing stops it from issuing overlapping turns: two fast messages in the same chat, an IM burst, a retry racing the original. This section defines the host-side contract for that situation. It introduces **no new event, field, or env-based version gate** — the bytes on stdin/stdout are unchanged.
+
+| Rule | Requirement |
+|------|-------------|
+| Default = unbounded | For backwards compatibility the default is the historical behaviour: every `run()` call spawns its process immediately, with no queue and no cap. A bridge that does nothing keeps working exactly as before. |
+| Queue-or-drop is the bridge's decision | SDK implementations SHOULD expose a process-wide run gate — a limit on how many `run()` calls execute at once — with an explicit overflow policy: **wait** (queue the caller until a slot frees) or **reject** (fail the call immediately, before any process is spawned, with a distinguishable "busy" error). Which policy fits is the bridge's call: a chat bridge usually wants one of them per deployment, not a silent default. |
+| Rejected runs spawn nothing | A gate-rejected call MUST NOT spawn a process, MUST NOT touch session state or history, and MUST be distinguishable from a turn that ran and failed. |
+| Per-session serialization | Two concurrent turns resuming the **same** agent session have undefined behaviour at the CLI layer (two `--resume` processes on one transcript). SDK implementations SHOULD offer opt-in per-session serialization: an overlapping `run()` with the same session id waits for the earlier turn to finish. Different session ids MUST NOT serialize against each other. |
+| Session file appends are atomic | Reference SDKs persist session history as JSONL (one JSON object per line). A concurrent appender MUST NOT tear a line: an append batch is written as a single blob under an append-mode handle (POSIX implementations additionally hold an exclusive advisory lock for the write). History loaders MUST stay fail-soft: a torn or trailing partial line is skipped, not fatal. |
+| Run-lock generations | Implementations that keep a workspace run lock (the kill-before-start orphan record) MUST stamp each lock record with a per-acquisition generation token and MUST NOT clear a record whose recorded process is still alive unless the caller holds that generation — a first-finisher must not delete the lock of a second run that overwrote it. Stale records (process gone) remain self-healing as before. |
+
+The reference Python and Node SDKs (0.21.0) ship the gate (`configure_concurrency()` / `configureConcurrency()`; env `AGENTPROC_MAX_CONCURRENT_RUNS`, `AGENTPROC_CONCURRENCY_OVERFLOW=wait|reject`, `AGENTPROC_SERIALIZE_SAME_SESSION`), the session-file append hardening, and (Python) the run-lock generation token. The Rust and Go SDKs do not provide these primitives yet — filed as gaps for their maintainers.
+
+---
+
 ## Design Principles
 
 **1. Process boundary is the only contract.**
@@ -886,6 +903,8 @@ Hub wrappers that previously read `session_id` only from a CLI’s terminal `res
 ## Changelog
 
 Document revisions are tracked here. Wire-protocol bumps are called out explicitly; other entries are editorial unless noted.
+
+- **doc 1.12** — New [Concurrency (host side)](#concurrency-host-side) section: the host-side contract for a bridge issuing overlapping turns. Default stays unbounded (no behaviour change); SDKs SHOULD expose a process-wide run gate with explicit queue-or-drop overflow policy (a rejected call spawns nothing and is distinguishable from a failed turn), opt-in per-session serialization (concurrent `--resume` on one agent session is undefined at the CLI layer), atomic single-blob session-file appends (fail-soft loaders), and generation tokens on workspace run locks (a first-finisher must not clear a live run's lock). Also fixes the "Closed vocabulary" scope sentence: concurrent requests stay out of scope **on the wire**, with a pointer to the new section. Reference Python/Node SDKs 0.21.0 implement the primitives; Rust/Go pending. No wire change.
 
 - **doc 1.11** — Exit Codes gains a non-zero-exit error-reporting rule: the bridge SHOULD extract **diagnostic lines** from the captured stderr instead of truncating to a fixed head window, because startup banners (e.g. `recursive`'s `checkpoint: per-turn snapshots active`) otherwise fill the window and the real cause is dropped; when no diagnostic line matches, the last N stderr lines SHOULD be included with an explicit "not necessarily the cause" marker. The Python reference runner implements this (`extract_failure_diagnostics`); Node and Rust parity is pending. No wire change.
 

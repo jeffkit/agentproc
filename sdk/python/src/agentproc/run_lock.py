@@ -38,6 +38,13 @@
 - **spawner pid 被系统复用时**会误判为「worker 还活着」→ Busy，属 fail-safe
   的可接受代价（不杀不删，人工可解）。
 - Windows 无 killpg：探测返回 ``unsupported``（不阻塞主流程），锁读写照常。
+
+**世代号（owner token，issue #17）**：每份记录带随机 ``owner`` 字段；
+:func:`clear_run_lock` 在「记录的 agent pid 仍存活」时**拒绝清锁**——修复
+「同 key 并发时后写覆盖前写、先结束者误清在跑者锁」：后写覆盖后，先结束者
+的 clear 看到的是别人的 owner + 活着的 pid → 不动；真正在跑的一方收尾时
+pid 已死（已被 reap）→ 正常清；崩溃方残留由 :func:`cleanup_stale_run` 按
+stale 自愈。写/清临界区共享一把进程内互斥，防「读-判定-删」与并发覆盖交错。
 """
 from __future__ import annotations
 
@@ -47,12 +54,18 @@ import os
 import signal
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 LOCK_DIR_ENV = "AGENTPROC_RUN_LOCK_DIR"
 _DEFAULT_LOCK_DIR = os.path.join("~", ".agentproc", "run-locks")
+
+# write/clear 的进程内互斥（issue #17）：clear 的「读记录→判 pid→删」必须与
+# 并发 write 的原子替换串行，否则可读到旧记录后误删新锁。
+_io_lock = threading.Lock()
 
 
 class RunLockBusy(RuntimeError):
@@ -80,6 +93,9 @@ def write_run_lock(
     ``spawner`` = 调用本函数的进程（它正是 Popen 掉 agent 的那一个），默认
     ``os.getpid()``；不用 ``os.getppid()``——那指向 runner 的父进程，核实不出
     「worker 是否还活着」。显式传值仅为测试注入已死 spawner。
+
+    记录带随机 ``owner`` 世代号（issue #17）：同 key 并发时后写覆盖前写后，
+    先结束者 ``clear_run_lock`` 靠「pid 仍活 → 拒清」不会误删在跑者的锁。
     """
     try:
         path = lock_path_for(key)
@@ -90,12 +106,14 @@ def write_run_lock(
             "command": Path(argv[0]).name if argv else "",
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "spawner": int(os.getpid() if spawner is None else spawner),
+            "owner": uuid.uuid4().hex,
         }
         fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(record, fh, ensure_ascii=False)
-            os.replace(tmp_name, path)
+            with _io_lock:
+                os.replace(tmp_name, path)
         except BaseException:
             try:
                 os.unlink(tmp_name)
@@ -107,12 +125,32 @@ def write_run_lock(
         return None
 
 
-def clear_run_lock(key: str) -> None:
-    """正常收尾清锁（best-effort）。"""
+def clear_run_lock(key: str) -> bool:
+    """正常收尾清锁（best-effort）。
+
+    issue #17 世代号语义：记录的 agent pid **仍存活**时不删（那是在跑者的
+    锁，不是我们的）；pid 已死/记录缺失/旧格式无 owner 字段 → 照常删
+    （stale 自愈路径不变）。返回是否真的清掉了。
+    """
+    path = lock_path_for(key)
+    record: Optional[Dict[str, Any]] = None
     try:
-        lock_path_for(key).unlink(missing_ok=True)
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    if isinstance(record, dict) and record.get("owner"):
+        try:
+            pid = int(record.get("pid"))
+        except (TypeError, ValueError):
+            pid = None
+        if pid is not None and _pid_alive(pid):
+            return False  # 别人的在跑锁——不动（误清防护）
+    try:
+        with _io_lock:
+            path.unlink(missing_ok=True)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _pid_alive(pid: int) -> bool:

@@ -1,7 +1,7 @@
 # AgentProc 协议规范
 
 **线协议（Wire protocol）：** `0.4`（由 turn 对象的 `protocol_version` 字段携带的字符串）
-**文档修订：** `1.11`
+**文档修订：** `1.12`
 **状态：** 稳定
 
 线协议与本文档**独立编号**。线协议版本仅在 stdin/stdout 上的字节发生变化时才更新；文档修订号追踪不影响一致 agent 或 bridge 收发内容的编辑性更新——例如措辞澄清、新增指引。实现者在读取 `protocol_version` 时应遵循下方的[版本治理](#版本治理)规则。
@@ -354,7 +354,7 @@ agent process 写入 stdout。bridge 逐行实时读取。**每行都是一个 J
 
 上述事件集合是**封闭**的。六个 `type` 值——`turn`（stdin）、`partial`、`result`、`error`、`permission_request` 与 `permission_response`（stdin）——是整个协议的全部词汇。AgentProc 故意**不**为工具调用、文件 diff、计划更新、推理块等更丰富语义增长类型化事件。需要这些的 agent 应在内部封装一个面向 IDE 的协议（例如 ACP）；AgentProc bridge 不渲染 diff、不持有用户文件，因此与这类事件无关。bridge **MUST NOT** 期待额外事件类型，agent **MUST NOT** 发明新类型来向本协议走私更丰富的语义——那条路只会把 ACP 实现得很糟。未知 `type` 按[格式错误的行](#格式错误的行)处理。
 
-本协议范围限定为**一个 turn**：一条用户消息、一个进程、一条回复。长生命周期会话、turn 中取消、并发请求、客户端提供的回调（文件系统、终端）按设计不在范围内——正是这些让 ACP 成为 IDE 协议而非聊天桥接协议。
+本协议范围限定为**一个 turn**：一条用户消息、一个进程、一条回复。长生命周期会话、turn 中取消、客户端提供的回调（文件系统、终端）按设计不在范围内——正是这些让 ACP 成为 IDE 协议而非聊天桥接协议。并发请求出于同样理由在**线上**保持超出范围；重叠 turn 的宿主侧契约见[并发（宿主侧）](#并发宿主侧)。
 
 ### 事件上的 `session_id`
 
@@ -736,6 +736,23 @@ journal **MUST** 默认关闭、**MUST NOT** 写入 stdout；关闭时 bridge �
 
 ---
 
+## 并发（宿主侧）
+
+线契约限定为一个 turn——一条消息、一个进程、一条回复——并发请求在**线上**保持超出范围。但 bridge 是长驻进程，没有任何东西阻止它发出重叠的 turn：同一会话的两条快消息、IM 洪峰、重试与原请求赛跑。本节定义这种情况下的宿主侧契约。它不引入**任何新事件、新字段或基于 env 的版本闸**——stdin/stdout 上的字节不变。
+
+| 规则 | 要求 |
+|------|------|
+| 默认 = 不设限 | 为向后兼容，默认即历史行为：每次 `run()` 调用立即 spawn 进程，无队列无上限。什么都不做的 bridge 行为与从前完全一致。 |
+| 排队还是丢弃由 bridge 决定 | SDK 实现 **SHOULD** 暴露进程级 run 闸——同时执行的 `run()` 调用数上限——并带显式溢出策略：**wait**（排队等待空槽）或 **reject**（在任何进程 spawn 之前立即失败，返回可辨识的「忙」错误）。选哪种是 bridge 的部署决策，不该有静默默认。 |
+| 被拒调用不 spawn 任何东西 | 被闸拒绝的调用 **MUST NOT** spawn 进程、**MUST NOT** 触碰会话状态或历史，且 **MUST** 与「跑过但失败」可区分。 |
+| 同会话串行化 | 两个并发 turn 恢复**同一** agent 会话在 CLI 层行为未定义（两个 `--resume` 进程写同一 transcript）。SDK 实现 **SHOULD** 提供 opt-in 的同会话串行化：携带相同 session id 的重叠 `run()` 等待前一个 turn 结束。不同 session id **MUST NOT** 互相串行。 |
+| 会话文件追加原子性 | 参考 SDK 以 JSONL 持久化会话历史（一行一个 JSON 对象）。并发追加 **MUST NOT** 撕裂行：一批追加以单个 blob 经 append 模式句柄写入（POSIX 实现另持排他咨询锁）。历史加载器 **MUST** 保持 fail-soft：撕裂或尾部残行被跳过，而非致命。 |
+| run lock 世代号 | 维护 workspace run lock（kill-before-start 孤儿记录）的实现 **MUST** 为每份锁记录盖上按次获取的世代 token，且**MUST NOT** 清除「记录进程仍存活」的记录——除非调用方持有该世代。先结束者不得删掉覆盖写入的第二跑的锁。陈旧记录（进程已死）照旧自愈。 |
+
+参考 Python 与 Node SDK（0.21.0）已交付闸（`configure_concurrency()` / `configureConcurrency()`；env `AGENTPROC_MAX_CONCURRENT_RUNS`、`AGENTPROC_CONCURRENCY_OVERFLOW=wait|reject`、`AGENTPROC_SERIALIZE_SAME_SESSION`）、会话文件追加加固，以及（Python）run lock 世代 token。Rust 与 Go SDK 尚未提供这些原语——已作为缺口登记给各自维护者。
+
+---
+
 ## 设计原则
 
 **1. 进程边界是唯一契约。**
@@ -882,6 +899,8 @@ POSIX 衍生的「从 stdin 读、向 stdout 写、成功退出 0」约定——
 ## 变更日志
 
 文档修订在此追踪。线协议 bump 显式标出；其余条目除非注明均为编辑性。
+
+- **doc 1.12** —— 新增[并发（宿主侧）](#并发宿主侧)一节：bridge 发出重叠 turn 时的宿主侧契约。默认保持不设限（行为零变化）；SDK **SHOULD** 暴露进程级 run 闸与显式的排队/丢弃溢出策略（被拒调用不 spawn 任何东西、与「跑过但失败」可区分）、opt-in 同会话串行化（同会话并发 `--resume` 在 CLI 层未定义）、会话文件单 blob 原子追加（加载器 fail-soft），以及 workspace run lock 的世代 token（先结束者不得清掉在跑者的锁）。同时修正「闭合词表」的范围句：并发请求在**线上**保持超出范围，并指向新章节。参考 Python/Node SDK 0.21.0 已实现原语；Rust/Go 待补。无 wire 变更。
 
 - **doc 1.11** —— 退出码一节新增「非零退出的错误上报」规则：bridge **SHOULD** 从捕获的 stderr 中提取**诊断行**，而不是截取固定长度的头部窗口——启动横幅（如 `recursive` 的 `checkpoint: per-turn snapshots active`）会把窗口占满而真因被丢弃；一条诊断行都不命中时，**SHOULD** 带上 stderr 末 N 行并显式标注「未必是根因」。Python 参考 runner 已实现（`extract_failure_diagnostics`）；Node 与 Rust 的一致性待补。无 wire 变更。
 

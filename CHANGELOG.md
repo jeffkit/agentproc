@@ -3,9 +3,28 @@
 All notable changes to AgentProc are documented here. Three version tracks are kept independent:
 
 - **Wire protocol** — the string carried in the `protocol_version` field of the turn object. Currently `0.4`. Only changes when bytes on stdin/stdout change.
-- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.10`. Does not change the wire contract (except when paired with a wire bump).
-- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (released); the Rust crate is on its own track currently `0.15.0`. Includes runner/CLI/SDK behaviour changes.
+- **Spec document revision** — editorial changes to `spec/protocol.md`. Currently `1.12`. Does not change the wire contract (except when paired with a wire bump).
+- **SDK package version** — `sdk/python/pyproject.toml`, `sdk/node/package.json`, and `sdk/rust/Cargo.toml`. Python and Node are currently `0.20.0` (released); the Rust crate is on its own track currently `0.15.0` (released). Includes runner/CLI/SDK behaviour changes.
 - **Go module version** — `sdk/go` (`github.com/jeffkit/agentproc/sdk/go`), on its own track like the Rust crate; currently `0.1.4` (released). Includes runner/SDK behaviour changes.
+
+## Unreleased
+
+### SDK 0.21.0 (Python + Node, unreleased)
+
+**feat(sdk): concurrency primitives for bridge hosts — process-wide run gate with explicit queue-or-drop policy, opt-in per-session serialization, atomic session-file appends, and run-lock generation tokens (issue #17).**
+
+The wire protocol stays `0.4` and the default behaviour is unchanged (unbounded). What a bridge gains is the explicit decision point the spec now assigns to it (spec doc 1.12, "Concurrency (host side)"):
+
+- **Global run gate** — `configure_concurrency(max_concurrent_runs=N, overflow="wait"|"reject")` (Node: `configureConcurrency({...})`), or env-only bootstrap (`AGENTPROC_MAX_CONCURRENT_RUNS`, `AGENTPROC_CONCURRENCY_OVERFLOW`, `AGENTPROC_SERIALIZE_SAME_SESSION`). At most N `run()` calls execute at once; overflow `wait` queues the caller, `reject` throws `ConcurrencyRejected` before anything spawns (no process, no session state touched, distinguishable from a failed turn).
+- **Per-session serializer** — `serialize_same_session=True` makes an overlapping `run()` with the same session id wait for the earlier turn to finish; two fast messages can no longer spawn two concurrent `--resume` processes on one agent session. Different sessions never serialize against each other.
+- **Session-file append atomicity (Python)** — `append_history` writes the whole batch as one blob under an `O_APPEND` handle, guarded by `flock` on POSIX (the per-entry write loop could interleave mid-batch with a concurrent bridge turn; Node's `appendHistory` already wrote a single blob).
+- **Run-lock generation tokens (Python)** — each run-lock record now carries a random `owner` token; `clear_run_lock` refuses to delete a record whose agent pid is still alive, so the first finisher of two same-key runs can no longer clear the second run's lock (self-healing stale cleanup is unchanged).
+- **Spec** — new "Concurrency (host side)" section (doc 1.12); the "closed vocabulary" scope sentence now points to it. No conformance-suite change: the gate is process-level, not wire-observable.
+- Tests: 19 new Python cases + 9 new Node cases (reject/wait/serialize/env-bootstrap/owner-token/torn-line torture). Rust and Go SDKs do not provide the primitives yet — divergence documented in the spec section.
+
+### Rust crate 0.15.1 (unreleased — publish via `publish-rust.yml`)
+
+No code change. Spec doc revision sync per repo convention (doc 1.12 adds the Concurrency section; the primitives ship Python/Node-side).
 
 ## Released
 
